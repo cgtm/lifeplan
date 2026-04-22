@@ -60,6 +60,12 @@ PORT = 3131
 # ── Request handler ─────────────────────────────────────────────────
 
 class Handler(SimpleHTTPRequestHandler):
+    extensions_map = {
+        **SimpleHTTPRequestHandler.extensions_map,
+        '.css': 'text/css',
+        '.js': 'application/javascript',
+    }
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=os.path.dirname(__file__), **kwargs)
 
