@@ -12,7 +12,7 @@
     <nav>
       <div class="nav-inner">
         <span class="nav-brand" data-view="home">lifeplan</span>
-        <a class="nav-link active" data-view="home">Home</a>
+        <a class="nav-link active" data-view="home">Home<span class="prompt-badge" id="promptBadge"></span></a>
         <a class="nav-link" data-view="dump">Brain Dump<span class="nav-badge" id="dumpBadge"></span><kbd>N</kbd></a>
         <a class="nav-link" data-view="goals">Goals<kbd>G</kbd></a>
         <a class="nav-link" data-view="tasks">Tasks<kbd>T</kbd></a>
@@ -38,6 +38,9 @@
           </div>
           <div class="dump-status" id="homeDumpStatus"></div>
         </div>
+
+        <!-- Prompts from Reed -->
+        <div id="homePrompts" class="prompts-section"></div>
 
         <!-- Primary goal -->
         <div id="homeHero"></div>

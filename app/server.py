@@ -31,6 +31,7 @@ if __package__ is None or __package__ == "":
         handle_get_people, handle_get_person, handle_update_person, handle_delete_person,
         handle_get_knowledge, handle_update_knowledge, handle_delete_knowledge,
         handle_get_dependencies, handle_get_dashboard,
+        handle_get_prompts, handle_update_prompt, handle_get_prompt_count,
         enrich_goal, enrich_task, enrich_person,
     )
 else:
@@ -51,6 +52,7 @@ else:
         handle_get_people, handle_get_person, handle_update_person, handle_delete_person,
         handle_get_knowledge, handle_update_knowledge, handle_delete_knowledge,
         handle_get_dependencies, handle_get_dashboard,
+        handle_get_prompts, handle_update_prompt, handle_get_prompt_count,
         enrich_goal, enrich_task, enrich_person,
     )
 
@@ -318,6 +320,28 @@ class Handler(SimpleHTTPRequestHandler):
 
         if method == "GET" and path == "/api/dependencies":
             status, data = handle_get_dependencies(params)
+            self.send_json(status, data)
+            return True
+
+        # ── Prompts ──
+
+        if method == "GET" and path == "/api/prompts":
+            status, data = handle_get_prompts()
+            self.send_json(status, data)
+            return True
+
+        if method == "GET" and path == "/api/prompts/count":
+            status, data = handle_get_prompt_count()
+            self.send_json(status, data)
+            return True
+
+        if method == "PUT" and path.startswith("/api/prompts/"):
+            pid = self.parse_id(path)
+            if pid is None:
+                self.send_json(400, {"error": "Invalid prompt ID"})
+                return True
+            body = self.read_body()
+            status, data = handle_update_prompt(pid, body)
             self.send_json(status, data)
             return True
 

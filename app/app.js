@@ -135,6 +135,7 @@ $$('.nav-link, .nav-brand').forEach(el => {
 async function loadHome() {
   const data = await api('/dashboard');
   renderHome(data);
+  loadPrompts();
 }
 
 function renderHome(data) {
@@ -351,6 +352,132 @@ function buildCompletionMessage(result) {
     if (parts.length > 0) return `Done — ${parts.join(', ')} extracted.`;
   }
   return 'Done — captured and processed.';
+}
+
+// ══════════════════════════════════════════════════════════
+// PROMPTS
+// ══════════════════════════════════════════════════════════
+
+let allPrompts = [];
+const _promptSeenTimers = new Map();
+
+function updatePromptBadge(count) {
+  const badge = $('#promptBadge');
+  if (count > 0) {
+    badge.textContent = count;
+    badge.classList.add('visible');
+  } else {
+    badge.classList.remove('visible');
+  }
+}
+
+async function loadPrompts() {
+  try {
+    allPrompts = await api('/prompts');
+    renderPrompts();
+    const countData = await api('/prompts/count');
+    updatePromptBadge(countData.count || 0);
+  } catch (e) {
+    // Prompts are non-critical; don't break the page
+  }
+}
+
+function renderPrompts() {
+  const el = $('#homePrompts');
+  if (!allPrompts || !allPrompts.length) {
+    el.innerHTML = '';
+    return;
+  }
+
+  el.innerHTML = allPrompts.map(p => {
+    const hasSource = p.source_type && p.source_id;
+    const isActivityGap = p.prompt_type === 'activity_gap' && p.trigger_rule && p.trigger_rule.includes('dump');
+
+    let actionsHtml = `<button class="prompt-btn" onclick="dismissPrompt(${p.id})">Got it</button>`;
+    if (hasSource) {
+      actionsHtml += `<button class="prompt-btn prompt-btn-primary" onclick="navigateToPromptSource('${esc(p.source_type)}', ${p.source_id})">Take me there</button>`;
+    }
+    if (isActivityGap) {
+      actionsHtml += `<button class="prompt-btn prompt-btn-primary" onclick="focusBrainDump()">Brain dump</button>`;
+    }
+
+    return `
+      <div class="prompt-card fade-in" id="prompt-${p.id}" data-prompt-id="${p.id}" data-status="${esc(p.status)}">
+        <div class="prompt-dot ${esc(p.prompt_type)}"></div>
+        <div class="prompt-content">
+          <div class="prompt-title">${esc(p.title)}</div>
+          <div class="prompt-body" id="prompt-body-${p.id}">${esc(p.body)}</div>
+          <span class="prompt-expand" onclick="togglePromptBody(${p.id})">more</span>
+          <div class="prompt-actions">${actionsHtml}</div>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  // Mark unseen prompts as seen after 2 seconds
+  _promptSeenTimers.forEach(t => clearTimeout(t));
+  _promptSeenTimers.clear();
+
+  allPrompts.forEach(p => {
+    if (p.status === 'active') {
+      const timer = setTimeout(() => markPromptSeen(p.id), 2000);
+      _promptSeenTimers.set(p.id, timer);
+    }
+  });
+}
+
+function togglePromptBody(id) {
+  const body = $(`#prompt-body-${id}`);
+  const expander = body.nextElementSibling;
+  if (body.classList.contains('expanded')) {
+    body.classList.remove('expanded');
+    expander.textContent = 'more';
+  } else {
+    body.classList.add('expanded');
+    expander.textContent = 'less';
+  }
+}
+
+async function markPromptSeen(id) {
+  try {
+    await api(`/prompts/${id}`, { method: 'PUT', body: { status: 'seen' } });
+    const card = $(`#prompt-${id}`);
+    if (card) card.dataset.status = 'seen';
+    const p = allPrompts.find(x => x.id === id);
+    if (p) p.status = 'seen';
+    const countData = await api('/prompts/count');
+    updatePromptBadge(countData.count || 0);
+  } catch (e) {
+    // Non-critical
+  }
+}
+
+async function dismissPrompt(id) {
+  const card = $(`#prompt-${id}`);
+  if (card) card.classList.add('dismissing');
+  try {
+    await api(`/prompts/${id}`, { method: 'PUT', body: { status: 'dismissed' } });
+  } catch (e) {
+    // Non-critical
+  }
+  setTimeout(() => {
+    allPrompts = allPrompts.filter(p => p.id !== id);
+    renderPrompts();
+  }, 300);
+}
+
+function navigateToPromptSource(sourceType, sourceId) {
+  if (sourceType === 'goal') {
+    navigate('goals');
+    setTimeout(() => openGoalDetail(sourceId), 200);
+  } else if (sourceType === 'task') {
+    navigate('tasks');
+  }
+}
+
+function focusBrainDump() {
+  homeDump.focus();
+  homeDump.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
 // ══════════════════════════════════════════════════════════

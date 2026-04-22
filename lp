@@ -36,6 +36,9 @@ case "${1:-help}" in
   serve)
     cd "$(dirname "$0")/app" && python3 server.py
     ;;
+  prompts)
+    cd "$(dirname "$0")" && python3 -m app.generate_prompts
+    ;;
   *)
     echo "Usage: lp <command>"
     echo ""
@@ -46,5 +49,6 @@ case "${1:-help}" in
     echo "  logs      Tail the server log"
     echo "  backup    Backup the database (optional: lp backup <label>)"
     echo "  serve     Run in foreground (for debugging)"
+    echo "  prompts   Manually run prompt generation"
     ;;
 esac

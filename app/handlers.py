@@ -8,6 +8,7 @@ import json
 
 from .db import get_db, now_utc, rows_to_dicts, get_tags_for, set_tags_for, get_entry_tags, enrich_entries
 from .processing import process_brain_dump, handle_process_brain_dump, handle_approve_item
+from .generate_prompts import maybe_generate_prompts
 
 
 # ── Journal entry handlers (v1 -- preserved) ─────────────────────
@@ -662,9 +663,77 @@ def handle_get_dependencies(params):
         conn.close()
 
 
+# ── Prompt handlers ──────────────────────────────────────────────
+
+def handle_get_prompts():
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM prompts WHERE status IN ('active', 'seen') "
+            "ORDER BY priority ASC, generated_at DESC"
+        ).fetchall()
+        return 200, rows_to_dicts(rows)
+    finally:
+        conn.close()
+
+
+def handle_update_prompt(prompt_id, body):
+    conn = get_db()
+    try:
+        existing = conn.execute(
+            "SELECT * FROM prompts WHERE id = ?", (prompt_id,)
+        ).fetchone()
+        if not existing:
+            return 404, {"error": "Prompt not found"}
+
+        new_status = body.get("status")
+        if new_status not in ("seen", "dismissed", "acted_on"):
+            return 400, {"error": "Invalid status"}
+
+        ts = now_utc()
+
+        if new_status == "seen" and not existing["seen_at"]:
+            conn.execute(
+                "UPDATE prompts SET status = ?, seen_at = ? WHERE id = ?",
+                (new_status, ts, prompt_id),
+            )
+        elif new_status in ("dismissed", "acted_on"):
+            conn.execute(
+                "UPDATE prompts SET status = ?, resolved_at = ? WHERE id = ?",
+                (new_status, ts, prompt_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE prompts SET status = ? WHERE id = ?",
+                (new_status, prompt_id),
+            )
+
+        conn.commit()
+        row = conn.execute("SELECT * FROM prompts WHERE id = ?", (prompt_id,)).fetchone()
+        return 200, dict(row)
+    finally:
+        conn.close()
+
+
+def handle_get_prompt_count():
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) as c FROM prompts WHERE status = 'active'"
+        ).fetchone()
+        return 200, {"count": row["c"]}
+    finally:
+        conn.close()
+
+
 # ── Dashboard handler ────────────────────────────────────────────
 
 def handle_get_dashboard():
+    try:
+        maybe_generate_prompts()
+    except Exception:
+        pass
+
     conn = get_db()
     try:
         data = {}
