@@ -1,0 +1,20 @@
+# Database (binary, use backups instead)
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/backups/
+
+# Claude Code settings (personal, not project-level)
+.claude/settings.local.json
+
+# OS files
+.DS_Store
+**/.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# Temp files
+*.tmp
+*.swp

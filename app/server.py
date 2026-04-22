@@ -1,0 +1,2674 @@
+#!/usr/bin/env python3
+"""
+lifeplan — local server
+Serves the frontend and provides a REST API to the SQLite database.
+"""
+
+import json
+import os
+import re
+import sqlite3
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone, timedelta
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
+
+DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "lifeplan.db")
+PORT = 3131
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+OLLAMA_MODEL = "mistral"
+OLLAMA_TIMEOUT = 30  # seconds
+
+
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+def now_utc():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def rows_to_dicts(rows):
+    return [dict(r) for r in rows]
+
+
+# ── Brain dump processing engine ──────────────────────────────────
+
+# --- Goal keyword index (Rule 4) ---
+GOAL_KEYWORDS = {
+    "Move to Seoul": {
+        "title_words": {"seoul", "move"},
+        "keywords": {"korea", "korean", "relocate", "apartment", "housing", "visa", "immigration", "itaewon"},
+    },
+    "Finalise Property Settlement": {
+        "title_words": {"settlement", "finalise"},
+        "keywords": {"settlement", "lawyer", "solicitor", "legal", "custody", "separation", "priya", "court", "financial"},
+    },
+    "Move House": {
+        "title_words": {"house", "move"},
+        "keywords": {"packing", "lease", "rent", "landlord", "moving", "boxes", "rental"},
+    },
+    "Nadia's Visit (26 Sept - 8 Oct 2025)": {
+        "title_words": {"nadia", "visit"},
+        "keywords": {"september", "october"},
+    },
+    "Learn Korean": {
+        "title_words": {"korean", "learn"},
+        "keywords": {"language", "study", "vocabulary", "grammar", "hangul", "topik", "speaking", "phrases"},
+    },
+    "Attend Korean Language School in Seoul": {
+        "title_words": {"language", "school"},
+        "keywords": {"enrolment", "enrollment", "semester", "tuition", "student", "d-4", "d4"},
+    },
+    "Achieve Debt Freedom": {
+        "title_words": {"debt", "freedom"},
+        "keywords": {"money", "payment", "loan", "finance", "budget", "savings", "pay"},
+    },
+    "Work Transition": {
+        "title_words": {"work", "transition"},
+        "keywords": {"job", "career", "remote", "contract", "employer", "freelance"},
+    },
+    "Achieve Korean Proficiency": {
+        "title_words": {"korean", "proficiency"},
+        "keywords": {"fluency", "topik", "level", "exam"},
+    },
+}
+
+# Common words that should never be detected as person names
+COMMON_WORDS = {
+    "the", "a", "an", "i", "we", "he", "she", "it", "they", "my", "our",
+    "his", "her", "its", "their", "this", "that", "these", "those", "today",
+    "tomorrow", "yesterday", "monday", "tuesday", "wednesday", "thursday",
+    "friday", "saturday", "sunday", "january", "february", "march", "april",
+    "may", "june", "july", "august", "september", "october", "november",
+    "december", "seoul", "london", "korea", "scottish", "itaewon",
+    "basingstoke", "also", "maybe", "really", "just", "still", "already",
+    "finally", "important", "actually", "basically", "currently", "however",
+    "new", "old", "big", "all", "some", "any", "every", "each", "first",
+    "last", "next", "need", "must", "should", "would", "could", "will",
+    "shall", "might", "going", "about", "after", "before", "into", "from",
+    "with", "been", "have", "had", "has", "was", "were", "did", "does",
+    "not", "but", "and", "for", "yet", "nor", "because", "since", "until",
+    "while", "during", "through", "found", "said", "told", "met", "talked",
+    "spoke", "called", "emailed", "texted", "turns", "learned", "decided",
+    "chose", "agreed", "realised", "realized", "remember", "note", "task",
+    "todo", "reminder", "fyi", "til", "lesson", "important", "deadline",
+    "due", "target", "start", "stop", "check", "send", "call", "email",
+    "text", "ask", "find", "look", "follow", "set", "sort", "book", "buy",
+    "schedule", "organise", "organize", "active", "completed", "stalled",
+    "waiting", "cancelled",
+}
+
+IMPERATIVE_VERBS = {
+    "call", "email", "book", "buy", "send", "check", "schedule", "ask",
+    "find", "look", "follow", "set", "organise", "organize", "sort",
+    "arrange", "confirm", "contact", "submit", "register", "apply",
+    "cancel", "renew", "update", "review", "prepare", "write", "finish",
+    "complete", "pay", "transfer", "sign", "collect", "pick", "drop",
+    "print", "scan", "upload", "download", "research", "investigate",
+    "text", "message", "visit", "meet", "attend", "plan", "start",
+    "begin", "get", "make", "take", "give",
+}
+
+# Stemming helpers (very basic)
+STEM_MAP = {
+    "settling": "settlement", "settled": "settlement",
+    "moving": "move", "moved": "move",
+    "finances": "finance", "financial": "finance",
+    "korean": "korean",
+    "working": "work", "worked": "work",
+    "packing": "move-house",
+    "legal": "legal",
+    "studying": "korean",
+    "learning": "korean",
+    "settlement": "settlement",
+    "relocate": "seoul", "relocating": "seoul",
+    "budgeting": "finance",
+}
+
+
+def segment_text(content):
+    """Split brain dump content into meaningful segments.
+    Careful not to split on abbreviations like Dr., Mr., Mrs., etc.
+    """
+    # Split on newlines first
+    lines = content.split("\n")
+    segments = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        # Split long lines on sentence boundaries, but keep short ones intact
+        if len(line) > 120:
+            # Split on sentence-ending punctuation followed by space + capital letter
+            # First, protect abbreviations by replacing them temporarily
+            protected = line
+            for abbr in ("Dr.", "Mr.", "Mrs.", "Ms.", "St.", "Jr.", "Sr.", "Prof.", "Rev.", "etc.", "approx."):
+                protected = protected.replace(abbr, abbr.replace(".", "\x00"))
+            # Now split on sentence boundaries
+            parts = re.split(r'(?<=[.!?])\s+(?=[A-Z])', protected)
+            for part in parts:
+                part = part.replace("\x00", ".").strip()
+                if part:
+                    segments.append(part)
+        else:
+            segments.append(line)
+    return segments
+
+
+def detect_dates(segment, reference_date):
+    """
+    Rule 6: Detect dates in a text segment.
+    Returns list of (date_str_iso, confidence, source_text).
+    reference_date is a datetime object.
+    """
+    results = []
+    text = segment.lower()
+
+    # ISO 8601 dates
+    for m in re.finditer(r'\b(\d{4}-\d{2}-\d{2})\b', segment):
+        results.append((m.group(1), 0.95, m.group(0)))
+
+    # Written dates: "April 25th", "25 April", "Apr 25", "May 15th"
+    months_map = {
+        "january": 1, "february": 2, "march": 3, "april": 4,
+        "may": 5, "june": 6, "july": 7, "august": 8,
+        "september": 9, "october": 10, "november": 11, "december": 12,
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4,
+        "jun": 6, "jul": 7, "aug": 8, "sep": 9, "sept": 9,
+        "oct": 10, "nov": 11, "dec": 12,
+    }
+    month_pattern = "|".join(months_map.keys())
+
+    # "May 15th", "April 25"
+    for m in re.finditer(
+        rf'\b({month_pattern})\s+(\d{{1,2}})(?:st|nd|rd|th)?\b', text
+    ):
+        month_name, day = m.group(1), int(m.group(2))
+        month_num = months_map.get(month_name)
+        if month_num and 1 <= day <= 31:
+            year = reference_date.year
+            try:
+                d = datetime(year, month_num, day)
+                # If the date has passed, assume next year
+                if d.date() < reference_date.date():
+                    d = datetime(year + 1, month_num, day)
+                results.append((d.strftime("%Y-%m-%d"), 0.95, m.group(0)))
+            except ValueError:
+                pass
+
+    # "25 April", "25th April"
+    for m in re.finditer(
+        rf'\b(\d{{1,2}})(?:st|nd|rd|th)?\s+({month_pattern})\b', text
+    ):
+        day, month_name = int(m.group(1)), m.group(2)
+        month_num = months_map.get(month_name)
+        if month_num and 1 <= day <= 31:
+            year = reference_date.year
+            try:
+                d = datetime(year, month_num, day)
+                if d.date() < reference_date.date():
+                    d = datetime(year + 1, month_num, day)
+                results.append((d.strftime("%Y-%m-%d"), 0.95, m.group(0)))
+            except ValueError:
+                pass
+
+    # Relative: "today", "tomorrow", "day after tomorrow"
+    if re.search(r'\btoday\b', text):
+        results.append((reference_date.strftime("%Y-%m-%d"), 0.90, "today"))
+    if re.search(r'\btomorrow\b', text):
+        d = reference_date + timedelta(days=1)
+        results.append((d.strftime("%Y-%m-%d"), 0.90, "tomorrow"))
+    if re.search(r'\bday after tomorrow\b', text):
+        d = reference_date + timedelta(days=2)
+        results.append((d.strftime("%Y-%m-%d"), 0.90, "day after tomorrow"))
+
+    # Named days: "Monday", "next Tuesday", "this Friday", "by Friday"
+    day_names = {
+        "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+        "friday": 4, "saturday": 5, "sunday": 6,
+    }
+    for m in re.finditer(
+        r'\b(?:next|this|by)?\s*(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b',
+        text
+    ):
+        day_name = m.group(1)
+        target_dow = day_names[day_name]
+        current_dow = reference_date.weekday()
+        diff = (target_dow - current_dow) % 7
+        if diff == 0:
+            diff = 7  # next occurrence
+        has_next = "next" in m.group(0).lower()
+        if has_next:
+            diff += 7 if diff <= 7 else 0
+        d = reference_date + timedelta(days=diff)
+        conf = 0.90 if has_next or "by" in m.group(0).lower() else 0.70
+        results.append((d.strftime("%Y-%m-%d"), conf, m.group(0).strip()))
+
+    # "next week" -> Monday of next week
+    if re.search(r'\bnext week\b', text):
+        current_dow = reference_date.weekday()
+        days_to_monday = (7 - current_dow) % 7 + 7
+        d = reference_date + timedelta(days=days_to_monday)
+        # actually, next monday
+        d = reference_date + timedelta(days=(7 - current_dow))
+        results.append((d.strftime("%Y-%m-%d"), 0.80, "next week"))
+
+    # "before next week" -> end of this week (Friday)
+    if re.search(r'\bbefore next week\b', text):
+        current_dow = reference_date.weekday()
+        days_to_friday = (4 - current_dow) % 7
+        if days_to_friday == 0 and current_dow > 4:
+            days_to_friday = 7
+        d = reference_date + timedelta(days=days_to_friday)
+        results.append((d.strftime("%Y-%m-%d"), 0.80, "before next week"))
+
+    # "in two weeks", "in 2 weeks"
+    for m in re.finditer(r'\bin\s+(\d+|two|three|four)\s+weeks?\b', text):
+        num_str = m.group(1)
+        num_map = {"two": 2, "three": 3, "four": 4}
+        num = num_map.get(num_str, None) or int(num_str)
+        d = reference_date + timedelta(weeks=num)
+        results.append((d.strftime("%Y-%m-%d"), 0.80, m.group(0)))
+
+    # "next month" -> 1st of next month
+    if re.search(r'\bnext month\b', text):
+        if reference_date.month == 12:
+            d = datetime(reference_date.year + 1, 1, 1)
+        else:
+            d = datetime(reference_date.year, reference_date.month + 1, 1)
+        results.append((d.strftime("%Y-%m-%d"), 0.80, "next month"))
+
+    # "before May", "by May" -> 1st of that month
+    for m in re.finditer(rf'\b(?:before|by)\s+({month_pattern})\b', text):
+        month_name = m.group(1)
+        month_num = months_map.get(month_name)
+        if month_num:
+            year = reference_date.year
+            d = datetime(year, month_num, 1)
+            if d.date() < reference_date.date():
+                d = datetime(year + 1, month_num, 1)
+            results.append((d.strftime("%Y-%m-%d"), 0.80, m.group(0)))
+
+    # "due April 30", "deadline: May 1"
+    for m in re.finditer(
+        rf'\b(?:due|deadline:?)\s+({month_pattern})\s+(\d{{1,2}})(?:st|nd|rd|th)?\b', text
+    ):
+        month_name, day = m.group(1), int(m.group(2))
+        month_num = months_map.get(month_name)
+        if month_num and 1 <= day <= 31:
+            year = reference_date.year
+            try:
+                d = datetime(year, month_num, day)
+                if d.date() < reference_date.date():
+                    d = datetime(year + 1, month_num, day)
+                results.append((d.strftime("%Y-%m-%d"), 0.95, m.group(0)))
+            except ValueError:
+                pass
+
+    return results
+
+
+def detect_people(segment, known_people):
+    """
+    Rule 2: Detect people mentions.
+    known_people: list of dicts with 'id' and 'name'.
+    Returns list of extraction items.
+    """
+    items = []
+    text_lower = segment.lower()
+
+    # Step 2a: Known people matching (whole word, case-insensitive)
+    for person in known_people:
+        name = person["name"]
+        pattern = r'\b' + re.escape(name.lower()) + r'\b'
+        if re.search(pattern, text_lower):
+            items.append({
+                "type": "person_mention",
+                "confidence": 0.95,
+                "status": "auto_created",
+                "source_text": segment,
+                "data": {
+                    "person_id": person["id"],
+                    "person_name": person["name"],
+                    "context": segment,
+                },
+                "created_id": None,
+            })
+
+    # Step 2b: New person detection
+    new_person_patterns = [
+        (r'\bmet\s+(?:with\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)', "met"),
+        (r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+said\b', "said"),
+        (r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+told\s+me\b', "told"),
+        (r'\bcall\s+((?:Dr\.\s+)?[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)', "call"),
+        (r'\bemail\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)', "email"),
+        (r'\btext\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)', "text"),
+        (r'\btalked\s+to\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)', "talked"),
+        (r'\bspoke\s+(?:with|to)\s+(?:the\s+\w+\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)', "spoke"),
+        (r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+from\s+(?:the\s+)?(\w+)', "from"),
+    ]
+
+    # Step 2c: Family / child / relationship person patterns
+    # e.g. "I have a third child, Eva, born 2005"
+    #       "my daughter Eva", "my son Liam", "child named Eva"
+    family_patterns = [
+        # "child, Name, born YYYY" or "child, Name (born YYYY)"
+        (r'\bchild,?\s+([A-Z][a-z]+)(?:,?\s+(?:\(?born\s+(\d{4})\)?))?', "child"),
+        # "daughter/son Name" or "my daughter/son, Name"
+        (r'\b(?:my\s+)?(?:daughter|son|child),?\s+([A-Z][a-z]+)(?:,?\s+(?:\(?born\s+(\d{4})\)?))?', "family"),
+        # "Name, my daughter/son"
+        (r'([A-Z][a-z]+),?\s+(?:my|our)\s+(?:daughter|son|child)', "family"),
+        # "Name (daughter)" or "Name (son)"
+        (r'([A-Z][a-z]+)\s+\((?:daughter|son|child)\)', "family"),
+        # "[Name], born YYYY" — a name followed by birth year is likely a person
+        (r'([A-Z][a-z]+),?\s+born\s+(\d{4})', "born"),
+    ]
+
+    known_names_lower = {p["name"].lower() for p in known_people}
+
+    for pattern, context_type in new_person_patterns:
+        for m in re.finditer(pattern, segment):
+            name = m.group(1).strip()
+            # Skip if it matches a known person
+            if name.lower() in known_names_lower:
+                continue
+            # Skip common words
+            if name.lower() in COMMON_WORDS:
+                continue
+            # Skip single very short names (likely false positive)
+            if len(name) < 3:
+                continue
+
+            relationship = "professional" if "Dr." in name else "unknown"
+            items.append({
+                "type": "person_new",
+                "confidence": 0.70,
+                "status": "suggested",
+                "source_text": segment,
+                "data": {
+                    "name": name,
+                    "inferred_relationship": relationship,
+                    "context": segment,
+                },
+                "created_id": None,
+            })
+
+    # Check family patterns (higher confidence — these are explicit)
+    for pattern, context_type in family_patterns:
+        for m in re.finditer(pattern, segment):
+            name = m.group(1).strip()
+            if name.lower() in known_names_lower:
+                continue
+            if name.lower() in COMMON_WORDS:
+                continue
+            if len(name) < 2:
+                continue
+
+            # Infer relationship from context
+            seg_lower = segment.lower()
+            if "daughter" in seg_lower or "child" in seg_lower:
+                relationship = "daughter"
+            elif "son" in seg_lower:
+                relationship = "son"
+            else:
+                relationship = "family"
+
+            # Extract birth year if present
+            birth_year = None
+            if m.lastindex and m.lastindex >= 2 and m.group(2):
+                birth_year = m.group(2)
+
+            notes = segment
+            if birth_year:
+                notes = f"Born {birth_year}. {segment}"
+
+            items.append({
+                "type": "person_new",
+                "confidence": 0.90,
+                "status": "auto_created",
+                "source_text": segment,
+                "data": {
+                    "name": name,
+                    "inferred_relationship": relationship,
+                    "notes": notes,
+                    "context": segment,
+                },
+                "created_id": None,
+            })
+
+    return items
+
+
+def detect_tasks(segment, goals_data, dates_for_segment):
+    """
+    Rule 1: Detect tasks in a text segment.
+    Returns list of extraction items.
+    """
+    items = []
+    text_lower = segment.lower().strip()
+
+    # Checkbox syntax
+    checkbox = re.match(r'^[-*]?\s*\[\s*\]\s*(.*)', text_lower)
+    if checkbox:
+        title = checkbox.group(1).strip().capitalize()
+        if title:
+            item = _build_task_item(segment, title, 0.95, goals_data, dates_for_segment)
+            items.append(item)
+            return items
+
+    # Explicit markers
+    explicit_patterns = [
+        (r'(?i)\b(?:todo|to-do|task):\s*(.*)', 0.95),
+        (r'(?i)\bremind\s+me\s+to\s+(.*)', 0.95),
+        (r'(?i)\bdon\'?t\s+forget\s+to\s+(.*)', 0.95),
+    ]
+    for pattern, confidence in explicit_patterns:
+        m = re.search(pattern, segment)  # match against original case
+        if m:
+            title = m.group(1).strip().rstrip(".")
+            title = title[0].upper() + title[1:] if title else title
+            if title and len(title) > 3:
+                item = _build_task_item(segment, title, confidence, goals_data, dates_for_segment)
+                items.append(item)
+                return items
+
+    # Modal verbs: "need to", "must", "should", "have to", "gotta"
+    modal_patterns = [
+        (r'(?i)\b(?:i\s+)?need\s+to\s+(.*)', 0.85),
+        (r'(?i)\b(?:i\s+)?must\s+(.*)', 0.85),
+        (r'(?i)\b(?:i\s+)?should\s+(?:probably\s+)?(.*)', 0.85),
+        (r'(?i)\b(?:i\s+)?have\s+to\s+(.*)', 0.85),
+        (r'(?i)\b(?:i\s+)?gotta\s+(.*)', 0.85),
+    ]
+    for pattern, confidence in modal_patterns:
+        m = re.search(pattern, segment)  # match against original case
+        if m:
+            rest = m.group(1).strip().rstrip(".")
+            if rest and len(rest) > 3:
+                title = rest[0].upper() + rest[1:]
+                item = _build_task_item(segment, title, confidence, goals_data, dates_for_segment)
+                items.append(item)
+                return items
+
+    # Imperative verbs at line start
+    first_word = text_lower.split()[0] if text_lower.split() else ""
+    if first_word in IMPERATIVE_VERBS:
+        title = segment.strip().rstrip(".")
+        if len(title) > 5:
+            item = _build_task_item(segment, title, 0.80, goals_data, dates_for_segment)
+            items.append(item)
+            return items
+
+    # "find out" / "look into" / "follow up" at start
+    two_word_imperatives = ["find out", "look into", "follow up", "set up", "sort out"]
+    for phrase in two_word_imperatives:
+        if text_lower.startswith(phrase):
+            title = segment.strip().rstrip(".")
+            if len(title) > 5:
+                item = _build_task_item(segment, title, 0.80, goals_data, dates_for_segment)
+                items.append(item)
+                return items
+
+    return items
+
+
+def _build_task_item(source_text, title, confidence, goals_data, dates_for_segment):
+    """Helper to build a task extraction item."""
+    goal_match = match_goal(source_text, goals_data)
+    due_date = None
+    if dates_for_segment:
+        # Pick the most confident date
+        dates_for_segment.sort(key=lambda x: x[1], reverse=True)
+        due_date = dates_for_segment[0][0]
+
+    data = {
+        "title": title,
+        "description": source_text,
+        "due_date": due_date,
+        "goal_id": goal_match["goal_id"] if goal_match else None,
+        "goal_title": goal_match["goal_title"] if goal_match else None,
+        "status": "active",
+    }
+
+    status = "auto_created" if confidence >= 0.80 else "suggested"
+
+    return {
+        "type": "task",
+        "confidence": confidence,
+        "status": status,
+        "source_text": source_text,
+        "data": data,
+        "created_id": None,
+    }
+
+
+def match_goal(text, goals_data):
+    """
+    Rule 4: Match text against goals.
+    goals_data: list of dicts from the goals table.
+    Returns best match dict or None.
+    """
+    text_lower = text.lower()
+    words = set(re.findall(r'[a-z0-9]+(?:-[a-z0-9]+)*', text_lower))
+
+    best_match = None
+    best_score = 0
+
+    for goal in goals_data:
+        title = goal["title"]
+        kw_entry = None
+        for key, val in GOAL_KEYWORDS.items():
+            if key == title:
+                kw_entry = val
+                break
+        if not kw_entry:
+            continue
+
+        title_hits = words & kw_entry["title_words"]
+        keyword_hits = words & kw_entry["keywords"]
+        total_hits = len(title_hits) + len(keyword_hits)
+
+        if total_hits == 0:
+            continue
+
+        # Scoring per Rule 4
+        if total_hits >= 3 and len(title_hits) >= 1:
+            conf = 0.90
+        elif total_hits >= 2 and len(title_hits) >= 1:
+            conf = 0.80
+        elif total_hits >= 2:
+            conf = 0.65
+        else:
+            conf = 0.40
+
+        if conf > best_score:
+            best_score = conf
+            best_match = {
+                "goal_id": goal["id"],
+                "goal_title": goal["title"],
+                "confidence": conf,
+                "matched_keywords": list(title_hits | keyword_hits),
+            }
+
+    return best_match if best_match and best_score >= 0.50 else None
+
+
+def detect_knowledge(segment, dump_id):
+    """
+    Rule 3: Knowledge extraction.
+    Returns list of extraction items.
+    """
+    items = []
+    text_lower = segment.lower()
+
+    # Decision patterns
+    decision_patterns = [
+        r'\b(?:i\'?ve?\s+)?decided\s+to\b',
+        r'\bdecision:\s*',
+        r'\bgoing\s+to\s+\w+\s+instead\s+of\b',
+        r'\bchose\s+to\b',
+        r'\bdecided\s+to\s+go\s+with\b',
+        r'\bwe\s+agreed\s+to\b',
+    ]
+    for p in decision_patterns:
+        if re.search(p, text_lower):
+            title = _make_knowledge_title(segment, "decision")
+            items.append(_build_knowledge_item(
+                segment, title, "decision", dump_id, 0.90
+            ))
+            return items
+
+    # Learning patterns
+    learning_patterns = [
+        r'\bi\s+learned\b',
+        r'\blearned\s+that\b',
+        r'\btil\b',
+        r'\bturns\s+out\b',
+        r'\brealised\s+that\b',
+        r'\brealized\s+that\b',
+        r'\bnow\s+i\s+know\b',
+        r'\blesson:\s*',
+        r'\bfound\s+out\b',
+    ]
+    for p in learning_patterns:
+        if re.search(p, text_lower):
+            title = _make_knowledge_title(segment, "learning")
+            items.append(_build_knowledge_item(
+                segment, title, "learning", dump_id, 0.90
+            ))
+            return items
+
+    # Fact patterns
+    fact_patterns = [
+        r'\bimportant:\s*',
+        r'\bnote:\s*',
+        r'\bfyi:\s*',
+        r'\bfor\s+the\s+record\b',
+        r'\buseful\s+facts?:\s*',
+        r'\bfact:\s*',
+        r'\bkey\s+info:\s*',
+        r'\bgood\s+to\s+know:\s*',
+    ]
+    for p in fact_patterns:
+        if re.search(p, text_lower):
+            # For "useful facts:" lines that contain multiple facts separated by ";"
+            # split them into separate knowledge items
+            prefix_match = re.match(r'(?i)^(?:useful\s+facts?|fact|key\s+info|good\s+to\s+know):\s*', segment)
+            if prefix_match and ";" in segment:
+                after_prefix = segment[prefix_match.end():]
+                parts = [p.strip() for p in after_prefix.split(";") if p.strip()]
+                for part in parts:
+                    title = _make_knowledge_title(part, "fact")
+                    items.append(_build_knowledge_item(
+                        part, title, "fact", dump_id, 0.90
+                    ))
+                return items
+            else:
+                title = _make_knowledge_title(segment, "fact")
+                items.append(_build_knowledge_item(
+                    segment, title, "fact", dump_id, 0.90
+                ))
+                return items
+
+    # Reference patterns (URLs, phone numbers, email, addresses)
+    has_url = re.search(r'https?://\S+', segment)
+    has_email = re.search(r'\b[\w.+-]+@[\w-]+\.[\w.]+\b', segment)
+    has_phone = re.search(r'\b(?:\+?\d[\d\s-]{7,}\d)\b', segment)
+    ref_phrases = re.search(
+        r'\b(?:the\s+(?:number|address|link|email|url)\s+is)\b', text_lower
+    )
+    if has_url or has_email or has_phone or ref_phrases:
+        title = _make_knowledge_title(segment, "reference")
+        items.append(_build_knowledge_item(
+            segment, title, "reference", dump_id, 0.85
+        ))
+        return items
+
+    # Status change patterns ("X is no longer Y", "X changed to Y", "no longer my X")
+    status_change_patterns = [
+        r'\bis\s+no\s+longer\b',
+        r'\bno\s+longer\s+(?:my|our|the)\b',
+        r'\bchanged\s+(?:to|from)\b',
+        r'\bswitched\s+(?:to|from)\b',
+        r'\bused\s+to\s+be\b',
+        r'\bno\s+longer\s+(?:works|available|valid|active)\b',
+        r'\bhas\s+(?:left|quit|retired|stopped|moved)\b',
+    ]
+    for p in status_change_patterns:
+        if re.search(p, text_lower):
+            title = _make_knowledge_title(segment, "fact")
+            items.append(_build_knowledge_item(
+                segment, title, "fact", dump_id, 0.90
+            ))
+            return items
+
+    # Personal identity / possession facts ("I hold X", "I have a X passport",
+    # "I also hold", "I am a X citizen")
+    identity_patterns = [
+        r'\bi\s+(?:also\s+)?hold\b',
+        r'\bi\s+(?:also\s+)?have\s+(?:a|an|my|dual|two)\b.*(?:passport|citizenship|nationality|visa)',
+        r'\bi\s+am\s+(?:a|an)\s+\w+\s+(?:citizen|national|resident)\b',
+        r'\b(?:my|i\s+have\s+(?:a|an)?)\s+\w+\s+(?:passport|citizenship)\b',
+    ]
+    for p in identity_patterns:
+        if re.search(p, text_lower):
+            title = _make_knowledge_title(segment, "fact")
+            items.append(_build_knowledge_item(
+                segment, title, "fact", dump_id, 0.90
+            ))
+            return items
+
+    # Factual equation patterns ("X = Y" used as a factual statement)
+    if re.search(r'\w+\s+=\s+\d+', text_lower):
+        title = _make_knowledge_title(segment, "fact")
+        items.append(_build_knowledge_item(
+            segment, title, "fact", dump_id, 0.85
+        ))
+        return items
+
+    # Note patterns
+    note_patterns = [
+        r'\bremember:\s*',
+        r'\bkeep\s+in\s+mind\b',
+        r'\bnote\s+to\s+self\b',
+    ]
+    for p in note_patterns:
+        if re.search(p, text_lower):
+            title = _make_knowledge_title(segment, "note")
+            items.append(_build_knowledge_item(
+                segment, title, "note", dump_id, 0.90
+            ))
+            return items
+
+    return items
+
+
+def _make_knowledge_title(text, item_type):
+    """Generate a concise title from knowledge text, max 80 chars."""
+    # Strip common prefixes
+    clean = re.sub(
+        r'^(?:i\'?ve?\s+)?(?:decided\s+to|learned\s+that|found\s+out|'
+        r'turns\s+out|realised\s+that|realized\s+that|now\s+i\s+know|'
+        r'important:\s*|note:\s*|fyi:\s*|for\s+the\s+record,?\s*|'
+        r'remember:\s*|keep\s+in\s+mind,?\s*|note\s+to\s+self,?\s*|'
+        r'lesson:\s*|decision:\s*|til\s+|'
+        r'useful\s+facts?:\s*|fact:\s*|key\s+info:\s*|good\s+to\s+know:\s*)',
+        '', text.strip(), flags=re.IGNORECASE
+    ).strip()
+    # Capitalise first letter
+    if clean:
+        clean = clean[0].upper() + clean[1:]
+    # Truncate
+    if len(clean) > 80:
+        clean = clean[:77] + "..."
+    return clean or text[:80]
+
+
+def _build_knowledge_item(source_text, title, item_type, dump_id, confidence):
+    """Helper to build a knowledge extraction item."""
+    status = "auto_created" if confidence >= 0.80 else "suggested"
+    return {
+        "type": "knowledge",
+        "confidence": confidence,
+        "status": status,
+        "source_text": source_text,
+        "data": {
+            "title": title,
+            "content": source_text,
+            "item_type": item_type,
+            "source": f"brain_dump:{dump_id}",
+        },
+        "created_id": None,
+    }
+
+
+def detect_tags(content, all_items, known_tags):
+    """
+    Rule 5: Tag generation.
+    known_tags: list of dicts with 'id' and 'name'.
+    Returns list of tag extraction items.
+    """
+    items = []
+    text_lower = content.lower()
+    words = set(re.findall(r'[a-z0-9]+(?:-[a-z0-9]+)*', text_lower))
+    matched_tag_names = set()
+
+    for tag in known_tags:
+        tag_name = tag["name"]
+        # Exact match
+        if tag_name in words:
+            items.append({
+                "type": "tag",
+                "confidence": 0.95,
+                "status": "auto_created",
+                "source_text": tag_name,
+                "data": {
+                    "tag_name": tag_name,
+                    "is_new": False,
+                    "matched_existing_id": tag["id"],
+                    "apply_to": [],
+                },
+                "created_id": None,
+            })
+            matched_tag_names.add(tag_name)
+            continue
+
+        # Unhyphenated form: "move-house" -> "move house"
+        unhyphenated = tag_name.replace("-", " ")
+        if unhyphenated != tag_name and unhyphenated in text_lower:
+            items.append({
+                "type": "tag",
+                "confidence": 0.95,
+                "status": "auto_created",
+                "source_text": unhyphenated,
+                "data": {
+                    "tag_name": tag_name,
+                    "is_new": False,
+                    "matched_existing_id": tag["id"],
+                    "apply_to": [],
+                },
+                "created_id": None,
+            })
+            matched_tag_names.add(tag_name)
+            continue
+
+        # Stem/variant matching
+        for word in words:
+            stemmed = STEM_MAP.get(word)
+            if stemmed and stemmed == tag_name:
+                items.append({
+                    "type": "tag",
+                    "confidence": 0.85,
+                    "status": "auto_created",
+                    "source_text": word,
+                    "data": {
+                        "tag_name": tag_name,
+                        "is_new": False,
+                        "matched_existing_id": tag["id"],
+                        "apply_to": [],
+                    },
+                    "created_id": None,
+                })
+                matched_tag_names.add(tag_name)
+                break
+
+    return items
+
+
+def match_goal_links(content, dump_id, goals_data):
+    """
+    Rule 4 standalone: generate goal_link items for the whole dump.
+    """
+    items = []
+    text_lower = content.lower()
+    words = set(re.findall(r'[a-z0-9]+(?:-[a-z0-9]+)*', text_lower))
+
+    for goal in goals_data:
+        title = goal["title"]
+        kw_entry = None
+        for key, val in GOAL_KEYWORDS.items():
+            if key == title:
+                kw_entry = val
+                break
+        if not kw_entry:
+            continue
+
+        title_hits = words & kw_entry["title_words"]
+        keyword_hits = words & kw_entry["keywords"]
+        total_hits = len(title_hits) + len(keyword_hits)
+
+        if total_hits == 0:
+            continue
+
+        if total_hits >= 3 and len(title_hits) >= 1:
+            conf = 0.90
+        elif total_hits >= 2 and len(title_hits) >= 1:
+            conf = 0.80
+        elif total_hits >= 2:
+            conf = 0.65
+        else:
+            conf = 0.40
+
+        if conf < 0.50:
+            continue
+
+        status = "auto_created" if conf >= 0.80 else "suggested"
+
+        items.append({
+            "type": "goal_link",
+            "confidence": conf,
+            "status": status,
+            "source_text": content[:120],
+            "data": {
+                "goal_id": goal["id"],
+                "goal_title": goal["title"],
+                "matched_keywords": list(title_hits | keyword_hits),
+                "target_type": "brain_dump",
+                "target_id": dump_id,
+            },
+            "created_id": None,
+        })
+
+    return items
+
+
+def _build_llm_prompt(content, dump_id, goals_data, known_people, known_tags, reference_date):
+    """Build the extraction prompt for Ollama/Mistral."""
+    today_str = reference_date.strftime("%Y-%m-%d")
+
+    goals_list = "\n".join(
+        f"  - ID {g['id']}: \"{g['title']}\" (status: {g['status']})"
+        for g in goals_data
+    )
+    people_list = "\n".join(
+        f"  - ID {p['id']}: \"{p['name']}\""
+        for p in known_people
+    )
+    tags_list = ", ".join(t["name"] for t in known_tags)
+
+    prompt = f"""You are an extraction engine for a personal knowledge management system. Today's date is {today_str}.
+
+Analyse the following brain dump text and extract structured items from it. Return ONLY valid JSON matching the schema below.
+
+## Brain dump text:
+\"\"\"{content}\"\"\"
+
+## Database context
+
+### Existing goals:
+{goals_list}
+
+### Existing people:
+{people_list}
+
+### Existing tags:
+{tags_list}
+
+## Extraction rules
+
+1. **Tasks**: Actionable items. Look for "todo:", "need to", "should", "must", "have to", "remind me to", checkbox syntax, or imperative verbs at line start. Each task needs a title (concise imperative), description (original text), optional due_date (ISO 8601), optional goal_id (from the goals list above), and status "active".
+
+2. **People mentions**: References to known people from the list above. Include person_id and context.
+
+3. **New people**: Names that appear in person-context patterns ("met X", "X said", "call X", "X from Y") but are NOT in the known people list. Include inferred_relationship ("professional", "family", "unknown"). New people should always be suggested, never auto-created (max confidence 0.70).
+
+4. **Knowledge items**: Facts, decisions, learnings, references. Categorise as "fact", "decision", "learning", "reference", or "note". Include a concise title (max 80 chars) and the full original text as content.
+
+5. **Goal links**: Which existing goals does this brain dump relate to? Include goal_id, goal_title, and matched_keywords.
+
+6. **Tags**: Which existing tags apply? Also suggest new tags (lowercase, hyphenated, max 30 chars) for recurring themes not covered by existing tags.
+
+## Confidence scoring guidelines
+- Explicit markers (todo:, remind me to, decided to, I learned): 0.90-0.95
+- Clear modal verbs + action (need to, should, must): 0.85
+- Imperative verbs with clear object: 0.80
+- Known person exact match: 0.95
+- New person in strong context: 0.70
+- Existing tag match: 0.95
+- New tag suggestion: 0.50-0.70
+- Ambiguous items: 0.50-0.60
+
+## Date resolution
+Resolve relative dates against today ({today_str}):
+- "tomorrow" = one day after today
+- "next week" = Monday of next week
+- Named days ("Friday", "next Tuesday") = next occurrence
+- Return all dates as ISO 8601 (YYYY-MM-DD)
+
+## Output schema
+Return a JSON object with this exact structure:
+{{
+  "tasks": [
+    {{
+      "title": "string (concise imperative)",
+      "description": "string (original text)",
+      "due_date": "YYYY-MM-DD or null",
+      "goal_id": "integer or null",
+      "goal_title": "string or null",
+      "confidence": 0.0-1.0,
+      "source_text": "exact substring from the brain dump"
+    }}
+  ],
+  "people_mentions": [
+    {{
+      "person_id": "integer",
+      "person_name": "string",
+      "context": "string",
+      "confidence": 0.0-1.0,
+      "source_text": "exact substring"
+    }}
+  ],
+  "new_people": [
+    {{
+      "name": "string",
+      "inferred_relationship": "professional|family|unknown",
+      "context": "string",
+      "confidence": 0.0-1.0,
+      "source_text": "exact substring"
+    }}
+  ],
+  "knowledge_items": [
+    {{
+      "title": "string (max 80 chars)",
+      "content": "string (original text)",
+      "item_type": "fact|decision|learning|reference|note",
+      "confidence": 0.0-1.0,
+      "source_text": "exact substring"
+    }}
+  ],
+  "goal_links": [
+    {{
+      "goal_id": "integer",
+      "goal_title": "string",
+      "matched_keywords": ["string"],
+      "confidence": 0.0-1.0
+    }}
+  ],
+  "tags": [
+    {{
+      "tag_name": "string (lowercase, hyphenated)",
+      "is_new": true/false,
+      "confidence": 0.0-1.0,
+      "source_text": "string"
+    }}
+  ]
+}}
+
+## Examples
+
+### Example input:
+"Need to call Priya about the settlement papers. TIL the D-4 visa takes 3-4 weeks. Also should start packing boxes for the house move by Friday."
+
+### Example output:
+{{
+  "tasks": [
+    {{
+      "title": "Call Priya about the settlement papers",
+      "description": "Need to call Priya about the settlement papers.",
+      "due_date": null,
+      "goal_id": 2,
+      "goal_title": "Finalise Property Settlement",
+      "confidence": 0.85,
+      "source_text": "Need to call Priya about the settlement papers."
+    }},
+    {{
+      "title": "Start packing boxes for the house move",
+      "description": "Also should start packing boxes for the house move by Friday.",
+      "due_date": "{(reference_date + timedelta(days=(4 - reference_date.weekday()) % 7 or 7)).strftime('%Y-%m-%d')}",
+      "goal_id": 3,
+      "goal_title": "Move House",
+      "confidence": 0.85,
+      "source_text": "Also should start packing boxes for the house move by Friday."
+    }}
+  ],
+  "people_mentions": [
+    {{
+      "person_id": 2,
+      "person_name": "Priya",
+      "context": "Need to call Priya about the settlement papers.",
+      "confidence": 0.95,
+      "source_text": "call Priya about the settlement papers"
+    }}
+  ],
+  "new_people": [],
+  "knowledge_items": [
+    {{
+      "title": "D-4 visa processing takes 3-4 weeks",
+      "content": "TIL the D-4 visa takes 3-4 weeks.",
+      "item_type": "learning",
+      "confidence": 0.90,
+      "source_text": "TIL the D-4 visa takes 3-4 weeks."
+    }}
+  ],
+  "goal_links": [
+    {{
+      "goal_id": 2,
+      "goal_title": "Finalise Property Settlement",
+      "matched_keywords": ["settlement", "priya", "settlement"],
+      "confidence": 0.85
+    }},
+    {{
+      "goal_id": 3,
+      "goal_title": "Move House",
+      "matched_keywords": ["packing", "house", "move"],
+      "confidence": 0.85
+    }},
+    {{
+      "goal_id": 1,
+      "goal_title": "Move to Seoul",
+      "matched_keywords": ["visa", "d-4"],
+      "confidence": 0.80
+    }}
+  ],
+  "tags": [
+    {{"tag_name": "settlement", "is_new": false, "confidence": 0.95, "source_text": "settlement papers"}},
+    {{"tag_name": "visa", "is_new": false, "confidence": 0.95, "source_text": "D-4 visa"}},
+    {{"tag_name": "move-house", "is_new": false, "confidence": 0.95, "source_text": "house move"}}
+  ]
+}}
+
+Now extract items from the brain dump text above. Return ONLY the JSON object, no other text."""
+
+    return prompt
+
+
+def _call_ollama(prompt):
+    """Send a prompt to Ollama and return the parsed JSON response.
+    Returns the parsed dict on success, or None on failure.
+    """
+    payload = json.dumps({
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "format": "json",
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        OLLAMA_URL,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT) as resp:
+            body = resp.read().decode("utf-8")
+            result = json.loads(body)
+            response_text = result.get("response", "")
+            return json.loads(response_text)
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError,
+            OSError, TimeoutError, ValueError, KeyError) as e:
+        print(f"  [ollama] LLM call failed: {type(e).__name__}: {e}")
+        return None
+
+
+def _llm_response_to_items(llm_data, dump_id, known_tags):
+    """Convert the LLM's structured JSON into the standard processed_items format."""
+    items = []
+
+    # Map existing tag names to IDs for quick lookup
+    tag_id_map = {t["name"]: t["id"] for t in known_tags}
+
+    # Tasks
+    for task in llm_data.get("tasks", []):
+        conf = _clamp_confidence(task.get("confidence", 0.60))
+        status = "auto_created" if conf >= 0.80 else "suggested"
+        items.append({
+            "type": "task",
+            "confidence": conf,
+            "status": status,
+            "source_text": task.get("source_text", task.get("description", "")),
+            "data": {
+                "title": task.get("title", "Untitled task"),
+                "description": task.get("description", ""),
+                "due_date": task.get("due_date"),
+                "goal_id": task.get("goal_id"),
+                "goal_title": task.get("goal_title"),
+                "status": "active",
+            },
+            "created_id": None,
+        })
+
+    # People mentions
+    for pm in llm_data.get("people_mentions", []):
+        conf = _clamp_confidence(pm.get("confidence", 0.95))
+        status = "auto_created" if conf >= 0.80 else "suggested"
+        items.append({
+            "type": "person_mention",
+            "confidence": conf,
+            "status": status,
+            "source_text": pm.get("source_text", pm.get("context", "")),
+            "data": {
+                "person_id": pm.get("person_id"),
+                "person_name": pm.get("person_name", ""),
+                "context": pm.get("context", ""),
+            },
+            "created_id": None,
+        })
+
+    # New people -- always suggested, never auto-created
+    for np in llm_data.get("new_people", []):
+        conf = min(_clamp_confidence(np.get("confidence", 0.70)), 0.70)
+        items.append({
+            "type": "person_new",
+            "confidence": conf,
+            "status": "suggested",
+            "source_text": np.get("source_text", np.get("context", "")),
+            "data": {
+                "name": np.get("name", "Unknown"),
+                "inferred_relationship": np.get("inferred_relationship", "unknown"),
+                "context": np.get("context", ""),
+            },
+            "created_id": None,
+        })
+
+    # Knowledge items
+    for ki in llm_data.get("knowledge_items", []):
+        conf = _clamp_confidence(ki.get("confidence", 0.80))
+        status = "auto_created" if conf >= 0.80 else "suggested"
+        items.append({
+            "type": "knowledge",
+            "confidence": conf,
+            "status": status,
+            "source_text": ki.get("source_text", ki.get("content", "")),
+            "data": {
+                "title": (ki.get("title", "Untitled"))[:80],
+                "content": ki.get("content", ""),
+                "item_type": ki.get("item_type", "fact"),
+                "source": f"brain_dump:{dump_id}",
+            },
+            "created_id": None,
+        })
+
+    # Goal links
+    for gl in llm_data.get("goal_links", []):
+        conf = _clamp_confidence(gl.get("confidence", 0.65))
+        status = "auto_created" if conf >= 0.80 else "suggested"
+        items.append({
+            "type": "goal_link",
+            "confidence": conf,
+            "status": status,
+            "source_text": ", ".join(gl.get("matched_keywords", [])),
+            "data": {
+                "goal_id": gl.get("goal_id"),
+                "goal_title": gl.get("goal_title", ""),
+                "matched_keywords": gl.get("matched_keywords", []),
+                "target_type": "brain_dump",
+                "target_id": dump_id,
+            },
+            "created_id": None,
+        })
+
+    # Tags
+    for tag in llm_data.get("tags", []):
+        conf = _clamp_confidence(tag.get("confidence", 0.70))
+        tag_name = tag.get("tag_name", "").lower().strip()
+        if not tag_name:
+            continue
+        is_new = tag.get("is_new", tag_name not in tag_id_map)
+        status = "auto_created" if conf >= 0.80 else "suggested"
+        items.append({
+            "type": "tag",
+            "confidence": conf,
+            "status": status,
+            "source_text": tag.get("source_text", tag_name),
+            "data": {
+                "tag_name": tag_name,
+                "is_new": is_new,
+                "matched_existing_id": tag_id_map.get(tag_name) if not is_new else None,
+                "apply_to": [],
+            },
+            "created_id": None,
+        })
+
+    return items
+
+
+def _clamp_confidence(val):
+    """Ensure confidence is a float between 0.0 and 1.0."""
+    try:
+        val = float(val)
+    except (TypeError, ValueError):
+        return 0.50
+    return max(0.0, min(1.0, val))
+
+
+def process_brain_dump_llm(dump_id, conn, dump, goals_data, known_people, known_tags, ref_date):
+    """Try to process a brain dump using Ollama/Mistral.
+    Returns a list of extracted items on success, or None if the LLM is unavailable.
+    """
+    content = dump["content"]
+
+    prompt = _build_llm_prompt(content, dump_id, goals_data, known_people, known_tags, ref_date)
+    llm_data = _call_ollama(prompt)
+
+    if llm_data is None:
+        print("  [ollama] Falling back to regex processing")
+        return None
+
+    # Validate minimal structure
+    if not isinstance(llm_data, dict):
+        print("  [ollama] Response is not a dict, falling back to regex")
+        return None
+
+    items = _llm_response_to_items(llm_data, dump_id, known_tags)
+    print(f"  [ollama] Extracted {len(items)} items via LLM")
+    return items
+
+
+def process_brain_dump(dump_id):
+    """
+    Main processing pipeline for a brain dump.
+    Implements the full pipeline from PROCESSING_RULES.md.
+    Tries LLM extraction first, falls back to regex if unavailable.
+    """
+    conn = get_db()
+    try:
+        # Fetch the brain dump
+        row = conn.execute(
+            "SELECT * FROM brain_dumps WHERE id = ?", (dump_id,)
+        ).fetchone()
+        if not row:
+            return 404, {"error": "Brain dump not found"}
+
+        dump = dict(row)
+        content = dump["content"]
+
+        # Set status to processing
+        conn.execute(
+            "UPDATE brain_dumps SET processing_status = 'processing' WHERE id = ?",
+            (dump_id,),
+        )
+        conn.commit()
+
+        try:
+            # Load reference data from DB
+            goals_data = rows_to_dicts(
+                conn.execute("SELECT id, title, description, status FROM goals").fetchall()
+            )
+            known_people = rows_to_dicts(
+                conn.execute("SELECT id, name FROM people").fetchall()
+            )
+            known_tags = rows_to_dicts(
+                conn.execute("SELECT id, name FROM tags").fetchall()
+            )
+
+            # Parse reference date from captured_at
+            captured_at = dump["captured_at"]
+            try:
+                ref_date = datetime.strptime(captured_at, "%Y-%m-%d %H:%M:%S")
+            except (ValueError, TypeError):
+                ref_date = datetime.now(timezone.utc).replace(tzinfo=None)
+
+            # ── Primary path: LLM extraction via Ollama ──
+            llm_items = process_brain_dump_llm(
+                dump_id, conn, dump, goals_data, known_people, known_tags, ref_date
+            )
+
+            if llm_items is not None:
+                # LLM succeeded -- use its output
+                all_items = llm_items
+                extraction_method = "llm"
+            else:
+                # ── Fallback: regex-based extraction ──
+                extraction_method = "regex"
+
+                # Step 1: Segment splitting
+                segments = segment_text(content)
+
+                all_items = []
+                seen_person_ids = set()
+                seen_new_names = set()
+
+                # Step 2-5: Process each segment
+                for seg in segments:
+                    # Step 2: Date detection
+                    seg_dates = detect_dates(seg, ref_date)
+
+                    # Step 3: People detection
+                    people_items = detect_people(seg, known_people)
+                    for pi in people_items:
+                        if pi["type"] == "person_mention":
+                            pid = pi["data"]["person_id"]
+                            if pid not in seen_person_ids:
+                                seen_person_ids.add(pid)
+                                all_items.append(pi)
+                        elif pi["type"] == "person_new":
+                            name_key = pi["data"]["name"].lower()
+                            if name_key not in seen_new_names:
+                                seen_new_names.add(name_key)
+                                all_items.append(pi)
+
+                    # Step 4: Task detection
+                    task_items = detect_tasks(seg, goals_data, seg_dates)
+                    all_items.extend(task_items)
+
+                    # Step 5: Knowledge extraction
+                    knowledge_items = detect_knowledge(seg, dump_id)
+                    all_items.extend(knowledge_items)
+
+                # Step 6: Goal relevance (standalone links)
+                goal_links = match_goal_links(content, dump_id, goals_data)
+                all_items.extend(goal_links)
+
+                # Step 7: Tag generation
+                tag_items = detect_tags(content, all_items, known_tags)
+                all_items.extend(tag_items)
+
+            # Step 8: Confidence filtering -- discard items below 0.50
+            filtered_items = [
+                item for item in all_items if item["confidence"] >= 0.50
+            ]
+
+            # Step 9: Auto-create high-confidence items
+            for item in filtered_items:
+                if item["confidence"] >= 0.80:
+                    item["status"] = "auto_created"
+                    created_id = _auto_create_item(conn, item, dump_id)
+                    item["created_id"] = created_id
+                else:
+                    item["status"] = "suggested"
+
+            # Determine processing status
+            has_suggestions = any(
+                item["status"] == "suggested" for item in filtered_items
+            )
+            processing_status = "needs_review" if has_suggestions else "processed"
+
+            ts = now_utc()
+            processed_json = json.dumps({
+                "version": 1,
+                "processed_at": ts,
+                "extraction_method": extraction_method,
+                "items": filtered_items,
+            }, ensure_ascii=False)
+
+            # Update brain dump row
+            conn.execute(
+                "UPDATE brain_dumps SET "
+                "processing_status = ?, processed_items = ?, processed_at = ?, "
+                "processed = ?, updated_at = ? "
+                "WHERE id = ?",
+                (
+                    processing_status,
+                    processed_json,
+                    ts,
+                    1 if processing_status == "processed" else 0,
+                    ts,
+                    dump_id,
+                ),
+            )
+            conn.commit()
+
+            # Return the updated dump
+            updated = dict(
+                conn.execute("SELECT * FROM brain_dumps WHERE id = ?", (dump_id,)).fetchone()
+            )
+            updated["tags"] = get_tags_for(conn, "brain_dump_tags", "brain_dump_id", dump_id)
+            # Parse JSON for the response
+            if updated.get("processed_items"):
+                updated["processed_items"] = json.loads(updated["processed_items"])
+            return 200, updated
+
+        except Exception as e:
+            # On error, reset status and re-raise
+            conn.execute(
+                "UPDATE brain_dumps SET processing_status = 'unprocessed' WHERE id = ?",
+                (dump_id,),
+            )
+            conn.commit()
+            return 500, {"error": f"Processing failed: {str(e)}"}
+
+    finally:
+        conn.close()
+
+
+def _auto_create_item(conn, item, dump_id):
+    """Create a database row for an auto-created item. Returns the new row ID or None."""
+    ts = now_utc()
+    itype = item["type"]
+    data = item["data"]
+
+    try:
+        if itype == "task":
+            cur = conn.execute(
+                "INSERT INTO tasks (title, description, goal_id, status, due_date, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    data["title"],
+                    data.get("description"),
+                    data.get("goal_id"),
+                    "active",
+                    data.get("due_date"),
+                    ts, ts,
+                ),
+            )
+            return cur.lastrowid
+
+        elif itype == "knowledge":
+            cur = conn.execute(
+                "INSERT INTO knowledge_items (title, content, item_type, source, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    data["title"],
+                    data.get("content"),
+                    data.get("item_type", "fact"),
+                    data.get("source", f"brain_dump:{dump_id}"),
+                    ts, ts,
+                ),
+            )
+            return cur.lastrowid
+
+        elif itype == "tag":
+            tag_name = data["tag_name"]
+            if data.get("is_new"):
+                conn.execute(
+                    "INSERT OR IGNORE INTO tags (name) VALUES (?)", (tag_name,)
+                )
+                tag_row = conn.execute(
+                    "SELECT id FROM tags WHERE name = ?", (tag_name,)
+                ).fetchone()
+                if tag_row:
+                    # Link to the brain dump
+                    conn.execute(
+                        "INSERT OR IGNORE INTO brain_dump_tags (brain_dump_id, tag_id) "
+                        "VALUES (?, ?)",
+                        (dump_id, tag_row["id"]),
+                    )
+                    return tag_row["id"]
+            else:
+                tag_id = data.get("matched_existing_id")
+                if tag_id:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO brain_dump_tags (brain_dump_id, tag_id) "
+                        "VALUES (?, ?)",
+                        (dump_id, tag_id),
+                    )
+                    return tag_id
+
+        elif itype == "person_new":
+            # Insert new person into the people table
+            cur = conn.execute(
+                "INSERT INTO people (name, relationship, notes, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    data["name"],
+                    data.get("inferred_relationship", "unknown"),
+                    data.get("notes", data.get("context", "")),
+                    ts, ts,
+                ),
+            )
+            return cur.lastrowid
+
+        elif itype == "person_mention":
+            # No new row to create, just note the mention
+            return data.get("person_id")
+
+        elif itype == "goal_link":
+            # Tag the brain dump with a goal-related tag if appropriate
+            return data.get("goal_id")
+
+    except Exception:
+        pass  # Don't fail the whole pipeline for one item
+
+    return None
+
+
+def handle_process_brain_dump(dump_id):
+    """Handler for POST /api/brain-dumps/:id/process"""
+    return process_brain_dump(dump_id)
+
+
+def handle_approve_item(dump_id, body):
+    """Handler for POST /api/brain-dumps/:id/approve-item"""
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT * FROM brain_dumps WHERE id = ?", (dump_id,)
+        ).fetchone()
+        if not row:
+            return 404, {"error": "Brain dump not found"}
+
+        dump = dict(row)
+        processed_items = json.loads(dump["processed_items"]) if dump["processed_items"] else None
+        if not processed_items:
+            return 400, {"error": "No processed items"}
+
+        item_index = body.get("item_index")
+        action = body.get("action", "approve")  # approve, reject, edit_approve
+        edit_data = body.get("edit_data")  # optional edited data
+
+        if item_index is None or item_index < 0 or item_index >= len(processed_items["items"]):
+            return 400, {"error": "Invalid item index"}
+
+        item = processed_items["items"][item_index]
+
+        if action == "reject":
+            item["status"] = "rejected"
+        elif action in ("approve", "edit_approve"):
+            if edit_data:
+                item["data"].update(edit_data)
+            created_id = _auto_create_item(conn, item, dump_id)
+            item["created_id"] = created_id
+            item["status"] = "approved"
+
+        # Update processed_items JSON
+        ts = now_utc()
+        processed_items["processed_at"] = ts
+
+        # Check if all suggestions are now resolved
+        has_pending = any(
+            i["status"] == "suggested"
+            for i in processed_items["items"]
+        )
+        new_status = dump["processing_status"]
+        if not has_pending and dump["processing_status"] == "needs_review":
+            new_status = "processed"
+
+        conn.execute(
+            "UPDATE brain_dumps SET processed_items = ?, processing_status = ?, "
+            "processed = ?, updated_at = ? WHERE id = ?",
+            (
+                json.dumps(processed_items, ensure_ascii=False),
+                new_status,
+                1 if new_status == "processed" else dump["processed"],
+                ts,
+                dump_id,
+            ),
+        )
+        conn.commit()
+
+        updated = dict(
+            conn.execute("SELECT * FROM brain_dumps WHERE id = ?", (dump_id,)).fetchone()
+        )
+        updated["tags"] = get_tags_for(conn, "brain_dump_tags", "brain_dump_id", dump_id)
+        if updated.get("processed_items"):
+            updated["processed_items"] = json.loads(updated["processed_items"])
+        return 200, updated
+
+    finally:
+        conn.close()
+
+
+# ── Tag helpers ──────────────────────────────────────────────────
+
+def get_tags_for(conn, junction_table, fk_column, entity_id):
+    rows = conn.execute(
+        f"SELECT t.id, t.name FROM tags t "
+        f"JOIN {junction_table} jt ON jt.tag_id = t.id "
+        f"WHERE jt.{fk_column} = ?",
+        (entity_id,),
+    ).fetchall()
+    return rows_to_dicts(rows)
+
+
+def set_tags_for(conn, junction_table, fk_column, entity_id, tag_names):
+    conn.execute(f"DELETE FROM {junction_table} WHERE {fk_column} = ?", (entity_id,))
+    for tag_name in tag_names:
+        tag_name = tag_name.strip().lower()
+        if not tag_name:
+            continue
+        conn.execute("INSERT OR IGNORE INTO tags (name) VALUES (?)", (tag_name,))
+        tag_row = conn.execute("SELECT id FROM tags WHERE name = ?", (tag_name,)).fetchone()
+        conn.execute(
+            f"INSERT OR IGNORE INTO {junction_table} ({fk_column}, tag_id) VALUES (?, ?)",
+            (entity_id, tag_row["id"]),
+        )
+
+
+def get_entry_tags(conn, entry_id):
+    return get_tags_for(conn, "entry_tags", "entry_id", entry_id)
+
+
+def enrich_entries(conn, entries):
+    for entry in entries:
+        entry["tags"] = get_entry_tags(conn, entry["id"])
+    return entries
+
+
+# ── Journal entry handlers (v1 — preserved) ─────────────────────
+
+def handle_get_entries(params):
+    conn = get_db()
+    try:
+        tag = params.get("tag", [None])[0]
+        date = params.get("date", [None])[0]
+        search = params.get("q", [None])[0]
+
+        if tag:
+            rows = conn.execute(
+                "SELECT je.* FROM journal_entries je "
+                "JOIN entry_tags et ON et.entry_id = je.id "
+                "JOIN tags t ON t.id = et.tag_id "
+                "WHERE t.name = ? ORDER BY je.entry_date DESC",
+                (tag,),
+            ).fetchall()
+        elif date:
+            rows = conn.execute(
+                "SELECT * FROM journal_entries WHERE entry_date = ? "
+                "ORDER BY created_at DESC",
+                (date,),
+            ).fetchall()
+        elif search:
+            rows = conn.execute(
+                "SELECT * FROM journal_entries WHERE content LIKE ? "
+                "ORDER BY entry_date DESC",
+                (f"%{search}%",),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM journal_entries ORDER BY entry_date DESC"
+            ).fetchall()
+
+        entries = enrich_entries(conn, rows_to_dicts(rows))
+        return 200, entries
+    finally:
+        conn.close()
+
+
+def handle_get_entry(entry_id):
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT * FROM journal_entries WHERE id = ?", (entry_id,)
+        ).fetchone()
+        if not row:
+            return 404, {"error": "Entry not found"}
+        entry = dict(row)
+        entry["tags"] = get_entry_tags(conn, entry["id"])
+        return 200, entry
+    finally:
+        conn.close()
+
+
+def handle_create_entry(body):
+    conn = get_db()
+    try:
+        entry_date = body.get("entry_date")
+        content = body.get("content", "")
+        tag_names = body.get("tags", [])
+
+        if not entry_date:
+            return 400, {"error": "entry_date is required"}
+        if not content.strip():
+            return 400, {"error": "content is required"}
+
+        ts = now_utc()
+        cur = conn.execute(
+            "INSERT INTO journal_entries (entry_date, content, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?)",
+            (entry_date, content, ts, ts),
+        )
+        entry_id = cur.lastrowid
+        set_tags_for(conn, "entry_tags", "entry_id", entry_id, tag_names)
+        conn.commit()
+
+        entry = dict(
+            conn.execute("SELECT * FROM journal_entries WHERE id = ?", (entry_id,)).fetchone()
+        )
+        entry["tags"] = get_entry_tags(conn, entry_id)
+        return 201, entry
+    finally:
+        conn.close()
+
+
+def handle_update_entry(entry_id, body):
+    conn = get_db()
+    try:
+        existing = conn.execute(
+            "SELECT * FROM journal_entries WHERE id = ?", (entry_id,)
+        ).fetchone()
+        if not existing:
+            return 404, {"error": "Entry not found"}
+
+        content = body.get("content", existing["content"])
+        entry_date = body.get("entry_date", existing["entry_date"])
+        tag_names = body.get("tags")
+
+        conn.execute(
+            "UPDATE journal_entries SET content = ?, entry_date = ?, updated_at = ? WHERE id = ?",
+            (content, entry_date, now_utc(), entry_id),
+        )
+        if tag_names is not None:
+            set_tags_for(conn, "entry_tags", "entry_id", entry_id, tag_names)
+        conn.commit()
+
+        entry = dict(
+            conn.execute("SELECT * FROM journal_entries WHERE id = ?", (entry_id,)).fetchone()
+        )
+        entry["tags"] = get_entry_tags(conn, entry_id)
+        return 200, entry
+    finally:
+        conn.close()
+
+
+def handle_delete_entry(entry_id):
+    conn = get_db()
+    try:
+        existing = conn.execute(
+            "SELECT * FROM journal_entries WHERE id = ?", (entry_id,)
+        ).fetchone()
+        if not existing:
+            return 404, {"error": "Entry not found"}
+        conn.execute("DELETE FROM journal_entries WHERE id = ?", (entry_id,))
+        conn.commit()
+        return 200, {"deleted": entry_id}
+    finally:
+        conn.close()
+
+
+def handle_get_tags():
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT t.id, t.name, "
+            "(SELECT COUNT(*) FROM entry_tags WHERE tag_id = t.id) + "
+            "(SELECT COUNT(*) FROM goal_tags WHERE tag_id = t.id) + "
+            "(SELECT COUNT(*) FROM task_tags WHERE tag_id = t.id) + "
+            "(SELECT COUNT(*) FROM person_tags WHERE tag_id = t.id) + "
+            "(SELECT COUNT(*) FROM knowledge_tags WHERE tag_id = t.id) + "
+            "(SELECT COUNT(*) FROM brain_dump_tags WHERE tag_id = t.id) AS total_count "
+            "FROM tags t ORDER BY total_count DESC, t.name ASC"
+        ).fetchall()
+        return 200, rows_to_dicts(rows)
+    finally:
+        conn.close()
+
+
+# ── Brain dump handlers ──────────────────────────────────────────
+
+def handle_get_brain_dumps(params):
+    conn = get_db()
+    try:
+        processed = params.get("processed", [None])[0]
+        status_filter = params.get("status", [None])[0]
+        q = "SELECT * FROM brain_dumps"
+        wheres = []
+        args = []
+        if processed is not None:
+            wheres.append("processed = ?")
+            args.append(int(processed))
+        if status_filter:
+            wheres.append("processing_status = ?")
+            args.append(status_filter)
+        if wheres:
+            q += " WHERE " + " AND ".join(wheres)
+        q += " ORDER BY captured_at DESC"
+        rows = conn.execute(q, args).fetchall()
+        dumps = rows_to_dicts(rows)
+        for d in dumps:
+            d["tags"] = get_tags_for(conn, "brain_dump_tags", "brain_dump_id", d["id"])
+            if d.get("processed_items"):
+                try:
+                    d["processed_items"] = json.loads(d["processed_items"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        return 200, dumps
+    finally:
+        conn.close()
+
+
+def handle_create_brain_dump(body):
+    conn = get_db()
+    try:
+        content = body.get("content", "").strip()
+        if not content:
+            return 400, {"error": "content is required"}
+        tag_names = body.get("tags", [])
+        ts = now_utc()
+        cur = conn.execute(
+            "INSERT INTO brain_dumps (content, captured_at, processed, processing_status, "
+            "created_at, updated_at) VALUES (?, ?, 0, 'unprocessed', ?, ?)",
+            (content, ts, ts, ts),
+        )
+        dump_id = cur.lastrowid
+        set_tags_for(conn, "brain_dump_tags", "brain_dump_id", dump_id, tag_names)
+        conn.commit()
+        dump = dict(conn.execute("SELECT * FROM brain_dumps WHERE id = ?", (dump_id,)).fetchone())
+        dump["tags"] = get_tags_for(conn, "brain_dump_tags", "brain_dump_id", dump_id)
+    finally:
+        conn.close()
+
+    # Auto-process after saving
+    try:
+        _, processed_dump = process_brain_dump(dump_id)
+        if isinstance(processed_dump, dict) and "id" in processed_dump:
+            return 201, processed_dump
+    except Exception:
+        pass  # If processing fails, still return the saved dump
+
+    return 201, dump
+
+
+def handle_update_brain_dump(dump_id, body):
+    conn = get_db()
+    try:
+        existing = conn.execute("SELECT * FROM brain_dumps WHERE id = ?", (dump_id,)).fetchone()
+        if not existing:
+            return 404, {"error": "Brain dump not found"}
+        content = body.get("content", existing["content"])
+        processed = body.get("processed", existing["processed"])
+        tag_names = body.get("tags")
+        processed_at = now_utc() if processed and not existing["processed"] else existing["processed_at"]
+        conn.execute(
+            "UPDATE brain_dumps SET content = ?, processed = ?, processed_at = ?, updated_at = ? WHERE id = ?",
+            (content, processed, processed_at, now_utc(), dump_id),
+        )
+        if tag_names is not None:
+            set_tags_for(conn, "brain_dump_tags", "brain_dump_id", dump_id, tag_names)
+        conn.commit()
+        dump = dict(conn.execute("SELECT * FROM brain_dumps WHERE id = ?", (dump_id,)).fetchone())
+        dump["tags"] = get_tags_for(conn, "brain_dump_tags", "brain_dump_id", dump_id)
+        return 200, dump
+    finally:
+        conn.close()
+
+
+# ── Goal handlers ────────────────────────────────────────────────
+
+def enrich_goal(conn, goal):
+    goal["tags"] = get_tags_for(conn, "goal_tags", "goal_id", goal["id"])
+    # linked people
+    rows = conn.execute(
+        "SELECT p.id, p.name, p.relationship, gp.role FROM people p "
+        "JOIN goal_people gp ON gp.person_id = p.id WHERE gp.goal_id = ?",
+        (goal["id"],),
+    ).fetchall()
+    goal["people"] = rows_to_dicts(rows)
+    # task counts
+    row = conn.execute(
+        "SELECT COUNT(*) as total, "
+        "SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed "
+        "FROM tasks WHERE goal_id = ?",
+        (goal["id"],),
+    ).fetchone()
+    goal["task_total"] = row["total"]
+    goal["task_completed"] = row["completed"]
+    # blockers (what blocks this goal)
+    blocker_rows = conn.execute(
+        "SELECT d.id, d.blocker_type, d.blocker_id, d.notes, d.resolved, "
+        "CASE d.blocker_type "
+        "  WHEN 'goal' THEN (SELECT title FROM goals WHERE id = d.blocker_id) "
+        "  WHEN 'task' THEN (SELECT title FROM tasks WHERE id = d.blocker_id) "
+        "  WHEN 'external_system' THEN (SELECT name FROM external_systems WHERE id = d.blocker_id) "
+        "END AS blocker_name, "
+        "CASE d.blocker_type "
+        "  WHEN 'goal' THEN (SELECT status FROM goals WHERE id = d.blocker_id) "
+        "  WHEN 'task' THEN (SELECT status FROM tasks WHERE id = d.blocker_id) "
+        "  ELSE NULL "
+        "END AS blocker_status "
+        "FROM dependencies d WHERE d.blocked_type = 'goal' AND d.blocked_id = ?",
+        (goal["id"],),
+    ).fetchall()
+    goal["blockers"] = rows_to_dicts(blocker_rows)
+    return goal
+
+
+def handle_get_goals(params):
+    conn = get_db()
+    try:
+        status = params.get("status", [None])[0]
+        q = "SELECT * FROM goals"
+        args = []
+        if status:
+            q += " WHERE status = ?"
+            args.append(status)
+        q += " ORDER BY id ASC"
+        rows = conn.execute(q, args).fetchall()
+        goals = [enrich_goal(conn, dict(r)) for r in rows]
+        return 200, goals
+    finally:
+        conn.close()
+
+
+def handle_get_goal(goal_id):
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone()
+        if not row:
+            return 404, {"error": "Goal not found"}
+        goal = enrich_goal(conn, dict(row))
+        # also include tasks
+        task_rows = conn.execute(
+            "SELECT * FROM tasks WHERE goal_id = ? ORDER BY status, id", (goal_id,)
+        ).fetchall()
+        tasks = rows_to_dicts(task_rows)
+        for t in tasks:
+            t["tags"] = get_tags_for(conn, "task_tags", "task_id", t["id"])
+        goal["tasks"] = tasks
+        return 200, goal
+    finally:
+        conn.close()
+
+
+# ── Task handlers ────────────────────────────────────────────────
+
+def enrich_task(conn, task):
+    task["tags"] = get_tags_for(conn, "task_tags", "task_id", task["id"])
+    # goal name
+    if task["goal_id"]:
+        g = conn.execute("SELECT title FROM goals WHERE id = ?", (task["goal_id"],)).fetchone()
+        task["goal_title"] = g["title"] if g else None
+    else:
+        task["goal_title"] = None
+    # linked people
+    rows = conn.execute(
+        "SELECT p.id, p.name, p.relationship, tp.role FROM people p "
+        "JOIN task_people tp ON tp.person_id = p.id WHERE tp.task_id = ?",
+        (task["id"],),
+    ).fetchall()
+    task["people"] = rows_to_dicts(rows)
+    return task
+
+
+def handle_get_tasks(params):
+    conn = get_db()
+    try:
+        status = params.get("status", [None])[0]
+        goal_id = params.get("goal_id", [None])[0]
+        person_id = params.get("person_id", [None])[0]
+
+        q = "SELECT t.* FROM tasks t"
+        wheres = []
+        args = []
+        if person_id:
+            q += " JOIN task_people tp ON tp.task_id = t.id"
+            wheres.append("tp.person_id = ?")
+            args.append(int(person_id))
+        if status:
+            wheres.append("t.status = ?")
+            args.append(status)
+        if goal_id:
+            wheres.append("t.goal_id = ?")
+            args.append(int(goal_id))
+        if wheres:
+            q += " WHERE " + " AND ".join(wheres)
+        q += " ORDER BY t.goal_id, t.id"
+
+        rows = conn.execute(q, args).fetchall()
+        tasks = [enrich_task(conn, dict(r)) for r in rows]
+        return 200, tasks
+    finally:
+        conn.close()
+
+
+def handle_update_task(task_id, body):
+    conn = get_db()
+    try:
+        existing = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if not existing:
+            return 404, {"error": "Task not found"}
+        title = body.get("title", existing["title"])
+        description = body.get("description", existing["description"])
+        status = body.get("status", existing["status"])
+        due_date = body.get("due_date", existing["due_date"])
+        goal_id = body.get("goal_id", existing["goal_id"])
+        completed_at = None
+        if status == "completed" and existing["status"] != "completed":
+            completed_at = now_utc()
+        elif status == "completed" and existing["status"] == "completed":
+            completed_at = existing["completed_at"]
+        conn.execute(
+            "UPDATE tasks SET title = ?, description = ?, status = ?, due_date = ?, "
+            "goal_id = ?, completed_at = ?, updated_at = ? WHERE id = ?",
+            (title, description, status, due_date, goal_id, completed_at, now_utc(), task_id),
+        )
+        tag_names = body.get("tags")
+        if tag_names is not None:
+            set_tags_for(conn, "task_tags", "task_id", task_id, tag_names)
+        conn.commit()
+        task = dict(conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone())
+        return 200, enrich_task(conn, task)
+    finally:
+        conn.close()
+
+
+def handle_delete_task(task_id):
+    conn = get_db()
+    try:
+        existing = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if not existing:
+            return 404, {"error": "Task not found"}
+        conn.execute("DELETE FROM task_tags WHERE task_id = ?", (task_id,))
+        conn.execute("DELETE FROM task_people WHERE task_id = ?", (task_id,))
+        conn.execute("DELETE FROM dependencies WHERE (blocker_type = 'task' AND blocker_id = ?) OR (blocked_type = 'task' AND blocked_id = ?)", (task_id, task_id))
+        conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        conn.commit()
+        return 200, {"deleted": task_id}
+    finally:
+        conn.close()
+
+
+# ── People handlers ──────────────────────────────────────────────
+
+def enrich_person(conn, person):
+    person["tags"] = get_tags_for(conn, "person_tags", "person_id", person["id"])
+    # linked goals
+    rows = conn.execute(
+        "SELECT g.id, g.title, g.status, gp.role FROM goals g "
+        "JOIN goal_people gp ON gp.goal_id = g.id WHERE gp.person_id = ?",
+        (person["id"],),
+    ).fetchall()
+    person["goals"] = rows_to_dicts(rows)
+    # linked tasks
+    rows = conn.execute(
+        "SELECT t.id, t.title, t.status, tp.role FROM tasks t "
+        "JOIN task_people tp ON tp.task_id = t.id WHERE tp.person_id = ?",
+        (person["id"],),
+    ).fetchall()
+    person["tasks"] = rows_to_dicts(rows)
+    return person
+
+
+def handle_get_people():
+    conn = get_db()
+    try:
+        rows = conn.execute("SELECT * FROM people ORDER BY id").fetchall()
+        people = [enrich_person(conn, dict(r)) for r in rows]
+        return 200, people
+    finally:
+        conn.close()
+
+
+def handle_get_person(person_id):
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT * FROM people WHERE id = ?", (person_id,)).fetchone()
+        if not row:
+            return 404, {"error": "Person not found"}
+        return 200, enrich_person(conn, dict(row))
+    finally:
+        conn.close()
+
+
+def handle_update_person(person_id, body):
+    conn = get_db()
+    try:
+        existing = conn.execute("SELECT * FROM people WHERE id = ?", (person_id,)).fetchone()
+        if not existing:
+            return 404, {"error": "Person not found"}
+        name = body.get("name", existing["name"])
+        relationship = body.get("relationship", existing["relationship"])
+        notes = body.get("notes", existing["notes"])
+        location = body.get("location", existing["location"])
+        conn.execute(
+            "UPDATE people SET name = ?, relationship = ?, notes = ?, location = ?, updated_at = ? WHERE id = ?",
+            (name, relationship, notes, location, now_utc(), person_id),
+        )
+        tag_names = body.get("tags")
+        if tag_names is not None:
+            set_tags_for(conn, "person_tags", "person_id", person_id, tag_names)
+        conn.commit()
+        person = dict(conn.execute("SELECT * FROM people WHERE id = ?", (person_id,)).fetchone())
+        return 200, enrich_person(conn, person)
+    finally:
+        conn.close()
+
+
+def handle_delete_person(person_id):
+    conn = get_db()
+    try:
+        existing = conn.execute("SELECT * FROM people WHERE id = ?", (person_id,)).fetchone()
+        if not existing:
+            return 404, {"error": "Person not found"}
+        conn.execute("DELETE FROM person_tags WHERE person_id = ?", (person_id,))
+        conn.execute("DELETE FROM goal_people WHERE person_id = ?", (person_id,))
+        conn.execute("DELETE FROM task_people WHERE person_id = ?", (person_id,))
+        conn.execute("DELETE FROM people WHERE id = ?", (person_id,))
+        conn.commit()
+        return 200, {"deleted": person_id}
+    finally:
+        conn.close()
+
+
+# ── Knowledge handlers ───────────────────────────────────────────
+
+def handle_get_knowledge(params):
+    conn = get_db()
+    try:
+        item_type = params.get("type", [None])[0]
+        q_search = params.get("q", [None])[0]
+
+        q = "SELECT * FROM knowledge_items"
+        wheres = []
+        args = []
+        if item_type:
+            wheres.append("item_type = ?")
+            args.append(item_type)
+        if q_search:
+            wheres.append("(title LIKE ? OR content LIKE ?)")
+            args.extend([f"%{q_search}%", f"%{q_search}%"])
+        if wheres:
+            q += " WHERE " + " AND ".join(wheres)
+        q += " ORDER BY id"
+
+        rows = conn.execute(q, args).fetchall()
+        items = rows_to_dicts(rows)
+        for item in items:
+            item["tags"] = get_tags_for(conn, "knowledge_tags", "knowledge_id", item["id"])
+        return 200, items
+    finally:
+        conn.close()
+
+
+def handle_update_knowledge(item_id, body):
+    conn = get_db()
+    try:
+        existing = conn.execute("SELECT * FROM knowledge_items WHERE id = ?", (item_id,)).fetchone()
+        if not existing:
+            return 404, {"error": "Knowledge item not found"}
+        title = body.get("title", existing["title"])
+        content = body.get("content", existing["content"])
+        item_type = body.get("item_type", existing["item_type"])
+        source = body.get("source", existing["source"])
+        conn.execute(
+            "UPDATE knowledge_items SET title = ?, content = ?, item_type = ?, source = ?, updated_at = ? WHERE id = ?",
+            (title, content, item_type, source, now_utc(), item_id),
+        )
+        tag_names = body.get("tags")
+        if tag_names is not None:
+            set_tags_for(conn, "knowledge_tags", "knowledge_id", item_id, tag_names)
+        conn.commit()
+        item = dict(conn.execute("SELECT * FROM knowledge_items WHERE id = ?", (item_id,)).fetchone())
+        item["tags"] = get_tags_for(conn, "knowledge_tags", "knowledge_id", item_id)
+        return 200, item
+    finally:
+        conn.close()
+
+
+def handle_delete_knowledge(item_id):
+    conn = get_db()
+    try:
+        existing = conn.execute("SELECT * FROM knowledge_items WHERE id = ?", (item_id,)).fetchone()
+        if not existing:
+            return 404, {"error": "Knowledge item not found"}
+        conn.execute("DELETE FROM knowledge_tags WHERE knowledge_id = ?", (item_id,))
+        conn.execute("DELETE FROM knowledge_items WHERE id = ?", (item_id,))
+        conn.commit()
+        return 200, {"deleted": item_id}
+    finally:
+        conn.close()
+
+
+# ── Goal mutation handlers ──────────────────────────────────────
+
+def handle_update_goal(goal_id, body):
+    conn = get_db()
+    try:
+        existing = conn.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone()
+        if not existing:
+            return 404, {"error": "Goal not found"}
+        title = body.get("title", existing["title"])
+        description = body.get("description", existing["description"])
+        status = body.get("status", existing["status"])
+        target_date = body.get("target_date", existing["target_date"])
+        completed_at = None
+        if status == "completed" and existing["status"] != "completed":
+            completed_at = now_utc()
+        elif status == "completed" and existing["status"] == "completed":
+            completed_at = existing["completed_at"]
+        conn.execute(
+            "UPDATE goals SET title = ?, description = ?, status = ?, target_date = ?, "
+            "completed_at = ?, updated_at = ? WHERE id = ?",
+            (title, description, status, target_date, completed_at, now_utc(), goal_id),
+        )
+        tag_names = body.get("tags")
+        if tag_names is not None:
+            set_tags_for(conn, "goal_tags", "goal_id", goal_id, tag_names)
+        conn.commit()
+        goal = dict(conn.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone())
+        return 200, enrich_goal(conn, goal)
+    finally:
+        conn.close()
+
+
+def handle_delete_goal(goal_id):
+    conn = get_db()
+    try:
+        existing = conn.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone()
+        if not existing:
+            return 404, {"error": "Goal not found"}
+        # Count linked tasks for info
+        row = conn.execute("SELECT COUNT(*) as c FROM tasks WHERE goal_id = ?", (goal_id,)).fetchone()
+        task_count = row["c"]
+        # Unlink tasks (set goal_id to NULL rather than deleting them)
+        conn.execute("UPDATE tasks SET goal_id = NULL, updated_at = ? WHERE goal_id = ?", (now_utc(), goal_id))
+        conn.execute("DELETE FROM goal_tags WHERE goal_id = ?", (goal_id,))
+        conn.execute("DELETE FROM goal_people WHERE goal_id = ?", (goal_id,))
+        conn.execute("DELETE FROM dependencies WHERE (blocker_type = 'goal' AND blocker_id = ?) OR (blocked_type = 'goal' AND blocked_id = ?)", (goal_id, goal_id))
+        conn.execute("DELETE FROM goals WHERE id = ?", (goal_id,))
+        conn.commit()
+        return 200, {"deleted": goal_id, "unlinked_tasks": task_count}
+    finally:
+        conn.close()
+
+
+def handle_delete_brain_dump(dump_id):
+    conn = get_db()
+    try:
+        existing = conn.execute("SELECT * FROM brain_dumps WHERE id = ?", (dump_id,)).fetchone()
+        if not existing:
+            return 404, {"error": "Brain dump not found"}
+        conn.execute("DELETE FROM brain_dump_tags WHERE brain_dump_id = ?", (dump_id,))
+        conn.execute("DELETE FROM brain_dumps WHERE id = ?", (dump_id,))
+        conn.commit()
+        return 200, {"deleted": dump_id}
+    finally:
+        conn.close()
+
+
+# ── Dependencies handler ────────────────────────────────────────
+
+def handle_get_dependencies(params):
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT d.*, "
+            "CASE d.blocker_type "
+            "  WHEN 'goal' THEN (SELECT title FROM goals WHERE id = d.blocker_id) "
+            "  WHEN 'task' THEN (SELECT title FROM tasks WHERE id = d.blocker_id) "
+            "  WHEN 'external_system' THEN (SELECT name FROM external_systems WHERE id = d.blocker_id) "
+            "END AS blocker_name, "
+            "CASE d.blocked_type "
+            "  WHEN 'goal' THEN (SELECT title FROM goals WHERE id = d.blocked_id) "
+            "  WHEN 'task' THEN (SELECT title FROM tasks WHERE id = d.blocked_id) "
+            "END AS blocked_name "
+            "FROM dependencies d ORDER BY d.id"
+        ).fetchall()
+        return 200, rows_to_dicts(rows)
+    finally:
+        conn.close()
+
+
+# ── Dashboard handler ────────────────────────────────────────────
+
+def handle_get_dashboard():
+    conn = get_db()
+    try:
+        data = {}
+
+        # Primary goal (Move to Seoul — id 1)
+        row = conn.execute("SELECT * FROM goals WHERE id = 1").fetchone()
+        if row:
+            data["primary_goal"] = enrich_goal(conn, dict(row))
+
+        # Active goals with progress
+        rows = conn.execute("SELECT * FROM goals WHERE status = 'active' ORDER BY id").fetchall()
+        data["active_goals"] = [enrich_goal(conn, dict(r)) for r in rows]
+
+        # Stalled goals
+        rows = conn.execute("SELECT * FROM goals WHERE status = 'stalled' ORDER BY id").fetchall()
+        data["stalled_goals"] = [enrich_goal(conn, dict(r)) for r in rows]
+
+        # Unprocessed brain dumps count
+        row = conn.execute("SELECT COUNT(*) as c FROM brain_dumps WHERE processed = 0").fetchone()
+        data["unprocessed_dumps"] = row["c"]
+
+        # Brain dumps needing review
+        row = conn.execute("SELECT COUNT(*) as c FROM brain_dumps WHERE processing_status = 'needs_review'").fetchone()
+        data["needs_review_count"] = row["c"]
+
+        # Active tasks count
+        row = conn.execute("SELECT COUNT(*) as c FROM tasks WHERE status = 'active'").fetchone()
+        data["active_task_count"] = row["c"]
+
+        # Completed tasks count
+        row = conn.execute("SELECT COUNT(*) as c FROM tasks WHERE status = 'completed'").fetchone()
+        data["completed_task_count"] = row["c"]
+
+        # Recent brain dumps (last 5)
+        rows = conn.execute(
+            "SELECT * FROM brain_dumps ORDER BY captured_at DESC LIMIT 5"
+        ).fetchall()
+        dumps = rows_to_dicts(rows)
+        for d in dumps:
+            d["tags"] = get_tags_for(conn, "brain_dump_tags", "brain_dump_id", d["id"])
+            if d.get("processed_items"):
+                try:
+                    d["processed_items"] = json.loads(d["processed_items"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        data["recent_dumps"] = dumps
+
+        return 200, data
+    finally:
+        conn.close()
+
+
+# ── Request handler ─────────────────────────────────────────────────
+
+class Handler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=os.path.dirname(__file__), **kwargs)
+
+    def send_json(self, status, data):
+        body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", len(body))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def read_body(self):
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length)
+        return json.loads(raw) if raw else {}
+
+    def parse_id(self, path):
+        """Extract trailing integer ID from path."""
+        m = re.search(r'/(\d+)$', path)
+        return int(m.group(1)) if m else None
+
+    def route(self, method):
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/")
+        params = parse_qs(parsed.query)
+
+        # ── Journal entries (v1 API — preserved) ──
+
+        if method == "GET" and path == "/api/entries":
+            status, data = handle_get_entries(params)
+            self.send_json(status, data)
+            return True
+
+        if method == "GET" and path.startswith("/api/entries/"):
+            eid = self.parse_id(path)
+            if eid is None:
+                self.send_json(400, {"error": "Invalid entry ID"})
+                return True
+            status, data = handle_get_entry(eid)
+            self.send_json(status, data)
+            return True
+
+        if method == "POST" and path == "/api/entries":
+            body = self.read_body()
+            status, data = handle_create_entry(body)
+            self.send_json(status, data)
+            return True
+
+        if method == "PUT" and path.startswith("/api/entries/"):
+            eid = self.parse_id(path)
+            if eid is None:
+                self.send_json(400, {"error": "Invalid entry ID"})
+                return True
+            body = self.read_body()
+            status, data = handle_update_entry(eid, body)
+            self.send_json(status, data)
+            return True
+
+        if method == "DELETE" and path.startswith("/api/entries/"):
+            eid = self.parse_id(path)
+            if eid is None:
+                self.send_json(400, {"error": "Invalid entry ID"})
+                return True
+            status, data = handle_delete_entry(eid)
+            self.send_json(status, data)
+            return True
+
+        # ── Tags ──
+
+        if method == "GET" and path == "/api/tags":
+            status, data = handle_get_tags()
+            self.send_json(status, data)
+            return True
+
+        # ── Dashboard ──
+
+        if method == "GET" and path == "/api/dashboard":
+            status, data = handle_get_dashboard()
+            self.send_json(status, data)
+            return True
+
+        # ── Brain dumps ──
+
+        if method == "GET" and path == "/api/brain-dumps":
+            status, data = handle_get_brain_dumps(params)
+            self.send_json(status, data)
+            return True
+
+        if method == "POST" and path == "/api/brain-dumps":
+            body = self.read_body()
+            status, data = handle_create_brain_dump(body)
+            self.send_json(status, data)
+            return True
+
+        if method == "POST" and re.match(r'/api/brain-dumps/\d+/process$', path):
+            did = int(re.search(r'/api/brain-dumps/(\d+)/process', path).group(1))
+            status, data = handle_process_brain_dump(did)
+            self.send_json(status, data)
+            return True
+
+        if method == "POST" and re.match(r'/api/brain-dumps/\d+/approve-item$', path):
+            did = int(re.search(r'/api/brain-dumps/(\d+)/approve-item', path).group(1))
+            body = self.read_body()
+            status, data = handle_approve_item(did, body)
+            self.send_json(status, data)
+            return True
+
+        if method == "PUT" and path.startswith("/api/brain-dumps/"):
+            did = self.parse_id(path)
+            if did is None:
+                self.send_json(400, {"error": "Invalid ID"})
+                return True
+            body = self.read_body()
+            status, data = handle_update_brain_dump(did, body)
+            self.send_json(status, data)
+            return True
+
+        if method == "DELETE" and path.startswith("/api/brain-dumps/"):
+            did = self.parse_id(path)
+            if did is None:
+                self.send_json(400, {"error": "Invalid ID"})
+                return True
+            status, data = handle_delete_brain_dump(did)
+            self.send_json(status, data)
+            return True
+
+        # ── Goals ──
+
+        if method == "GET" and path == "/api/goals":
+            status, data = handle_get_goals(params)
+            self.send_json(status, data)
+            return True
+
+        if method == "GET" and path.startswith("/api/goals/"):
+            gid = self.parse_id(path)
+            if gid is None:
+                self.send_json(400, {"error": "Invalid goal ID"})
+                return True
+            status, data = handle_get_goal(gid)
+            self.send_json(status, data)
+            return True
+
+        if method == "PUT" and path.startswith("/api/goals/"):
+            gid = self.parse_id(path)
+            if gid is None:
+                self.send_json(400, {"error": "Invalid goal ID"})
+                return True
+            body = self.read_body()
+            status, data = handle_update_goal(gid, body)
+            self.send_json(status, data)
+            return True
+
+        if method == "DELETE" and path.startswith("/api/goals/"):
+            gid = self.parse_id(path)
+            if gid is None:
+                self.send_json(400, {"error": "Invalid goal ID"})
+                return True
+            status, data = handle_delete_goal(gid)
+            self.send_json(status, data)
+            return True
+
+        # ── Tasks ──
+
+        if method == "GET" and path == "/api/tasks":
+            status, data = handle_get_tasks(params)
+            self.send_json(status, data)
+            return True
+
+        if method == "PUT" and path.startswith("/api/tasks/"):
+            tid = self.parse_id(path)
+            if tid is None:
+                self.send_json(400, {"error": "Invalid task ID"})
+                return True
+            body = self.read_body()
+            status, data = handle_update_task(tid, body)
+            self.send_json(status, data)
+            return True
+
+        if method == "DELETE" and path.startswith("/api/tasks/"):
+            tid = self.parse_id(path)
+            if tid is None:
+                self.send_json(400, {"error": "Invalid task ID"})
+                return True
+            status, data = handle_delete_task(tid)
+            self.send_json(status, data)
+            return True
+
+        # ── People ──
+
+        if method == "GET" and path == "/api/people":
+            status, data = handle_get_people()
+            self.send_json(status, data)
+            return True
+
+        if method == "GET" and path.startswith("/api/people/"):
+            pid = self.parse_id(path)
+            if pid is None:
+                self.send_json(400, {"error": "Invalid person ID"})
+                return True
+            status, data = handle_get_person(pid)
+            self.send_json(status, data)
+            return True
+
+        if method == "PUT" and path.startswith("/api/people/"):
+            pid = self.parse_id(path)
+            if pid is None:
+                self.send_json(400, {"error": "Invalid person ID"})
+                return True
+            body = self.read_body()
+            status, data = handle_update_person(pid, body)
+            self.send_json(status, data)
+            return True
+
+        if method == "DELETE" and path.startswith("/api/people/"):
+            pid = self.parse_id(path)
+            if pid is None:
+                self.send_json(400, {"error": "Invalid person ID"})
+                return True
+            status, data = handle_delete_person(pid)
+            self.send_json(status, data)
+            return True
+
+        # ── Knowledge ──
+
+        if method == "GET" and path == "/api/knowledge":
+            status, data = handle_get_knowledge(params)
+            self.send_json(status, data)
+            return True
+
+        if method == "PUT" and path.startswith("/api/knowledge/"):
+            kid = self.parse_id(path)
+            if kid is None:
+                self.send_json(400, {"error": "Invalid knowledge ID"})
+                return True
+            body = self.read_body()
+            status, data = handle_update_knowledge(kid, body)
+            self.send_json(status, data)
+            return True
+
+        if method == "DELETE" and path.startswith("/api/knowledge/"):
+            kid = self.parse_id(path)
+            if kid is None:
+                self.send_json(400, {"error": "Invalid knowledge ID"})
+                return True
+            status, data = handle_delete_knowledge(kid)
+            self.send_json(status, data)
+            return True
+
+        # ── Dependencies ──
+
+        if method == "GET" and path == "/api/dependencies":
+            status, data = handle_get_dependencies(params)
+            self.send_json(status, data)
+            return True
+
+        return False
+
+    def do_GET(self):
+        if not self.route("GET"):
+            super().do_GET()
+
+    def do_POST(self):
+        if not self.route("POST"):
+            self.send_json(404, {"error": "Not found"})
+
+    def do_PUT(self):
+        if not self.route("PUT"):
+            self.send_json(404, {"error": "Not found"})
+
+    def do_DELETE(self):
+        if not self.route("DELETE"):
+            self.send_json(404, {"error": "Not found"})
+
+    def log_message(self, fmt, *args):
+        pass
+
+
+if __name__ == "__main__":
+    server = HTTPServer(("127.0.0.1", PORT), Handler)
+    print(f"\n  lifeplan")
+    print(f"  ────────")
+    print(f"  http://localhost:{PORT}\n")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n  stopped.\n")
+        server.server_close()
