@@ -25,6 +25,7 @@ All team member definitions live in `/team/`. Each file is a self-contained pers
 | **Nova** | Head of HR | `team/nova.md` |
 | **Reed** | Knowledge Architect | `team/reed.md` |
 | **Lumen** | Product/Design Engineer | `team/lumen.md` |
+| **Forge** | Infrastructure Engineer | `team/forge.md` |
 
 ## Addressing Team Members
 Cam can directly address any team member by name (e.g. "Sage, research..." or "Nova, hire..."). Atlas will route accordingly.
