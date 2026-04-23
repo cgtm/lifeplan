@@ -5,8 +5,10 @@ All regex functions, LLM functions, and the main process_brain_dump pipeline.
 
 import json
 import re
+import time
 import urllib.error
 import urllib.request
+from collections import Counter
 from datetime import datetime, timezone, timedelta
 
 from .db import get_db, now_utc, rows_to_dicts, get_tags_for, call_mistral_api, _load_env
@@ -14,7 +16,7 @@ from .db import get_db, now_utc, rows_to_dicts, get_tags_for, call_mistral_api, 
 _env = _load_env()
 OLLAMA_URL = _env.get("OLLAMA_URL", "http://localhost:11434") + "/api/generate"
 OLLAMA_MODEL = "mistral"
-OLLAMA_TIMEOUT = 30  # seconds
+OLLAMA_TIMEOUT = 2  # seconds
 
 
 # ── Goal keyword index (Rule 4) ─────────────────────────────────
@@ -1245,6 +1247,7 @@ def _call_ollama(prompt):
     """Send a prompt to Ollama and return the parsed JSON response.
     Returns the parsed dict on success, or None on failure.
     """
+    print(f"  [ollama] Calling Ollama at {OLLAMA_URL} model={OLLAMA_MODEL}")
     payload = json.dumps({
         "model": OLLAMA_MODEL,
         "prompt": prompt,
@@ -1259,15 +1262,20 @@ def _call_ollama(prompt):
         method="POST",
     )
 
+    t0 = time.time()
     try:
         with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT) as resp:
+            elapsed = time.time() - t0
             body = resp.read().decode("utf-8")
             result = json.loads(body)
             response_text = result.get("response", "")
-            return json.loads(response_text)
+            parsed = json.loads(response_text)
+            print(f"  [ollama] Success in {elapsed:.1f}s")
+            return parsed
     except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError,
             OSError, TimeoutError, ValueError, KeyError) as e:
-        print(f"  [ollama] LLM call failed: {type(e).__name__}: {e}")
+        elapsed = time.time() - t0
+        print(f"  [ollama] Failed in {elapsed:.1f}s: {type(e).__name__}: {e}")
         return None
 
 
@@ -1276,6 +1284,7 @@ def _call_mistral(prompt):
     Uses the same prompt as Ollama but via OpenAI-compatible chat/completions.
     Returns the parsed dict on success, or None on failure.
     """
+    print("  [mistral] Calling Mistral cloud API (processing fallback)")
     messages = [
         {
             "role": "system",
@@ -1286,7 +1295,14 @@ def _call_mistral(prompt):
             "content": prompt,
         },
     ]
-    return call_mistral_api(messages)
+    t0 = time.time()
+    result = call_mistral_api(messages)
+    elapsed = time.time() - t0
+    if result is not None:
+        print(f"  [mistral] Success in {elapsed:.1f}s")
+    else:
+        print(f"  [mistral] Failed in {elapsed:.1f}s")
+    return result
 
 
 def _llm_response_to_items(llm_data, dump_id, known_tags):
@@ -1452,21 +1468,24 @@ def process_brain_dump_llm(dump_id, conn, dump, goals_data, known_people, known_
 
     # Tier 1: Local Ollama
     llm_data = _call_ollama(prompt)
+    tier_used = "ollama"
 
     # Tier 2: Mistral cloud API
     if llm_data is None:
-        print("  [ollama] Ollama unavailable, trying Mistral cloud API...")
+        print("  [processing] Ollama unavailable, falling back to Mistral cloud API")
         llm_data = _call_mistral(prompt)
+        tier_used = "mistral"
 
     if llm_data is None:
-        print("  [llm] All LLM backends failed, falling back to regex processing")
+        print("  [processing] All LLM backends failed, falling back to regex")
         return None
 
     # Validate minimal structure
     if not isinstance(llm_data, dict):
-        print("  [llm] Response is not a dict, falling back to regex")
+        print("  [processing] LLM response is not a dict, falling back to regex")
         return None
 
+    print(f"  [processing] LLM succeeded via {tier_used}")
     items = _llm_response_to_items(llm_data, dump_id, known_tags)
 
     # Post-processing: Mistral often misclassifies explicit goal requests as tasks.
@@ -1492,7 +1511,10 @@ def process_brain_dump_llm(dump_id, conn, dump, goals_data, known_people, known_
             if not (i["type"] == "task" and _task_overlaps_goal(i["data"]["title"]))
         ]
 
-    print(f"  [llm] Extracted {len(items)} items via LLM")
+    # Summarise what was extracted
+    type_counts = Counter(i["type"] for i in items)
+    summary = ", ".join(f"{cnt} {t}" for t, cnt in sorted(type_counts.items()))
+    print(f"  [processing] Extracted {len(items)} items via {tier_used}: {summary}")
     return items
 
 
@@ -1631,6 +1653,9 @@ def process_brain_dump(dump_id):
 
         dump = dict(row)
         content = dump["content"]
+        preview = content[:80].replace("\n", " ")
+        print(f"  [processing] Starting brain dump #{dump_id}: \"{preview}...\"")
+        t_start = time.time()
 
         # Set status to processing
         conn.execute(
@@ -1650,6 +1675,7 @@ def process_brain_dump(dump_id):
             known_tags = rows_to_dicts(
                 conn.execute("SELECT id, name FROM tags").fetchall()
             )
+            print(f"  [processing] Context: {len(goals_data)} goals, {len(known_people)} people, {len(known_tags)} tags")
 
             # Parse reference date from captured_at
             captured_at = dump["captured_at"]
@@ -1670,9 +1696,11 @@ def process_brain_dump(dump_id):
             else:
                 # Fallback: regex-based extraction
                 extraction_method = "regex"
+                print("  [regex] Running regex-based extraction")
 
                 # Step 1: Segment splitting
                 segments = segment_text(content)
+                print(f"  [regex] Split into {len(segments)} segments")
 
                 all_items = []
                 seen_person_ids = set()
@@ -1719,25 +1747,39 @@ def process_brain_dump(dump_id):
                 tag_items = detect_tags(content, all_items, known_tags)
                 all_items.extend(tag_items)
 
+                # Summarise regex results
+                type_counts = Counter(i["type"] for i in all_items)
+                summary = ", ".join(f"{cnt} {t}" for t, cnt in sorted(type_counts.items()))
+                print(f"  [regex] Extracted {len(all_items)} items: {summary}")
+
             # Step 8: Confidence filtering -- discard items below 0.50
             filtered_items = [
                 item for item in all_items if item["confidence"] >= 0.50
             ]
 
             # Step 9: Auto-create high-confidence items
+            auto_count = 0
+            suggest_count = 0
             for item in filtered_items:
                 if item["confidence"] >= 0.80:
                     item["status"] = "auto_created"
                     created_id = _auto_create_item(conn, item, dump_id)
                     item["created_id"] = created_id
+                    auto_count += 1
                 else:
                     item["status"] = "suggested"
+                    suggest_count += 1
 
             # Determine processing status
             has_suggestions = any(
                 item["status"] == "suggested" for item in filtered_items
             )
             processing_status = "needs_review" if has_suggestions else "processed"
+
+            elapsed = time.time() - t_start
+            print(f"  [processing] Done #{dump_id} in {elapsed:.1f}s via {extraction_method}: "
+                  f"{auto_count} auto-created, {suggest_count} suggested, "
+                  f"status={processing_status}")
 
             ts = now_utc()
             processed_json = json.dumps({
@@ -1775,6 +1817,8 @@ def process_brain_dump(dump_id):
             return 200, updated
 
         except Exception as e:
+            elapsed = time.time() - t_start
+            print(f"  [processing] ERROR #{dump_id} after {elapsed:.1f}s: {e}")
             # On error, reset status and re-raise
             conn.execute(
                 "UPDATE brain_dumps SET processing_status = 'unprocessed' WHERE id = ?",

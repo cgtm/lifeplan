@@ -6,6 +6,7 @@ Database connection, utility functions, tag helpers, and shared LLM utilities.
 import json
 import os
 import sqlite3
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -56,6 +57,7 @@ def call_mistral_api(messages):
         print("  [mistral] No MISTRAL_API_KEY found in .env")
         return None
 
+    print(f"  [mistral] Calling {MISTRAL_API_URL} model={MISTRAL_MODEL}")
     payload = json.dumps({
         "model": MISTRAL_MODEL,
         "messages": messages,
@@ -72,15 +74,20 @@ def call_mistral_api(messages):
         method="POST",
     )
 
+    t0 = time.time()
     try:
         with urllib.request.urlopen(req, timeout=MISTRAL_TIMEOUT) as resp:
+            elapsed = time.time() - t0
             body = resp.read().decode("utf-8")
             result = json.loads(body)
             content = result["choices"][0]["message"]["content"]
-            return json.loads(content)
+            parsed = json.loads(content)
+            print(f"  [mistral] API success in {elapsed:.1f}s")
+            return parsed
     except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError,
             OSError, TimeoutError, ValueError, KeyError, IndexError) as e:
-        print(f"  [mistral] API call failed: {type(e).__name__}: {e}")
+        elapsed = time.time() - t0
+        print(f"  [mistral] API failed in {elapsed:.1f}s: {type(e).__name__}: {e}")
         return None
 
 

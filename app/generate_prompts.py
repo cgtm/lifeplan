@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone, timedelta
@@ -19,7 +20,7 @@ from app.db import get_db, now_utc, rows_to_dicts, call_mistral_api, _load_env
 _env = _load_env()
 OLLAMA_URL = _env.get("OLLAMA_URL", "http://localhost:11434") + "/api/chat"
 OLLAMA_MODEL = "mistral"
-OLLAMA_TIMEOUT = 45
+OLLAMA_TIMEOUT = 2
 
 MAX_ACTIVE_PROMPTS = 5
 
@@ -516,6 +517,7 @@ def call_ollama_for_patterns(summary):
     ]
 
     # Tier 1: Local Ollama
+    print(f"  [prompts] Calling Ollama at {OLLAMA_URL} model={OLLAMA_MODEL} for pattern analysis")
     payload = json.dumps({
         "model": OLLAMA_MODEL,
         "messages": messages,
@@ -530,28 +532,38 @@ def call_ollama_for_patterns(summary):
         method="POST",
     )
 
+    t0 = time.time()
     try:
         with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT) as resp:
+            elapsed = time.time() - t0
             body = resp.read().decode("utf-8")
             result = json.loads(body)
             content = result.get("message", {}).get("content", "")
             parsed = json.loads(content)
-            return _parse_pattern_response(parsed)
+            observations = _parse_pattern_response(parsed)
+            print(f"  [prompts] Ollama pattern analysis success in {elapsed:.1f}s: {len(observations)} observations")
+            return observations
     except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError,
             OSError, TimeoutError, ValueError, KeyError) as e:
-        print(f"  [ollama] LLM pattern analysis unavailable: {type(e).__name__}: {e}")
+        elapsed = time.time() - t0
+        print(f"  [prompts] Ollama pattern analysis failed in {elapsed:.1f}s: {type(e).__name__}: {e}")
 
     # Tier 2: Mistral cloud API
-    print("  [ollama] Trying Mistral cloud API for pattern analysis...")
+    print("  [prompts] Falling back to Mistral cloud API for pattern analysis")
+    t0 = time.time()
     mistral_result = call_mistral_api(messages)
+    elapsed = time.time() - t0
     if mistral_result is not None:
-        return _parse_pattern_response(mistral_result)
+        observations = _parse_pattern_response(mistral_result)
+        print(f"  [prompts] Mistral pattern analysis success in {elapsed:.1f}s: {len(observations)} observations")
+        return observations
 
-    print("  [llm] All LLM backends failed for pattern analysis")
+    print(f"  [prompts] All LLM backends failed for pattern analysis ({elapsed:.1f}s)")
     return []
 
 
 def run_llm_analysis(conn):
+    print("  [prompts] Running LLM pattern analysis")
     summary = build_llm_summary(conn)
     observations = call_ollama_for_patterns(summary)
 
@@ -591,6 +603,8 @@ def expire_old_prompts(conn):
 def generate_prompts():
     conn = get_db()
     try:
+        t_start = time.time()
+        print("  [prompts] Starting prompt generation")
         expire_old_prompts(conn)
 
         total = 0
@@ -601,10 +615,13 @@ def generate_prompts():
         total += check_elicitation(conn)
         total += check_milestones(conn)
         total += check_patterns(conn)
+        rules_count = total
+        print(f"  [prompts] Rule-based checks done: {rules_count} prompts from rules")
         total += run_llm_analysis(conn)
 
         conn.commit()
-        print(f"  [prompts] Generated {total} new prompts")
+        elapsed = time.time() - t_start
+        print(f"  [prompts] Done in {elapsed:.1f}s: {total} new prompts ({rules_count} rules, {total - rules_count} LLM)")
         return total
     except Exception as e:
         print(f"  [prompts] Error: {e}")
@@ -625,11 +642,13 @@ def maybe_generate_prompts():
         ).fetchone()
 
         if row and row["last_gen"] and row["last_gen"] > cutoff:
+            print("  [prompts] Skipping generation (last run < 12h ago)")
             return
 
     finally:
         conn.close()
 
+    print("  [prompts] Triggering prompt generation (>12h since last run)")
     generate_prompts()
 
 
