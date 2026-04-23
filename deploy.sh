@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # deploy.sh -- push lifeplan to the DigitalOcean droplet
-# Usage: ./deploy.sh          (deploy app files + db)
-#        ./deploy.sh --code   (app files only, skip db)
+# Usage: ./deploy.sh          (deploy app files only -- safe default)
+#        ./deploy.sh --with-db (app files + overwrite remote db with local)
 #        ./deploy.sh --db     (database only)
 #
 # Prerequisites: server-setup.sh must have been run once on the droplet.
 # Idempotent: safe to re-run at any time.
+# NOTE: The droplet database is the source of truth. Use --with-db only if
+#       you are certain the local db should replace the remote one.
 
 set -euo pipefail
 
@@ -13,7 +15,7 @@ SERVER="your-user@your-domain.example"
 REMOTE_BASE="/opt/lifeplan"
 LOCAL_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-MODE="${1:-full}"
+MODE="${1:-code}"
 
 echo "==> lifeplan deploy"
 echo "    server:  $SERVER"
@@ -40,8 +42,8 @@ if [[ "$MODE" != "--db" ]]; then
         "$SERVER:$REMOTE_BASE/app/"
 fi
 
-# ── Sync database ────────────────────────────────────────────────
-if [[ "$MODE" != "--code" ]]; then
+# ── Sync database (only with explicit flag) ──────────────────────
+if [[ "$MODE" == "--with-db" || "$MODE" == "--db" ]]; then
     echo ""
     echo "--- syncing database ---"
     rsync -avz \

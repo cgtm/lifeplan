@@ -40,16 +40,29 @@ case "${1:-help}" in
   prompts)
     cd "$(dirname "$0")" && python3 -m app.generate_prompts
     ;;
+  pull-db)
+    LOCAL_DB="$(dirname "$0")/data/lifeplan.db"
+    echo "Pulling database from droplet..."
+    echo "  Local backup: ${LOCAL_DB}.before-pull"
+    cp "$LOCAL_DB" "${LOCAL_DB}.before-pull"
+    rsync -az your-user@your-domain.example:/opt/lifeplan/data/lifeplan.db "$LOCAL_DB"
+    echo "  Done. Local database updated from droplet."
+    ;;
+  deploy)
+    cd "$(dirname "$0")" && bash deploy.sh "${2:-}"
+    ;;
   *)
     echo "Usage: lp <command>"
     echo ""
-    echo "  start     Start the service"
-    echo "  stop      Stop the service"
-    echo "  restart   Restart the service"
+    echo "  start     Start the local service"
+    echo "  stop      Stop the local service"
+    echo "  restart   Restart the local service"
     echo "  status    Check if it's running"
     echo "  logs      Tail the server log"
     echo "  backup    Backup the database (optional: lp backup <label>)"
     echo "  serve     Run in foreground (for debugging)"
     echo "  prompts   Manually run prompt generation"
+    echo "  pull-db   Download the droplet database (backs up local first)"
+    echo "  deploy    Deploy to droplet (code only by default, --with-db to include db)"
     ;;
 esac
