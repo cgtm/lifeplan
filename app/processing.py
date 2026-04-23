@@ -9,9 +9,10 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone, timedelta
 
-from .db import get_db, now_utc, rows_to_dicts, get_tags_for
+from .db import get_db, now_utc, rows_to_dicts, get_tags_for, call_mistral_api, _load_env
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
+_env = _load_env()
+OLLAMA_URL = _env.get("OLLAMA_URL", "http://localhost:11434") + "/api/generate"
 OLLAMA_MODEL = "mistral"
 OLLAMA_TIMEOUT = 30  # seconds
 
@@ -524,6 +525,140 @@ def _build_task_item(source_text, title, confidence, goals_data, dates_for_segme
     }
 
 
+def detect_goals(segment, known_people, reference_date):
+    """
+    Detect new goal creation requests in a text segment.
+    Looks for patterns like "create a goal ...", "new goal ...", "goal: ...",
+    "my goal is to ...", etc.
+    Returns list of extraction items with type "goal_new".
+    """
+    items = []
+
+    # Months map for target date extraction
+    months_map = {
+        "january": 1, "february": 2, "march": 3, "april": 4,
+        "may": 5, "june": 6, "july": 7, "august": 8,
+        "september": 9, "october": 10, "november": 11, "december": 12,
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4,
+        "jun": 6, "jul": 7, "aug": 8, "sep": 9, "sept": 9,
+        "oct": 10, "nov": 11, "dec": 12,
+    }
+
+    # Explicit goal patterns -- high confidence (0.95)
+    explicit_patterns = [
+        # "create a goal 'Title'" or "create a goal: Title"
+        r"""(?i)\bcreate\s+(?:a\s+)?(?:new\s+)?goal[:\s]+['"\u2018\u2019\u201c\u201d]?([^'"\u2018\u2019\u201c\u201d\n]+?)['"\u2018\u2019\u201c\u201d]?\s*$""",
+        # "new goal 'Title'" or "new goal: Title"
+        r"""(?i)\bnew\s+goal[:\s]+['"\u2018\u2019\u201c\u201d]?([^'"\u2018\u2019\u201c\u201d\n]+?)['"\u2018\u2019\u201c\u201d]?\s*$""",
+        # "goal: Title"
+        r'(?i)^goal:\s*(.+)',
+        # "add goal 'Title'"
+        r"""(?i)\badd\s+(?:a\s+)?(?:new\s+)?goal[:\s]+['"\u2018\u2019\u201c\u201d]?([^'"\u2018\u2019\u201c\u201d\n]+?)['"\u2018\u2019\u201c\u201d]?\s*$""",
+    ]
+
+    # Softer goal patterns -- still high but slightly lower (0.90)
+    soft_patterns = [
+        # "my goal is to ..."
+        r'(?i)\bmy\s+goal\s+is\s+(?:to\s+)?(.+)',
+        # "i want to achieve ..."
+        r'(?i)\bi\s+want\s+to\s+achieve\s+(.+)',
+        # "set a goal to ..."
+        r'(?i)\bset\s+(?:a\s+)?goal\s+(?:to\s+)?(.+)',
+    ]
+
+    def _extract_target_date(title_text):
+        """Try to extract a target date from the goal title text."""
+        text_lower = title_text.lower()
+
+        # "June 2026", "May 2025", etc.
+        for m in re.finditer(
+            r'\b(' + '|'.join(months_map.keys()) + r')\s+(\d{4})\b', text_lower
+        ):
+            month_name, year_str = m.group(1), m.group(2)
+            month_num = months_map.get(month_name)
+            if month_num:
+                # Use the 1st of that month as target_date
+                return f"{year_str}-{month_num:02d}-01"
+
+        # ISO dates in the title
+        m = re.search(r'\b(\d{4}-\d{2}-\d{2})\b', title_text)
+        if m:
+            return m.group(1)
+
+        # "by May", "before June"
+        for m in re.finditer(
+            r'\b(?:by|before)\s+(' + '|'.join(months_map.keys()) + r')\b', text_lower
+        ):
+            month_name = m.group(1)
+            month_num = months_map.get(month_name)
+            if month_num:
+                year = reference_date.year
+                d = datetime(year, month_num, 1)
+                if d.date() < reference_date.date():
+                    d = datetime(year + 1, month_num, 1)
+                return d.strftime("%Y-%m-%d")
+
+        return None
+
+    def _extract_people_ids(title_text, known_people):
+        """Find any known people mentioned in the goal title."""
+        text_lower = title_text.lower()
+        people_ids = []
+        for person in known_people:
+            pattern = r'\b' + re.escape(person["name"].lower()) + r'\b'
+            if re.search(pattern, text_lower):
+                people_ids.append(person["id"])
+        return people_ids
+
+    for pattern in explicit_patterns:
+        m = re.search(pattern, segment)
+        if m:
+            title = m.group(1).strip().rstrip(".")
+            if title and len(title) > 2:
+                target_date = _extract_target_date(title)
+                people_ids = _extract_people_ids(title, known_people)
+                items.append({
+                    "type": "goal_new",
+                    "confidence": 0.95,
+                    "status": "auto_created",
+                    "source_text": segment,
+                    "data": {
+                        "title": title,
+                        "description": segment,
+                        "status": "active",
+                        "target_date": target_date,
+                        "people_ids": people_ids,
+                    },
+                    "created_id": None,
+                })
+                return items
+
+    for pattern in soft_patterns:
+        m = re.search(pattern, segment)
+        if m:
+            title = m.group(1).strip().rstrip(".")
+            if title and len(title) > 2:
+                target_date = _extract_target_date(title)
+                people_ids = _extract_people_ids(title, known_people)
+                items.append({
+                    "type": "goal_new",
+                    "confidence": 0.90,
+                    "status": "auto_created",
+                    "source_text": segment,
+                    "data": {
+                        "title": title,
+                        "description": segment,
+                        "status": "active",
+                        "target_date": target_date,
+                        "people_ids": people_ids,
+                    },
+                    "created_id": None,
+                })
+                return items
+
+    return items
+
+
 def match_goal(text, goals_data):
     """
     Rule 4: Match text against goals.
@@ -937,7 +1072,9 @@ Analyse the following brain dump text and extract structured items from it. Retu
 
 5. **Goal links**: Which existing goals does this brain dump relate to? Include goal_id, goal_title, and matched_keywords.
 
-6. **Tags**: Which existing tags apply? Also suggest new tags (lowercase, hyphenated, max 30 chars) for recurring themes not covered by existing tags.
+6. **New goals**: Explicit requests to create a new goal. Look for "create a goal", "new goal", "goal:", "my goal is to", "add goal", "set a goal to". Extract the goal title, optional target_date (ISO 8601), and status "active". Only create goal_new items when the user is explicitly asking for a NEW goal to be created -- do NOT confuse this with tasks or goal links.
+
+7. **Tags**: Which existing tags apply? Also suggest new tags (lowercase, hyphenated, max 30 chars) for recurring themes not covered by existing tags.
 
 ## Confidence scoring guidelines
 - Explicit markers (todo:, remind me to, decided to, I learned): 0.90-0.95
@@ -946,6 +1083,8 @@ Analyse the following brain dump text and extract structured items from it. Retu
 - Known person exact match: 0.95
 - New person in strong context: 0.70
 - Existing tag match: 0.95
+- Explicit new goal request ("create a goal", "new goal"): 0.95
+- Softer goal request ("my goal is to"): 0.90
 - New tag suggestion: 0.50-0.70
 - Ambiguous items: 0.50-0.60
 
@@ -1003,6 +1142,15 @@ Return a JSON object with this exact structure:
       "goal_title": "string",
       "matched_keywords": ["string"],
       "confidence": 0.0-1.0
+    }}
+  ],
+  "new_goals": [
+    {{
+      "title": "string (concise goal name)",
+      "description": "string (original text)",
+      "target_date": "YYYY-MM-DD or null",
+      "confidence": 0.0-1.0,
+      "source_text": "exact substring"
     }}
   ],
   "tags": [
@@ -1123,6 +1271,24 @@ def _call_ollama(prompt):
         return None
 
 
+def _call_mistral(prompt):
+    """Send a prompt to the Mistral cloud API and return the parsed JSON response.
+    Uses the same prompt as Ollama but via OpenAI-compatible chat/completions.
+    Returns the parsed dict on success, or None on failure.
+    """
+    messages = [
+        {
+            "role": "system",
+            "content": "You are an extraction engine for a personal knowledge management system. Return ONLY valid JSON.",
+        },
+        {
+            "role": "user",
+            "content": prompt,
+        },
+    ]
+    return call_mistral_api(messages)
+
+
 def _llm_response_to_items(llm_data, dump_id, known_tags):
     """Convert the LLM's structured JSON into the standard processed_items format."""
     items = []
@@ -1201,6 +1367,25 @@ def _llm_response_to_items(llm_data, dump_id, known_tags):
             "created_id": None,
         })
 
+    # New goals
+    for ng in llm_data.get("new_goals", []):
+        conf = _clamp_confidence(ng.get("confidence", 0.90))
+        status = "auto_created" if conf >= 0.80 else "suggested"
+        items.append({
+            "type": "goal_new",
+            "confidence": conf,
+            "status": status,
+            "source_text": ng.get("source_text", ng.get("description", "")),
+            "data": {
+                "title": ng.get("title", "Untitled goal"),
+                "description": ng.get("description", ""),
+                "status": "active",
+                "target_date": ng.get("target_date"),
+                "people_ids": [],
+            },
+            "created_id": None,
+        })
+
     # Goal links
     for gl in llm_data.get("goal_links", []):
         conf = _clamp_confidence(gl.get("confidence", 0.65))
@@ -1255,25 +1440,59 @@ def _clamp_confidence(val):
 
 
 def process_brain_dump_llm(dump_id, conn, dump, goals_data, known_people, known_tags, ref_date):
-    """Try to process a brain dump using Ollama/Mistral.
-    Returns a list of extracted items on success, or None if the LLM is unavailable.
+    """Try to process a brain dump using LLM (three-tier fallback).
+    1. Try local Ollama first
+    2. If Ollama fails, try Mistral cloud API
+    3. If Mistral fails, return None (caller falls back to regex)
+    Returns a list of extracted items on success, or None if all LLMs unavailable.
     """
     content = dump["content"]
 
     prompt = _build_llm_prompt(content, dump_id, goals_data, known_people, known_tags, ref_date)
+
+    # Tier 1: Local Ollama
     llm_data = _call_ollama(prompt)
 
+    # Tier 2: Mistral cloud API
     if llm_data is None:
-        print("  [ollama] Falling back to regex processing")
+        print("  [ollama] Ollama unavailable, trying Mistral cloud API...")
+        llm_data = _call_mistral(prompt)
+
+    if llm_data is None:
+        print("  [llm] All LLM backends failed, falling back to regex processing")
         return None
 
     # Validate minimal structure
     if not isinstance(llm_data, dict):
-        print("  [ollama] Response is not a dict, falling back to regex")
+        print("  [llm] Response is not a dict, falling back to regex")
         return None
 
     items = _llm_response_to_items(llm_data, dump_id, known_tags)
-    print(f"  [ollama] Extracted {len(items)} items via LLM")
+
+    # Post-processing: Mistral often misclassifies explicit goal requests as tasks.
+    # Run regex goal detection and promote any matching tasks to goals.
+    has_goal_new = any(i["type"] == "goal_new" for i in items)
+    if not has_goal_new:
+        segments = segment_text(content)
+        for seg in segments:
+            goal_items = detect_goals(seg, known_people, ref_date)
+            if goal_items:
+                items.extend(goal_items)
+                has_goal_new = True
+
+    # Remove tasks that duplicate any goal_new items (substring match
+    # because the LLM often shortens titles)
+    goal_new_titles = [i["data"]["title"].lower() for i in items if i["type"] == "goal_new"]
+    if goal_new_titles:
+        def _task_overlaps_goal(task_title):
+            t = task_title.lower()
+            return any(t in gt or gt in t for gt in goal_new_titles)
+        items = [
+            i for i in items
+            if not (i["type"] == "task" and _task_overlaps_goal(i["data"]["title"]))
+        ]
+
+    print(f"  [llm] Extracted {len(items)} items via LLM")
     return items
 
 
@@ -1340,6 +1559,30 @@ def _auto_create_item(conn, item, dump_id):
                     )
                     return tag_id
 
+        elif itype == "goal_new":
+            cur = conn.execute(
+                "INSERT INTO goals (title, description, status, target_date, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    data["title"],
+                    data.get("description"),
+                    "active",
+                    data.get("target_date"),
+                    ts, ts,
+                ),
+            )
+            goal_id = cur.lastrowid
+
+            # Link detected people via goal_people
+            for person_id in data.get("people_ids", []):
+                conn.execute(
+                    "INSERT OR IGNORE INTO goal_people (goal_id, person_id, role) "
+                    "VALUES (?, ?, ?)",
+                    (goal_id, person_id, "involved"),
+                )
+
+            return goal_id
+
         elif itype == "person_new":
             # Insert new person into the people table
             cur = conn.execute(
@@ -1359,8 +1602,11 @@ def _auto_create_item(conn, item, dump_id):
             return data.get("person_id")
 
         elif itype == "goal_link":
-            # Tag the brain dump with a goal-related tag if appropriate
-            return data.get("goal_id")
+            # Only report a created_id when a goal was actually linked
+            goal_id = data.get("goal_id")
+            if goal_id is not None:
+                return goal_id
+            return None
 
     except Exception:
         pass  # Don't fail the whole pipeline for one item
@@ -1451,9 +1697,15 @@ def process_brain_dump(dump_id):
                                 seen_new_names.add(name_key)
                                 all_items.append(pi)
 
-                    # Step 4: Task detection
-                    task_items = detect_tasks(seg, goals_data, seg_dates)
-                    all_items.extend(task_items)
+                    # Step 4a: Goal creation detection (before tasks so
+                    # "create a goal ..." isn't misclassified as a task)
+                    goal_new_items = detect_goals(seg, known_people, ref_date)
+                    all_items.extend(goal_new_items)
+
+                    # Step 4b: Task detection (skip if segment was a goal creation)
+                    if not goal_new_items:
+                        task_items = detect_tasks(seg, goals_data, seg_dates)
+                        all_items.extend(task_items)
 
                     # Step 5: Knowledge extraction
                     knowledge_items = detect_knowledge(seg, dump_id)
