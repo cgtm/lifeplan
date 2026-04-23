@@ -1,3 +1,96 @@
+// ── Theme Manager ───────────────────────────────────────
+const ThemeManager = (() => {
+  const STORAGE_KEY = 'lifeplan-theme';
+  const MODES = ['auto', 'light', 'dark'];
+  const html = document.documentElement;
+  let currentMode = 'auto';
+  let systemDarkMq = window.matchMedia('(prefers-color-scheme: dark)');
+
+  function getStoredMode() {
+    try { return localStorage.getItem(STORAGE_KEY); } catch { return null; }
+  }
+
+  function storeMode(mode) {
+    try { localStorage.setItem(STORAGE_KEY, mode); } catch {}
+  }
+
+  function applyTheme() {
+    let isDark;
+    if (currentMode === 'dark') {
+      isDark = true;
+    } else if (currentMode === 'light') {
+      isDark = false;
+    } else {
+      isDark = systemDarkMq.matches;
+    }
+
+    html.setAttribute('data-theme', isDark ? 'dark' : 'light');
+    html.style.colorScheme = isDark ? 'dark' : 'light';
+
+    // Update theme-color meta tags for the browser/PWA chrome
+    const metaLight = document.querySelector('meta[name="theme-color"][media*="light"]');
+    const metaDark = document.querySelector('meta[name="theme-color"][media*="dark"]');
+    if (metaLight && metaDark) {
+      if (currentMode === 'auto') {
+        metaLight.setAttribute('content', '#fafaf9');
+        metaDark.setAttribute('content', '#1c1917');
+        metaLight.removeAttribute('media');
+        metaDark.removeAttribute('media');
+        metaLight.setAttribute('media', '(prefers-color-scheme: light)');
+        metaDark.setAttribute('media', '(prefers-color-scheme: dark)');
+      } else {
+        metaLight.setAttribute('content', isDark ? '#1c1917' : '#fafaf9');
+        metaDark.setAttribute('content', isDark ? '#1c1917' : '#fafaf9');
+      }
+    }
+
+    updateButtons();
+  }
+
+  function updateButtons() {
+    const desktopBtn = document.getElementById('themeToggle');
+    const mobileLabel = document.getElementById('mobileThemeLabel');
+    if (desktopBtn) desktopBtn.textContent = currentMode;
+    if (mobileLabel) mobileLabel.textContent = currentMode;
+  }
+
+  function cycle() {
+    const idx = MODES.indexOf(currentMode);
+    currentMode = MODES[(idx + 1) % MODES.length];
+    storeMode(currentMode);
+    applyTheme();
+  }
+
+  function init() {
+    const stored = getStoredMode();
+    if (stored && MODES.includes(stored)) {
+      currentMode = stored;
+    }
+    applyTheme();
+
+    // Listen for system theme changes (relevant when mode is 'auto')
+    systemDarkMq.addEventListener('change', () => {
+      if (currentMode === 'auto') applyTheme();
+    });
+
+    // Bind desktop toggle
+    const desktopBtn = document.getElementById('themeToggle');
+    if (desktopBtn) desktopBtn.addEventListener('click', cycle);
+
+    // Bind mobile toggle
+    const mobileBtn = document.getElementById('mobileThemeToggle');
+    if (mobileBtn) mobileBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      cycle();
+    });
+  }
+
+  return { init, cycle };
+})();
+
+// Initialise theme immediately so it applies before paint
+ThemeManager.init();
+
 // ── Utilities ───────────────────────────────────────────
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => document.querySelectorAll(s);
@@ -1697,6 +1790,70 @@ document.addEventListener('keydown', (e) => {
 ['#editPersonOverlay', '#editTaskOverlay', '#editGoalOverlay', '#editKnowledgeOverlay'].forEach(sel => {
   $(sel).addEventListener('click', e => { if (e.target === $(sel)) closeModal($(sel)); });
 });
+
+// ══════════════════════════════════════════════════════════
+// PULL TO REFRESH (touch devices only)
+// ══════════════════════════════════════════════════════════
+
+(() => {
+  // Only activate on touch devices
+  if (!('ontouchstart' in window)) return;
+
+  const indicator = document.getElementById('ptrIndicator');
+  if (!indicator) return;
+
+  let startY = 0;
+  let pulling = false;
+  const THRESHOLD = 60;
+
+  function reloadCurrentView() {
+    if (currentView === 'home') loadHome();
+    else if (currentView === 'dump') loadDumps();
+    else if (currentView === 'goals') loadGoals();
+    else if (currentView === 'tasks') loadTasks();
+    else if (currentView === 'people') loadPeople();
+    else if (currentView === 'journal') loadJournal();
+    else if (currentView === 'knowledge') loadKnowledge();
+  }
+
+  document.addEventListener('touchstart', (e) => {
+    // Only start if at scroll top
+    if (window.scrollY > 0) return;
+    // Don't interfere with inputs or modals
+    if (e.target.closest('.modal') || e.target.closest('.overlay:not(.hidden)')) return;
+    startY = e.touches[0].clientY;
+    pulling = true;
+  }, { passive: true });
+
+  document.addEventListener('touchmove', (e) => {
+    if (!pulling) return;
+    const dy = e.touches[0].clientY - startY;
+    if (dy < 0 || window.scrollY > 0) {
+      indicator.classList.remove('visible');
+      pulling = false;
+      return;
+    }
+    if (dy > 10) {
+      indicator.classList.add('visible');
+      indicator.textContent = dy >= THRESHOLD ? 'Release to refresh' : '\u2193 Pull to refresh';
+    }
+  }, { passive: true });
+
+  document.addEventListener('touchend', () => {
+    if (!pulling) return;
+    pulling = false;
+    if (indicator.classList.contains('visible') && indicator.textContent === 'Release to refresh') {
+      indicator.textContent = 'Refreshing...';
+      indicator.classList.add('refreshing');
+      reloadCurrentView();
+      setTimeout(() => {
+        indicator.classList.remove('visible', 'refreshing');
+      }, 600);
+    } else {
+      indicator.classList.remove('visible');
+    }
+  }, { passive: true });
+})();
 
 // ══════════════════════════════════════════════════════════
 // INIT

@@ -1296,9 +1296,80 @@ main {
   .progress-text { font-size: 0.75rem; }
 }
 
-/* ── Dark theme ───────────────────────────────────────────── */
+/* ── Dark theme (data-attribute driven, JS sets this) ────── */
+[data-theme="dark"] {
+  --bg:        #1c1917;
+  --surface:   #292524;
+  --border:    #44403c;
+  --border-lt: #352f2b;
+  --text:      #fafaf9;
+  --text-2:    #a8a29e;
+  --text-3:    #78716c;
+  --accent:    #e7e5e4;
+  --accent-bg: #352f2b;
+  --tag-bg:    #352f2b;
+  --tag-text:  #d6d3d1;
+  --tag-hover: #44403c;
+  --danger:    #ef4444;
+  --danger-bg: #3b1314;
+  --focus:     #78716c;
+  --green:     #22c55e;
+  --green-bg:  #132a1c;
+  --amber:     #f59e0b;
+  --amber-bg:  #332508;
+  --blue:      #3b82f6;
+  --blue-bg:   #172135;
+  --purple:    #8b5cf6;
+  --purple-bg: #211a3a;
+  --teal:      #14b8a6;
+  --teal-bg:   #0f2926;
+  --gold:      #eab308;
+  --gold-bg:   #302808;
+  --red:       #ef4444;
+  --red-bg:    #3b1314;
+  --shadow:    0 1px 3px rgba(0,0,0,0.2), 0 1px 2px rgba(0,0,0,0.15);
+  --shadow-lg: 0 4px 12px rgba(0,0,0,0.3), 0 1px 3px rgba(0,0,0,0.2);
+}
+
+[data-theme="dark"] .dump-send {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+[data-theme="dark"] .btn-primary {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+[data-theme="dark"] .filter-pill.active {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+[data-theme="dark"] .task-check.checked::after {
+  border-left-color: var(--bg);
+  border-bottom-color: var(--bg);
+}
+
+[data-theme="dark"] .entry-card:hover {
+  background: rgba(53, 47, 43, 0.5);
+}
+
+[data-theme="dark"] .overlay {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+[data-theme="dark"] .search-box:focus,
+[data-theme="dark"] .form-input:focus,
+[data-theme="dark"] .form-textarea:focus,
+[data-theme="dark"] .form-select:focus,
+[data-theme="dark"] .filter-date:focus {
+  box-shadow: 0 0 0 3px rgba(120, 113, 108, 0.25);
+}
+
+/* ── Dark theme fallback (before JS loads) ───────────────── */
 @media (prefers-color-scheme: dark) {
-  :root {
+  html:not([data-theme]) {
     --bg:        #1c1917;
     --surface:   #292524;
     --border:    #44403c;
@@ -1330,45 +1401,42 @@ main {
     --red-bg:    #3b1314;
     --shadow:    0 1px 3px rgba(0,0,0,0.2), 0 1px 2px rgba(0,0,0,0.15);
     --shadow-lg: 0 4px 12px rgba(0,0,0,0.3), 0 1px 3px rgba(0,0,0,0.2);
-  }
-
-  html {
     color-scheme: dark;
   }
 
-  .dump-send {
+  html:not([data-theme]) .dump-send {
     background: var(--accent);
     color: var(--bg);
   }
 
-  .btn-primary {
+  html:not([data-theme]) .btn-primary {
     background: var(--accent);
     color: var(--bg);
   }
 
-  .filter-pill.active {
+  html:not([data-theme]) .filter-pill.active {
     background: var(--accent);
     color: var(--bg);
   }
 
-  .task-check.checked::after {
+  html:not([data-theme]) .task-check.checked::after {
     border-left-color: var(--bg);
     border-bottom-color: var(--bg);
   }
 
-  .entry-card:hover {
+  html:not([data-theme]) .entry-card:hover {
     background: rgba(53, 47, 43, 0.5);
   }
 
-  .overlay {
+  html:not([data-theme]) .overlay {
     background: rgba(0, 0, 0, 0.5);
   }
 
-  .search-box:focus,
-  .form-input:focus,
-  .form-textarea:focus,
-  .form-select:focus,
-  .filter-date:focus {
+  html:not([data-theme]) .search-box:focus,
+  html:not([data-theme]) .form-input:focus,
+  html:not([data-theme]) .form-textarea:focus,
+  html:not([data-theme]) .form-select:focus,
+  html:not([data-theme]) .filter-date:focus {
     box-shadow: 0 0 0 3px rgba(120, 113, 108, 0.25);
   }
 }
@@ -1861,3 +1929,109 @@ main {
 }
 
 .prompt-badge.visible { display: inline-block; }
+
+/* ── Theme toggle ────────────────────────────────────────── */
+.theme-toggle {
+  font-family: var(--font);
+  font-size: 0.625rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-3);
+  cursor: pointer;
+  margin-left: auto;
+  white-space: nowrap;
+  transition: color var(--transition), background var(--transition), border-color var(--transition);
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.theme-toggle:hover {
+  color: var(--text-2);
+  background: var(--accent-bg);
+}
+
+/* Mobile: theme toggle in More menu */
+.nav-more-theme {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  /* Hide desktop theme toggle on mobile */
+  .theme-toggle.nav-desktop { display: none; }
+
+  /* Show theme toggle in More menu */
+  .nav-more-theme {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-family: var(--font);
+    font-size: 0.9375rem;
+    font-weight: 500;
+    color: var(--text);
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border-lt);
+    cursor: pointer;
+    min-height: 52px;
+    transition: background var(--transition);
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .nav-more-theme:hover,
+  .nav-more-theme:active { background: var(--accent-bg); }
+
+  .nav-more-theme-label {
+    font-size: 0.625rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-3);
+    padding: 3px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+  }
+}
+
+/* ── Pull to refresh ─────────────────────────────────────── */
+.ptr-indicator {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  color: var(--text-3);
+  background: var(--bg);
+  padding: 8px;
+  transform: translateY(-100%);
+  transition: transform 200ms ease, opacity 200ms ease;
+  opacity: 0;
+  z-index: 200;
+  pointer-events: none;
+}
+
+.ptr-indicator.visible {
+  transform: translateY(0);
+  opacity: 1;
+}
+
+.ptr-indicator.refreshing {
+  transform: translateY(0);
+  opacity: 1;
+}
+
+@media (max-width: 640px) {
+  .ptr-indicator {
+    padding: 10px;
+    padding-top: calc(10px + env(safe-area-inset-top));
+  }
+}
