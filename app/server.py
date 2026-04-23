@@ -9,6 +9,7 @@ import os
 import re
 import sys
 from http.server import HTTPServer, SimpleHTTPRequestHandler
+from socketserver import ThreadingMixIn
 from urllib.parse import urlparse, parse_qs
 
 # Allow running as both `python -m app.server` (package) and `python app/server.py` (script)
@@ -32,6 +33,7 @@ if __package__ is None or __package__ == "":
         handle_get_knowledge, handle_update_knowledge, handle_delete_knowledge,
         handle_get_dependencies, handle_get_dashboard,
         handle_get_prompts, handle_update_prompt, handle_get_prompt_count,
+        handle_generate_prompts,
         enrich_goal, enrich_task, enrich_person,
     )
 else:
@@ -53,6 +55,7 @@ else:
         handle_get_knowledge, handle_update_knowledge, handle_delete_knowledge,
         handle_get_dependencies, handle_get_dashboard,
         handle_get_prompts, handle_update_prompt, handle_get_prompt_count,
+        handle_generate_prompts,
         enrich_goal, enrich_task, enrich_person,
     )
 
@@ -341,6 +344,11 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json(status, data)
             return True
 
+        if method == "POST" and path == "/api/prompts/generate":
+            status, data = handle_generate_prompts()
+            self.send_json(status, data)
+            return True
+
         if method == "PUT" and path.startswith("/api/prompts/"):
             pid = self.parse_id(path)
             if pid is None:
@@ -374,7 +382,9 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    server = HTTPServer(("127.0.0.1", PORT), Handler)
+    class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+        daemon_threads = True
+    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"\n  lifeplan")
     print(f"  ────────")
     print(f"  http://localhost:{PORT}\n")

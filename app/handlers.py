@@ -728,12 +728,15 @@ def handle_get_prompt_count():
 
 # ── Dashboard handler ────────────────────────────────────────────
 
-def handle_get_dashboard():
+def handle_generate_prompts():
     try:
         maybe_generate_prompts()
-    except Exception:
-        pass
+        return 200, {"status": "ok"}
+    except Exception as e:
+        return 200, {"status": "skipped", "reason": str(e)}
 
+
+def handle_get_dashboard():
     conn = get_db()
     try:
         data = {}
