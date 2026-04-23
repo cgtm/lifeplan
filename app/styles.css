@@ -501,6 +501,134 @@ main {
   white-space: nowrap;
 }
 
+/* ── Task groups (collapsible by goal) ───────────────────── */
+.task-group {
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.task-group-done {
+  opacity: 0.7;
+}
+
+.task-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 14px 20px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: var(--font);
+  text-align: left;
+  transition: background var(--transition);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.task-group-header:hover {
+  background: var(--accent-bg);
+}
+
+.task-group-chevron {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  position: relative;
+}
+
+.task-group-chevron::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid var(--text-3);
+  border-bottom: 1.5px solid var(--text-3);
+  transform: translate(-50%, -65%) rotate(45deg);
+  transition: transform 200ms ease;
+}
+
+.task-group-chevron.expanded::before {
+  transform: translate(-50%, -35%) rotate(-135deg);
+}
+
+.task-group-title {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--text);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-group-done .task-group-title {
+  color: var(--text-3);
+}
+
+.task-group-progress {
+  font-size: 0.6875rem;
+  font-weight: 500;
+  color: var(--text-3);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.task-group-target {
+  font-size: 0.6875rem;
+  font-weight: 500;
+  color: var(--text-3);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.task-group-target-overdue {
+  color: var(--amber);
+}
+
+.task-group-done .task-group-target {
+  color: var(--text-3);
+}
+
+.task-group-bar {
+  width: 48px;
+  height: 4px;
+  background: var(--border-lt);
+  border-radius: 2px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.task-group-bar-fill {
+  height: 100%;
+  background: var(--green);
+  border-radius: 2px;
+  transition: width 400ms ease;
+}
+
+.task-group-body {
+  padding: 0 20px 8px;
+  transition: none;
+}
+
+.task-group-body.collapsed {
+  display: none;
+}
+
+.task-group-body .task-row:first-child {
+  border-top: 1px solid var(--border-lt);
+}
+
+.task-group-body .task-row:last-child {
+  border-bottom: none;
+}
+
 /* ── People ───────────────────────────────────────────────── */
 .person-card {
   cursor: pointer;
@@ -1280,6 +1408,16 @@ main {
   .task-row { font-size: 0.875rem; }
   .task-goal-label { font-size: 0.6875rem; }
 
+  /* ── Task groups (mobile) ──────────────────────────────── */
+  .task-group { margin-bottom: 6px; }
+  .task-group-header { padding: 14px 16px; min-height: 48px; gap: 10px; }
+  .task-group-body { padding: 0 16px 6px; }
+  .task-group-title { font-size: 0.875rem; }
+  .task-group-progress { font-size: 0.75rem; }
+  .task-group-target { font-size: 0.6875rem; }
+  .task-group-bar { width: 40px; height: 5px; }
+  .task-group-chevron { width: 20px; height: 20px; }
+
   .blocker-item { font-size: 0.875rem; }
   .blocker-type { font-size: 0.6875rem; }
 
@@ -1294,6 +1432,12 @@ main {
 
   .section-header { font-size: 0.75rem; }
   .progress-text { font-size: 0.75rem; }
+
+  /* ── Result detail items (touch targets) ─────────── */
+  .result-pill-clickable { padding: 4px 10px; font-size: 0.625rem; }
+  .result-detail-item { padding: 8px 0; min-height: 36px; }
+  .result-detail-title { font-size: 0.8125rem; }
+  .result-detail-type { font-size: 0.625rem; }
 }
 
 /* ── Dark theme (data-attribute driven, JS sets this) ────── */
@@ -1562,6 +1706,73 @@ main {
 .result-pill.tags     { background: var(--tag-bg); color: var(--tag-text); }
 .result-pill.goals    { background: var(--amber-bg); color: var(--amber); }
 
+.result-pill-clickable {
+  cursor: pointer;
+  transition: opacity var(--transition), box-shadow var(--transition);
+}
+
+.result-pill-clickable:hover {
+  opacity: 0.8;
+}
+
+.result-pill-clickable.active {
+  box-shadow: 0 0 0 1.5px currentColor;
+}
+
+/* ── Result details expandable section ─────────────────── */
+.result-details {
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: var(--accent-bg);
+  border-radius: var(--radius);
+  animation: fadeIn 150ms ease both;
+}
+
+.result-detail-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border-lt);
+  transition: background var(--transition);
+  border-radius: var(--radius-sm);
+}
+
+.result-detail-item:last-child { border-bottom: none; }
+
+.result-detail-item[data-view]:not([data-view=""]):hover {
+  background: var(--tag-hover);
+  margin: 0 -4px;
+  padding-left: 4px;
+  padding-right: 4px;
+}
+
+.result-detail-type {
+  font-size: 0.5625rem;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 100px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+
+.result-detail-type.tasks    { background: var(--green-bg); color: var(--green); }
+.result-detail-type.knowledge { background: var(--blue-bg); color: var(--blue); }
+.result-detail-type.people   { background: var(--purple-bg); color: var(--purple); }
+.result-detail-type.tags     { background: var(--tag-bg); color: var(--tag-text); }
+.result-detail-type.goals    { background: var(--amber-bg); color: var(--amber); }
+
+.result-detail-title {
+  font-size: 0.75rem;
+  color: var(--text);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ── Review button ─────────────────────────────────────── */
 .btn-review {
   font-family: var(--font);
@@ -1607,6 +1818,7 @@ main {
 .review-type-badge.person_new { background: var(--purple-bg); color: var(--purple); }
 .review-type-badge.tag        { background: var(--tag-bg); color: var(--tag-text); }
 .review-type-badge.goal_link  { background: var(--amber-bg); color: var(--amber); }
+.review-type-badge.goal_new   { background: var(--amber-bg); color: var(--amber); }
 .review-type-badge.person_mention { background: var(--purple-bg); color: var(--purple); }
 
 .review-confidence {

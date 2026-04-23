@@ -148,7 +148,7 @@ function typePill(type) {
 }
 
 async function api(path, opts = {}) {
-  const res = await fetch(`/api${path}`, {
+  const res = await fetch(`api${path}`, {
     headers: { 'Content-Type': 'application/json' },
     ...opts,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
@@ -258,6 +258,8 @@ async function loadHome() {
   const data = await api('/dashboard');
   renderHome(data);
   loadPrompts();
+  // Refresh prompts in the background — don't block the UI
+  fetch('api/prompts/generate', { method: 'POST' }).catch(() => {});
 }
 
 function renderHome(data) {
@@ -355,6 +357,7 @@ function renderHome(data) {
         </div>
       `).join('')}
     `;
+    bindResultPills('#homeRecentDumps');
   } else {
     $('#homeRecentDumps').innerHTML = '';
   }
@@ -459,7 +462,7 @@ function buildCompletionMessage(result) {
       if (i.status === 'auto_created' || i.status === 'approved' || i.status === 'suggested') {
         const t = i.type;
         const label = (t === 'person_mention' || t === 'person_new') ? 'person' :
-                      t === 'goal_link' ? 'goal' :
+                      (t === 'goal_link' || t === 'goal_new') ? 'goal' :
                       t === 'knowledge' ? 'knowledge' :
                       t === 'tag' ? 'tag' :
                       t === 'task' ? 'task' : t;
@@ -495,9 +498,12 @@ function updatePromptBadge(count) {
 
 async function loadPrompts() {
   try {
-    allPrompts = await api('/prompts');
+    const [prompts, countData] = await Promise.all([
+      api('/prompts'),
+      api('/prompts/count'),
+    ]);
+    allPrompts = prompts;
     renderPrompts();
-    const countData = await api('/prompts/count');
     updatePromptBadge(countData.count || 0);
   } catch (e) {
     // Prompts are non-critical; don't break the page
@@ -651,25 +657,95 @@ function processingResultsPills(d) {
   if (!d.processed_items || !d.processed_items.items) return '';
   const items = d.processed_items.items;
   const counts = {};
+  const itemsByCategory = {};
   items.forEach(i => {
     if (i.status === 'auto_created' || i.status === 'approved') {
       const t = i.type;
+      // For goal_link, only count if something was actually linked
+      if (t === 'goal_link' && !i.created_id) return;
       const label = t === 'person_mention' ? 'people' :
                     t === 'person_new' ? 'people' :
                     t === 'goal_link' ? 'goals' :
+                    t === 'goal_new' ? 'goals' :
                     t === 'knowledge' ? 'knowledge' :
                     t === 'tag' ? 'tags' :
                     t === 'task' ? 'tasks' : t;
       counts[label] = (counts[label] || 0) + 1;
+      if (!itemsByCategory[label]) itemsByCategory[label] = [];
+      itemsByCategory[label].push(i);
     }
   });
   if (Object.keys(counts).length === 0) return '';
   const singulars = { tasks: 'task', people: 'person', knowledge: 'knowledge', tags: 'tag', goals: 'goal' };
+  const dumpId = d.id || 0;
   const pills = Object.entries(counts).map(([label, count]) => {
     const display = count === 1 ? (singulars[label] || label) : label;
-    return `<span class="result-pill ${esc(label)}">${count} ${esc(display)}</span>`;
+    return `<span class="result-pill result-pill-clickable ${esc(label)}" data-dump-id="${dumpId}" data-category="${esc(label)}">${count} ${esc(display)}</span>`;
   }).join('');
-  return `<div class="processing-results">${pills}</div>`;
+  const detailItems = Object.entries(itemsByCategory).map(([label, catItems]) => {
+    return catItems.map(i => {
+      const t = i.type;
+      const data = i.data || {};
+      let title = '';
+      let viewTarget = '';
+      if (t === 'task') { title = data.title || 'Untitled task'; viewTarget = 'tasks'; }
+      else if (t === 'goal_link') { title = data.goal_title || 'Linked goal'; viewTarget = 'goals'; }
+      else if (t === 'goal_new') { title = data.title || 'New goal'; viewTarget = 'goals'; }
+      else if (t === 'person_new') { title = data.name || 'New person'; viewTarget = 'people'; }
+      else if (t === 'person_mention') { title = data.person_name || 'Person'; viewTarget = 'people'; }
+      else if (t === 'knowledge') { title = data.title || 'Knowledge'; viewTarget = 'knowledge'; }
+      else if (t === 'tag') { title = data.tag_name || 'Tag'; viewTarget = ''; }
+      else { title = data.title || data.name || t; viewTarget = ''; }
+      const typeLabel = t === 'person_mention' ? 'person' :
+                        t === 'person_new' ? 'person' :
+                        t === 'goal_link' ? 'goal' :
+                        t === 'goal_new' ? 'goal' : t;
+      const goalId = (t === 'goal_link' || t === 'goal_new') ? (i.created_id || '') : '';
+      return `<div class="result-detail-item" data-view="${esc(viewTarget)}" data-goal-id="${goalId}">
+        <span class="result-detail-type ${esc(label)}">${esc(typeLabel)}</span>
+        <span class="result-detail-title">${esc(title)}</span>
+      </div>`;
+    }).join('');
+  }).join('');
+  return `<div class="processing-results" data-dump-id="${dumpId}">${pills}</div>
+    <div class="result-details" id="resultDetails-${dumpId}" style="display:none">${detailItems}</div>`;
+}
+
+function bindResultPills(container) {
+  const el = typeof container === 'string' ? $(container) : container;
+  if (!el) return;
+  el.querySelectorAll('.result-pill-clickable').forEach(pill => {
+    pill.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const dumpId = pill.dataset.dumpId;
+      const detailsEl = el.querySelector(`#resultDetails-${dumpId}`);
+      if (!detailsEl) return;
+      const isVisible = detailsEl.style.display !== 'none';
+      // Close all other open details in this container
+      el.querySelectorAll('.result-details').forEach(d => d.style.display = 'none');
+      el.querySelectorAll('.result-pill-clickable').forEach(p => p.classList.remove('active'));
+      if (!isVisible) {
+        detailsEl.style.display = 'block';
+        pill.classList.add('active');
+      }
+    });
+  });
+  // Bind navigation on detail items
+  el.querySelectorAll('.result-detail-item').forEach(item => {
+    const viewTarget = item.dataset.view;
+    if (!viewTarget) return;
+    item.style.cursor = 'pointer';
+    item.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const goalId = item.dataset.goalId;
+      if (viewTarget === 'goals' && goalId) {
+        navigate('goals');
+        setTimeout(() => openGoalDetail(parseInt(goalId)), 200);
+      } else {
+        navigate(viewTarget);
+      }
+    });
+  });
 }
 
 function renderDumps() {
@@ -725,6 +801,9 @@ function renderDumps() {
       loadDumps();
     });
   });
+
+  // Bind clickable result pills
+  bindResultPills(el);
 }
 
 // Dump filter pills
@@ -801,6 +880,7 @@ function reviewItemTitle(item) {
   if (t === 'person_mention') return `Mention: ${d.person_name || 'Unknown'}`;
   if (t === 'tag') return `Tag: ${d.tag_name || ''}`;
   if (t === 'goal_link') return `Link to: ${d.goal_title || 'Unknown goal'}`;
+  if (t === 'goal_new') return `New goal: ${d.title || 'Unknown goal'}`;
   return t;
 }
 
@@ -812,6 +892,7 @@ function reviewItemTypeLabel(type) {
     'person_mention': 'Person',
     'tag': 'Tag',
     'goal_link': 'Goal Link',
+    'goal_new': 'New Goal',
   };
   return labels[type] || type;
 }
@@ -865,6 +946,8 @@ function openReviewModal(dump) {
             <input type="text" class="form-input" id="editTitle-${item._index}" value="${esc(item.data.title || '')}" placeholder="Title">
           ` : item.type === 'person_new' ? `
             <input type="text" class="form-input" id="editTitle-${item._index}" value="${esc(item.data.name || '')}" placeholder="Person name">
+          ` : item.type === 'goal_new' ? `
+            <input type="text" class="form-input" id="editTitle-${item._index}" value="${esc(item.data.title || '')}" placeholder="Goal title">
           ` : `
             <input type="text" class="form-input" id="editTitle-${item._index}" value="${esc(item.data.tag_name || item.data.title || '')}" placeholder="Value">
           `}
@@ -921,6 +1004,7 @@ function openReviewModal(dump) {
           if (item.type === 'task') editData = { title: newVal };
           else if (item.type === 'knowledge') editData = { title: newVal };
           else if (item.type === 'person_new') editData = { name: newVal };
+          else if (item.type === 'goal_new') editData = { title: newVal };
           else if (item.type === 'tag') editData = { tag_name: newVal };
         }
 
@@ -1156,37 +1240,21 @@ $('#goalFilters').addEventListener('click', e => {
 // ══════════════════════════════════════════════════════════
 
 let taskStatusFilter = 'all';
-let taskGoalFilter = null;
 let allTasks = [];
+let _taskGoalsCache = []; // goals data for sorting by target_date
+const _taskGroupCollapsed = new Map(); // tracks manual collapse state by goalId
 
 async function loadTasks() {
   const params = new URLSearchParams();
   if (taskStatusFilter !== 'all') params.set('status', taskStatusFilter);
-  if (taskGoalFilter) params.set('goal_id', taskGoalFilter);
   const qs = params.toString();
-  allTasks = await api(`/tasks${qs ? '?' + qs : ''}`);
-
-  // Load goals for filter pills
-  const goals = await api('/goals');
-  renderTaskGoalFilters(goals);
+  const [tasks, goals] = await Promise.all([
+    api(`/tasks${qs ? '?' + qs : ''}`),
+    api('/goals'),
+  ]);
+  allTasks = tasks;
+  _taskGoalsCache = goals;
   renderTasks();
-}
-
-function renderTaskGoalFilters(goals) {
-  const el = $('#taskGoalFilters');
-  el.innerHTML = `
-    <span class="filter-pill ${!taskGoalFilter ? 'active' : ''}" data-goal-id="">All goals</span>
-    ${goals.map(g => `
-      <span class="filter-pill ${taskGoalFilter == g.id ? 'active' : ''}" data-goal-id="${g.id}">${esc(g.title)}</span>
-    `).join('')}
-  `;
-  el.querySelectorAll('.filter-pill').forEach(pill => {
-    pill.addEventListener('click', () => {
-      taskGoalFilter = pill.dataset.goalId || null;
-      el.querySelectorAll('.filter-pill').forEach(p => p.classList.toggle('active', (p.dataset.goalId || null) === taskGoalFilter));
-      loadTasks();
-    });
-  });
 }
 
 function renderTasks() {
@@ -1196,32 +1264,120 @@ function renderTasks() {
     return;
   }
 
-  // Group by goal
-  const grouped = {};
+  // Group tasks by goal
+  const groupMap = new Map();
   allTasks.forEach(t => {
-    const key = t.goal_title || 'Unlinked';
-    if (!grouped[key]) grouped[key] = [];
-    grouped[key].push(t);
+    const key = t.goal_id || 'unlinked';
+    const title = t.goal_title || 'Unlinked';
+    if (!groupMap.has(key)) groupMap.set(key, { goalId: key, goalTitle: title, tasks: [] });
+    groupMap.get(key).tasks.push(t);
   });
 
-  el.innerHTML = Object.entries(grouped).map(([goalTitle, tasks]) => `
-    <div style="margin-bottom:24px" class="fade-in">
-      <div class="section-header">${esc(goalTitle)}</div>
-      ${tasks.map(t => `
-        <div class="task-row">
-          <div class="task-check ${t.status === 'completed' ? 'checked' : ''}" data-task-id="${t.id}" data-status="${t.status}"></div>
-          <span class="task-title ${t.status === 'completed' ? 'done' : ''}">${esc(t.title)}</span>
-          ${t.due_date ? `<span style="font-size:0.625rem;color:var(--text-3)">${fmtDate(t.due_date)}</span>` : ''}
-          ${t.people && t.people.length ? `<span style="font-size:0.625rem;color:var(--text-3)">${t.people.map(p => esc(p.name)).join(', ')}</span>` : ''}
-          ${t.status !== 'completed' && t.status !== 'active' ? statusPill(t.status) : ''}
-          ${actionsHtml('openEditTask(' + t.id + ')', 'deleteTask(' + t.id + ')')}
-        </div>
-      `).join('')}
-    </div>
-  `).join('');
+  // Build sorted groups: within each group, sort active tasks by date then completed to bottom
+  const groups = Array.from(groupMap.values()).map(g => {
+    const completed = g.tasks.filter(t => t.status === 'completed');
+    const active = g.tasks.filter(t => t.status !== 'completed');
+    // Among active: tasks with due_date first (soonest-first), then tasks without
+    const activeDated = active.filter(t => t.due_date).sort((a, b) => a.due_date.localeCompare(b.due_date));
+    const activeUndated = active.filter(t => !t.due_date);
+    const sorted = [...activeDated, ...activeUndated, ...completed];
+    const allDone = active.length === 0 && completed.length > 0;
 
+    // Calculate earliest date for group ordering:
+    // Task dates take priority over goal target_date on this page
+    const goalData = g.goalId !== 'unlinked' ? _taskGoalsCache.find(gl => gl.id === g.goalId) : null;
+    const goalDate = goalData && goalData.target_date ? goalData.target_date : null;
+    const earliestTaskDate = activeDated.length > 0 ? activeDated[0].due_date : null;
+    const earliestDate = earliestTaskDate || goalDate;
+
+    return { ...g, tasks: sorted, completedCount: completed.length, totalCount: g.tasks.length, allDone, earliestTaskDate, earliestDate, goalTargetDate: goalDate };
+  });
+
+  // Sort groups: all-completed to bottom, then by date priority:
+  // 1. Groups with task dates (soonest-first)
+  // 2. Groups with only a goal date (soonest-first)
+  // 3. Groups with no dates at all
+  groups.sort((a, b) => {
+    if (a.allDone && !b.allDone) return 1;
+    if (!a.allDone && b.allDone) return -1;
+    if (a.allDone && b.allDone) return 0;
+    // Task dates take priority over goal-only dates
+    const aHasTaskDate = !!a.earliestTaskDate;
+    const bHasTaskDate = !!b.earliestTaskDate;
+    if (aHasTaskDate && !bHasTaskDate) return -1;
+    if (!aHasTaskDate && bHasTaskDate) return 1;
+    // Same tier — sort by earliest date
+    if (a.earliestDate && !b.earliestDate) return -1;
+    if (!a.earliestDate && b.earliestDate) return 1;
+    if (a.earliestDate && b.earliestDate) return a.earliestDate.localeCompare(b.earliestDate);
+    return 0;
+  });
+
+  el.innerHTML = groups.map(g => {
+    // Determine collapse state: manual override > default (collapsed if all done)
+    const hasManual = _taskGroupCollapsed.has(g.goalId);
+    const collapsed = hasManual ? _taskGroupCollapsed.get(g.goalId) : g.allDone;
+    const pct = g.totalCount > 0 ? Math.round((g.completedCount / g.totalCount) * 100) : 0;
+
+    // Format goal target date as compact "Mon YYYY" and check if overdue
+    let targetDateHtml = '';
+    if (g.goalTargetDate) {
+      const td = new Date(g.goalTargetDate + 'T00:00:00');
+      const label = td.toLocaleDateString('en-GB', { month: 'short', year: 'numeric' });
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const isOverdue = td < today && !g.allDone;
+      targetDateHtml = `<span class="task-group-target${isOverdue ? ' task-group-target-overdue' : ''}">${isOverdue ? 'overdue \u00b7 ' : ''}${esc(label)}</span>`;
+    }
+
+    return `
+      <div class="task-group fade-in ${g.allDone ? 'task-group-done' : ''}" data-group-id="${esc(String(g.goalId))}">
+        <button class="task-group-header" aria-expanded="${!collapsed}">
+          <span class="task-group-chevron ${collapsed ? '' : 'expanded'}"></span>
+          <span class="task-group-title">${esc(g.goalTitle)}</span>
+          <span class="task-group-progress">${g.completedCount}/${g.totalCount}</span>
+          ${targetDateHtml}
+          <div class="task-group-bar"><div class="task-group-bar-fill" style="width:${pct}%"></div></div>
+        </button>
+        <div class="task-group-body ${collapsed ? 'collapsed' : ''}">
+          ${g.tasks.map(t => `
+            <div class="task-row">
+              <div class="task-check ${t.status === 'completed' ? 'checked' : ''}" data-task-id="${t.id}" data-status="${t.status}"></div>
+              <span class="task-title ${t.status === 'completed' ? 'done' : ''}">${esc(t.title)}</span>
+              ${t.due_date ? `<span style="font-size:0.625rem;color:var(--text-3)">${fmtDate(t.due_date)}</span>` : ''}
+              ${t.people && t.people.length ? `<span style="font-size:0.625rem;color:var(--text-3)">${t.people.map(p => esc(p.name)).join(', ')}</span>` : ''}
+              ${t.status !== 'completed' && t.status !== 'active' ? statusPill(t.status) : ''}
+              ${actionsHtml('openEditTask(' + t.id + ')', 'deleteTask(' + t.id + ')')}
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  // Bind collapse/expand
+  el.querySelectorAll('.task-group-header').forEach(header => {
+    header.addEventListener('click', () => {
+      const group = header.closest('.task-group');
+      const groupId = group.dataset.groupId;
+      const body = group.querySelector('.task-group-body');
+      const chevron = header.querySelector('.task-group-chevron');
+      const isCollapsed = body.classList.contains('collapsed');
+
+      body.classList.toggle('collapsed', !isCollapsed);
+      chevron.classList.toggle('expanded', isCollapsed);
+      header.setAttribute('aria-expanded', isCollapsed);
+
+      // Store manual override
+      const key = groupId === 'unlinked' ? 'unlinked' : (isNaN(groupId) ? groupId : parseInt(groupId));
+      _taskGroupCollapsed.set(key, !isCollapsed);
+    });
+  });
+
+  // Bind task completion
   el.querySelectorAll('.task-check:not(.checked)').forEach(check => {
-    check.addEventListener('click', async () => {
+    check.addEventListener('click', async (e) => {
+      e.stopPropagation();
       const taskId = check.dataset.taskId;
       await api(`/tasks/${taskId}`, { method: 'PUT', body: { status: 'completed' } });
       loadTasks();
