@@ -4,6 +4,7 @@ data/*.db-wal
 data/*.db-shm
 data/backups/
 data/server.log
+data/prompts.log
 
 # Claude Code settings (personal, not project-level)
 .claude/settings.local.json
