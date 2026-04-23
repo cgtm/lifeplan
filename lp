@@ -16,8 +16,9 @@ case "${1:-help}" in
     echo "lifeplan stopped"
     ;;
   restart)
-    "$0" stop
-    "$0" start
+    launchctl kickstart -k "gui/$(id -u)/com.cam.lifeplan"
+    sleep 1
+    curl -s http://localhost:3131/api/dashboard > /dev/null && echo "lifeplan restarted" || echo "Failed to restart"
     ;;
   status)
     if launchctl list | grep -q lifeplan 2>/dev/null; then
