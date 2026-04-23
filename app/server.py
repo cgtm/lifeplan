@@ -66,6 +66,8 @@ class Handler(SimpleHTTPRequestHandler):
         **SimpleHTTPRequestHandler.extensions_map,
         '.css': 'text/css',
         '.js': 'application/javascript',
+        '.json': 'application/json',
+        '.png': 'image/png',
     }
 
     def __init__(self, *args, **kwargs):

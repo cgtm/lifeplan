@@ -1004,15 +1004,183 @@ main {
 
 /* ── Responsive ───────────────────────────────────────────── */
 @media (max-width: 640px) {
-  main { padding: 24px 16px 100px; }
-  .nav-inner { padding: 0 16px; gap: 2px; overflow-x: auto; }
-  .nav-brand { margin-right: 12px; }
+
+  /* ── Bottom nav bar ──────────────────────────────────── */
+  nav {
+    position: fixed;
+    bottom: 0;
+    top: auto;
+    border-bottom: none;
+    border-top: 1px solid var(--border);
+    padding-bottom: env(safe-area-inset-bottom);
+    background: rgba(250, 250, 249, 0.95);
+  }
+
+  .nav-inner {
+    padding: 0;
+    gap: 0;
+    height: auto;
+    justify-content: space-around;
+    overflow-x: visible;
+  }
+
+  .nav-brand { display: none; }
+
+  .nav-link {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.625rem;
+    padding: 10px 2px 8px;
+    border-radius: 0;
+    text-align: center;
+    min-width: 0;
+  }
+
   .nav-link kbd { display: none; }
-  .search-box { width: 100%; }
+
+  .nav-badge, .prompt-badge {
+    position: absolute;
+    top: 4px;
+    right: calc(50% - 18px);
+    margin-left: 0;
+  }
+
+  .nav-link { position: relative; }
+
+  /* ── Main content adjustments ────────────────────────── */
+  main {
+    padding: 16px 16px 88px;
+    padding-top: calc(16px + env(safe-area-inset-top));
+  }
+
+  /* ── Page headers ────────────────────────────────────── */
+  .page-header { margin-bottom: 20px; }
+  .page-header h1 { font-size: 1.125rem; }
+
+  /* ── Cards ───────────────────────────────────────────── */
+  .card { padding: 16px; }
+  .hero-goal { padding: 16px; margin-bottom: 24px; }
+  .dump-zone-home { padding: 16px; margin-bottom: 24px; }
+  .dump-zone { padding: 16px; margin-bottom: 20px; }
+
+  /* ── Touch targets — minimum 44px ────────────────────── */
+  .filter-pill {
+    padding: 8px 14px;
+    font-size: 0.75rem;
+  }
+
   .filters { gap: 6px; }
-  .hero-goal { padding: 16px; }
-  .dump-zone-home { padding: 16px; }
-  .modal { border-radius: 12px 12px 0 0; margin-top: auto; }
+
+  .task-check {
+    width: 24px;
+    height: 24px;
+  }
+
+  .task-row {
+    padding: 12px 0;
+    gap: 12px;
+    min-height: 44px;
+  }
+
+  .blocker-item { min-height: 44px; }
+
+  .btn, .btn-primary, .btn-danger, .btn-review {
+    padding: 10px 16px;
+    font-size: 0.8125rem;
+  }
+
+  .prompt-btn {
+    padding: 8px 14px;
+    font-size: 0.75rem;
+  }
+
+  /* ── Action menus always visible on touch ────────────── */
+  .card-actions-btn { opacity: 0.6; }
+
+  /* ── Search & filters ────────────────────────────────── */
+  .search-box { width: 100%; }
+
+  .journal-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .journal-toolbar-left {
+    flex-direction: column;
+    gap: 8px;
+    width: 100%;
+  }
+
+  .journal-toolbar-left .search-box,
+  .journal-toolbar-left .filter-date {
+    width: 100%;
+  }
+
+  #journalNew { width: 100%; text-align: center; }
+
+  /* Knowledge view filters: stack search above pills */
+  #view-knowledge .filters {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  #knowledgeSearch { width: 100%; margin-bottom: 4px; }
+
+  /* ── Modals as bottom sheets ─────────────────────────── */
+  .overlay {
+    align-items: flex-end;
+    padding-top: 0;
+  }
+
+  .modal {
+    width: 100vw;
+    max-height: 85vh;
+    border-radius: 16px 16px 0 0;
+    margin-top: auto;
+  }
+
+  .modal-header { padding: 16px 16px 0; }
+  .modal-body { padding: 16px; }
+  .modal-footer { padding: 0 16px 16px; }
+
+  /* Drag indicator for bottom sheets */
+  .modal::before {
+    content: '';
+    display: block;
+    width: 36px;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--border);
+    margin: 8px auto 0;
+  }
+
+  .form-textarea { min-height: 120px; }
+  .form-input, .form-select, .form-textarea { font-size: 1rem; }
+
+  /* ── Prompt cards ────────────────────────────────────── */
+  .prompt-card { padding: 14px 16px; gap: 10px; }
+
+  /* ── Dump textarea ───────────────────────────────────── */
+  .dump-textarea { font-size: 1rem; }
+
+  /* ── Progress bar ────────────────────────────────────── */
+  .progress-bar { height: 6px; margin-top: 10px; }
+
+  /* ── People cards ────────────────────────────────────── */
+  .person-avatar { width: 40px; height: 40px; font-size: 0.875rem; }
+
+  /* ── Review modal ────────────────────────────────────── */
+  .review-actions { flex-wrap: wrap; }
+  .review-actions button { flex: 1; min-width: 80px; text-align: center; padding: 10px 8px; }
+
+  /* ── Section headers ─────────────────────────────────── */
+  .section-header { margin-top: 4px; }
+
+  /* ── Goal card meta ──────────────────────────────────── */
+  .goal-card-header { flex-wrap: wrap; gap: 6px; }
 }
 
 /* ── Transitions ──────────────────────────────────────────── */
