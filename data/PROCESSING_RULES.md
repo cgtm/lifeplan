@@ -1,6 +1,6 @@
 # Brain Dump Auto-Processing Specification
 
-**Version:** 1.0
+**Version:** 1.1
 **Created:** 2026-04-20
 **Author:** Reed (Knowledge Architect)
 **Implementer:** Lumen (Full-Stack Engineer)
@@ -40,7 +40,7 @@ The `processed_items` column stores a JSON object with the following structure:
   "processed_at": "2026-04-20T14:30:00Z",
   "items": [
     {
-      "type": "task | knowledge | person_mention | person_new | tag | goal_link",
+      "type": "task | knowledge | person_mention | person_new | tag | goal_link | goal_new",
       "confidence": 0.0-1.0,
       "status": "auto_created | suggested | approved | rejected",
       "source_text": "the exact substring from the brain dump that triggered this extraction",
@@ -288,6 +288,48 @@ New person suggestions should always go to review (never auto-create people).
 
 ---
 
+### Rule 4b: Goal Creation Detection
+
+**Goal:** Detect when Cam is stating a new life goal and create a goal row.
+
+**Trigger patterns** (case-insensitive):
+
+| Pattern Category | Examples |
+|-----------------|----------|
+| Explicit markers | "new goal:", "goal:", "my goal is", "I want to", "life goal:" |
+| Aspirational statements | "I'm going to [verb]", "I plan to [verb]", "this year I will" |
+
+**Extraction logic:**
+
+1. For each segment matching a trigger pattern, extract:
+   - `title`: A concise goal name (max 80 chars)
+   - `description`: The full original text for context
+   - `status`: Default `'active'`
+
+**Confidence scoring:**
+
+| Condition | Score |
+|-----------|-------|
+| Explicit marker ("new goal:", "goal:", "my goal is") | 0.90 |
+| Aspirational with clear objective ("I plan to move to Berlin") | 0.75 |
+| Vague aspiration ("I want to be healthier") | 0.55 |
+
+**Data shape:**
+```json
+{
+  "type": "goal_new",
+  "data": {
+    "title": "Move to Berlin",
+    "description": "new goal: move to Berlin by end of 2027",
+    "status": "active"
+  }
+}
+```
+
+**Post-processing note:** If an item is classified as a task but contains goal-like language (e.g. "new goal: ..."), post-processing should reclassify it as `goal_new`.
+
+---
+
 ### Rule 5: Tag Generation
 
 **Goal:** Extract topic keywords and match against existing tags or suggest new ones.
@@ -406,14 +448,20 @@ For items with status `suggested`, the review UI should present:
 Brain dump submitted
         |
         v
-[1. Segment splitting]
-    Split content into lines and sentences.
-    Preserve line breaks as segment boundaries.
-        |
+[1. LLM extraction (three-tier fallback)]
+    Primary:  Ollama (local Mistral 7B)
+    Fallback: Mistral cloud API (mistral-small-latest)
+    Fallback: Regex pattern matching
+    |
+    |-- LLM path produces structured JSON with types,
+    |   confidence scores, and extracted data per Rules 1-6.
+    |
         v
-[2. Date detection (Rule 6)]
-    First pass: find all dates/deadlines.
-    Store as annotations on segments.
+[2. Post-processing]
+    Fix goal misclassification (tasks with goal-like
+    language reclassified as goal_new, Rule 4b).
+    Attach dates to tasks (Rule 6).
+    Resolve goal links (Rule 4).
         |
         v
 [3. People detection (Rule 2)]
@@ -421,35 +469,19 @@ Brain dump submitted
     Detect potential new people.
         |
         v
-[4. Task detection (Rule 1)]
-    Find actionable items.
-    Attach dates from step 2.
-    Attempt goal linking (Rule 4).
-        |
-        v
-[5. Knowledge extraction (Rule 3)]
-    Find facts, decisions, learnings.
-    Attach source reference.
-        |
-        v
-[6. Goal relevance (Rule 4)]
-    Match remaining content against goals.
-    Link extracted items where confident.
-        |
-        v
-[7. Tag generation (Rule 5)]
+[4. Tag generation (Rule 5)]
     Match existing tags.
     Suggest new tags.
     Associate tags with extracted items.
         |
         v
-[8. Confidence filtering (Rule 7)]
+[5. Confidence filtering (Rule 7)]
     >= 0.80: auto-create in database
     0.50-0.79: store as suggestion
     < 0.50: discard
         |
         v
-[9. Store results]
+[6. Store results]
     Write processed_items JSON to brain_dumps row.
     Set processing_status ('processed' or 'needs_review').
     Set processed_at timestamp.
@@ -497,7 +529,7 @@ The old `processed` column (INTEGER 0/1) is retained for backward compatibility.
 
 ## Implementation Notes for Lumen
 
-1. **LLM-assisted extraction.** The pattern matching described above is the minimum baseline. Lumen should use an LLM call (Claude API) as the primary extraction engine, with these rules as the system prompt / structured output schema. The patterns serve as the specification for what the LLM should find, not as a regex-only implementation.
+1. **LLM-assisted extraction.** The pattern matching described above is the minimum baseline. The primary extraction engine is Ollama (local Mistral 7B), with Mistral cloud API (`mistral-small-latest`) as the first fallback and regex as the final fallback. These rules serve as the specification for what the LLM should find, not as a regex-only implementation.
 
 2. **Segment splitting.** Start simple: split on newlines and sentence-ending punctuation. Do not over-segment -- keep "need to call Dr. Osei about the visa medical before next week" as one segment.
 

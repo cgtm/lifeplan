@@ -1,8 +1,19 @@
 # lifeplan
 
-Personal knowledge management system — brain dumps, goals, tasks, people, journal, and knowledge items backed by SQLite with LLM-powered processing via Ollama.
+Personal knowledge management system — brain dumps, goals, tasks, people, journal, and knowledge items backed by SQLite with LLM-powered processing via three-tier fallback (Ollama local -> Mistral cloud API -> regex).
 
 ## Run
+
+**Via `lp` command (recommended):**
+
+```
+./lp start       # start the server via launchd
+./lp restart     # restart
+./lp logs        # tail the logs
+./lp stop        # stop the server
+```
+
+**Manual:**
 
 ```
 cd /Users/cam/lifeplan/app
@@ -11,7 +22,7 @@ python3 server.py
 
 Then open **http://localhost:3131**.
 
-Requires [Ollama](https://ollama.com) running locally with the Mistral model for brain dump processing. Falls back to regex if Ollama is unavailable.
+Requires [Ollama](https://ollama.com) running locally with the Mistral model for brain dump processing. Falls back to Mistral cloud API, then regex if both are unavailable. Runs via launchd.
 
 ## Keyboard shortcuts
 
@@ -59,6 +70,10 @@ Requires [Ollama](https://ollama.com) running locally with the Mistral model for
 | `PUT` | `/api/entries/:id` | Update an entry |
 | `DELETE` | `/api/entries/:id` | Delete an entry |
 | `GET` | `/api/tags` | List all tags |
+| **Prompts** | | |
+| `POST` | `/api/prompts/generate` | Generate proactive prompts |
+| `GET` | `/api/prompts` | List prompts |
+| `GET` | `/api/prompts/count` | Get prompt count |
 | **Other** | | |
 | `GET` | `/api/dashboard` | Home dashboard data |
 | `GET` | `/api/dependencies` | Dependency graph |
@@ -67,13 +82,20 @@ Requires [Ollama](https://ollama.com) running locally with the Mistral model for
 
 ```
 app/
-  server.py       HTTP routing and startup
-  db.py           Database connection and tag helpers
-  processing.py   Brain dump processing (regex + LLM)
-  handlers.py     REST API handlers
-  index.html      HTML markup
-  styles.css      Styling
-  app.js          Frontend behaviour
+  server.py          HTTP routing and startup
+  db.py              Database connection and tag helpers
+  processing.py      Brain dump processing (regex + LLM)
+  generate_prompts.py  Proactive prompt generation
+  handlers.py        REST API handlers
+  index.html         HTML markup
+  styles.css         Styling
+  app.js             Frontend behaviour
+  manifest.json      PWA manifest
+  icon-*.png         App icons
 ```
 
-No external dependencies. Python 3 stdlib + SQLite + Ollama.
+## Deployment
+
+Deployed to `https://your-domain.example/lifeplan` on a DigitalOcean droplet with nginx + HTTP Basic Auth. `deploy.sh` pushes updates via rsync.
+
+No external dependencies beyond Python 3 stdlib + SQLite + Ollama. Requires a `.env` file with `MISTRAL_API_KEY` for the cloud API fallback tier.

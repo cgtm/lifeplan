@@ -2,7 +2,7 @@
 
 **Version:** 0.3 (brain dump auto-processing)
 **Created:** 2026-04-20
-**Last updated:** 2026-04-20
+**Last updated:** 2026-04-23
 **Author:** Reed (Knowledge Architect)
 
 ## Overview
@@ -405,19 +405,21 @@ people -----tags-----------+
 knowledge_items ----tags----> tags
 ```
 
-## Current Data Summary (as of 2026-04-20)
+## Current Data Summary
 
-| Table            | Count | Notes                                           |
-|------------------|-------|-------------------------------------------------|
-| journal_entries  | 1     | Seed entry from day one                         |
-| brain_dumps      | 0     | Ready for use                                   |
-| people           | 5     | Nadia, Priya, Sam, Jess, Minji            |
-| goals            | 9     | 4 active, 2 completed, 1 stalled, 1 someday     |
-| tasks            | 35    | 12 active, 22 completed, 1 someday              |
-| dependencies     | 8     | 4 blocking Move to Seoul                        |
-| knowledge_items  | 7     | 4 facts, 1 decision, 1 learning, 1 reference    |
-| external_systems | 1     | Finance App                                     |
-| tags             | 24    | Shared across all content types                 |
+> Static snapshots go stale quickly. Query the database directly for current counts:
+>
+> ```sql
+> SELECT 'journal_entries' AS tbl, COUNT(*) AS n FROM journal_entries
+> UNION ALL SELECT 'brain_dumps', COUNT(*) FROM brain_dumps
+> UNION ALL SELECT 'people', COUNT(*) FROM people
+> UNION ALL SELECT 'goals', COUNT(*) FROM goals
+> UNION ALL SELECT 'tasks', COUNT(*) FROM tasks
+> UNION ALL SELECT 'dependencies', COUNT(*) FROM dependencies
+> UNION ALL SELECT 'knowledge_items', COUNT(*) FROM knowledge_items
+> UNION ALL SELECT 'external_systems', COUNT(*) FROM external_systems
+> UNION ALL SELECT 'tags', COUNT(*) FROM tags;
+> ```
 
 ## Design Decisions
 
