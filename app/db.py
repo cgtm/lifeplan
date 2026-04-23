@@ -1,13 +1,87 @@
 """
 lifeplan — database helpers
-Database connection, utility functions, and tag helpers.
+Database connection, utility functions, tag helpers, and shared LLM utilities.
 """
 
+import json
 import os
 import sqlite3
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "lifeplan.db")
+ENV_PATH = os.path.join(os.path.dirname(__file__), "..", ".env")
+
+# ── Mistral cloud API config ────────────────────────────────────
+MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
+MISTRAL_MODEL = "mistral-small-latest"
+MISTRAL_TIMEOUT = 45  # seconds
+_mistral_api_key = None
+
+
+def _load_env():
+    """Load key=value pairs from the project .env file (stdlib only)."""
+    env = {}
+    try:
+        with open(ENV_PATH, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                env[key.strip()] = value.strip()
+    except FileNotFoundError:
+        pass
+    return env
+
+
+def get_mistral_api_key():
+    """Return the Mistral API key, loading from .env on first call."""
+    global _mistral_api_key
+    if _mistral_api_key is None:
+        env = _load_env()
+        _mistral_api_key = env.get("MISTRAL_API_KEY", "")
+    return _mistral_api_key
+
+
+def call_mistral_api(messages):
+    """Call the Mistral cloud API (OpenAI-compatible chat/completions).
+
+    messages: list of {"role": ..., "content": ...} dicts.
+    Returns the parsed JSON content on success, or None on failure.
+    """
+    api_key = get_mistral_api_key()
+    if not api_key:
+        print("  [mistral] No MISTRAL_API_KEY found in .env")
+        return None
+
+    payload = json.dumps({
+        "model": MISTRAL_MODEL,
+        "messages": messages,
+        "response_format": {"type": "json_object"},
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        MISTRAL_API_URL,
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=MISTRAL_TIMEOUT) as resp:
+            body = resp.read().decode("utf-8")
+            result = json.loads(body)
+            content = result["choices"][0]["message"]["content"]
+            return json.loads(content)
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError,
+            OSError, TimeoutError, ValueError, KeyError, IndexError) as e:
+        print(f"  [mistral] API call failed: {type(e).__name__}: {e}")
+        return None
 
 
 def get_db():

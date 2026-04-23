@@ -14,9 +14,10 @@ import urllib.request
 from datetime import datetime, timezone, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from app.db import get_db, now_utc, rows_to_dicts
+from app.db import get_db, now_utc, rows_to_dicts, call_mistral_api, _load_env
 
-OLLAMA_URL = "http://localhost:11434/api/chat"
+_env = _load_env()
+OLLAMA_URL = _env.get("OLLAMA_URL", "http://localhost:11434") + "/api/chat"
 OLLAMA_MODEL = "mistral"
 OLLAMA_TIMEOUT = 45
 
@@ -470,6 +471,15 @@ def build_llm_summary(conn):
     return summary
 
 
+def _parse_pattern_response(parsed):
+    """Normalise the LLM response into a list of 0-3 observation dicts."""
+    if isinstance(parsed, dict) and "observations" in parsed:
+        parsed = parsed["observations"]
+    if isinstance(parsed, list):
+        return parsed[:3]
+    return []
+
+
 def call_ollama_for_patterns(summary):
     messages = [
         {
@@ -505,6 +515,7 @@ def call_ollama_for_patterns(summary):
         },
     ]
 
+    # Tier 1: Local Ollama
     payload = json.dumps({
         "model": OLLAMA_MODEL,
         "messages": messages,
@@ -525,15 +536,19 @@ def call_ollama_for_patterns(summary):
             result = json.loads(body)
             content = result.get("message", {}).get("content", "")
             parsed = json.loads(content)
-            if isinstance(parsed, dict) and "observations" in parsed:
-                parsed = parsed["observations"]
-            if isinstance(parsed, list):
-                return parsed[:3]
-            return []
+            return _parse_pattern_response(parsed)
     except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError,
             OSError, TimeoutError, ValueError, KeyError) as e:
         print(f"  [ollama] LLM pattern analysis unavailable: {type(e).__name__}: {e}")
-        return []
+
+    # Tier 2: Mistral cloud API
+    print("  [ollama] Trying Mistral cloud API for pattern analysis...")
+    mistral_result = call_mistral_api(messages)
+    if mistral_result is not None:
+        return _parse_pattern_response(mistral_result)
+
+    print("  [llm] All LLM backends failed for pattern analysis")
+    return []
 
 
 def run_llm_analysis(conn):

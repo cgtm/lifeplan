@@ -12,6 +12,9 @@ data/server.log
 .DS_Store
 **/.DS_Store
 
+# Environment (secrets)
+.env
+
 # Python
 __pycache__/
 *.pyc
