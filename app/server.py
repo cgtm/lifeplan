@@ -73,6 +73,10 @@ class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=os.path.dirname(__file__), **kwargs)
 
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        super().end_headers()
+
     def send_json(self, status, data):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(status)

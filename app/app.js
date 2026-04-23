@@ -112,6 +112,14 @@ function navigate(view) {
   $$('.view').forEach(v => v.classList.remove('active'));
   $(`#view-${view}`).classList.add('active');
   $$('.nav-link').forEach(l => l.classList.toggle('active', l.dataset.view === view));
+  $$('.nav-more-item').forEach(l => l.classList.toggle('active', l.dataset.view === view));
+  // Highlight "More" tab when a sub-view is active
+  const moreViews = ['people', 'journal', 'knowledge'];
+  const moreBtn = $('#navMoreBtn');
+  if (moreBtn) moreBtn.classList.toggle('active', moreViews.includes(view));
+  // Close more menu on navigate
+  const moreMenu = $('#navMoreMenu');
+  if (moreMenu) moreMenu.classList.add('hidden');
   window.scrollTo(0, 0);
 
   // Load data for view
@@ -125,8 +133,29 @@ function navigate(view) {
 }
 
 $$('.nav-link, .nav-brand').forEach(el => {
-  el.addEventListener('click', () => navigate(el.dataset.view || 'home'));
+  el.addEventListener('click', () => {
+    if (el.id === 'navMoreBtn') return; // handled separately
+    navigate(el.dataset.view || 'home');
+  });
 });
+
+// Mobile "More" menu
+const navMoreBtn = $('#navMoreBtn');
+const navMoreMenu = $('#navMoreMenu');
+if (navMoreBtn && navMoreMenu) {
+  navMoreBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    navMoreMenu.classList.toggle('hidden');
+  });
+  $$('.nav-more-item').forEach(el => {
+    el.addEventListener('click', () => navigate(el.dataset.view));
+  });
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.nav-more-menu') && !e.target.closest('#navMoreBtn')) {
+      navMoreMenu.classList.add('hidden');
+    }
+  });
+}
 
 // ══════════════════════════════════════════════════════════
 // HOME VIEW
