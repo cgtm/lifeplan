@@ -7,8 +7,7 @@ knowledge, dependencies, and dashboard.
 import json
 
 from .db import get_db, now_utc, rows_to_dicts, get_tags_for, set_tags_for, get_entry_tags, enrich_entries
-from .processing import process_brain_dump, handle_process_brain_dump, handle_approve_item
-from .generate_prompts import maybe_generate_prompts
+from .processing import handle_process_brain_dump, handle_retry_brain_dump, handle_approve_item
 
 
 # ── Journal entry handlers (v1 -- preserved) ─────────────────────
@@ -194,6 +193,14 @@ def handle_get_brain_dumps(params):
 
 
 def handle_create_brain_dump(body):
+    """
+    Create a brain dump and queue it for background processing.
+
+    Per app/contracts/background-processing.md, this handler does NOT process
+    inline. It inserts the brain_dumps row with processing_status='queued' and
+    a corresponding work_queue row in a single transaction, then returns 202.
+    The worker (app/worker.py) picks the job up on its next tick.
+    """
     conn = get_db()
     try:
         content = body.get("content", "").strip()
@@ -203,26 +210,25 @@ def handle_create_brain_dump(body):
         ts = now_utc()
         cur = conn.execute(
             "INSERT INTO brain_dumps (content, captured_at, processed, processing_status, "
-            "created_at, updated_at) VALUES (?, ?, 0, 'unprocessed', ?, ?)",
+            "created_at, updated_at) VALUES (?, ?, 0, 'queued', ?, ?)",
             (content, ts, ts, ts),
         )
         dump_id = cur.lastrowid
         set_tags_for(conn, "brain_dump_tags", "brain_dump_id", dump_id, tag_names)
+        # Same-transaction queue insert. A new dump_id is unique by construction
+        # so the partial-unique-index can't reject this row at create-time, but
+        # the index would catch any concurrent re-insert if one ever raced.
+        conn.execute(
+            "INSERT INTO work_queue (job_type, target_id, status) "
+            "VALUES ('brain_dump', ?, 'queued')",
+            (dump_id,),
+        )
         conn.commit()
         dump = dict(conn.execute("SELECT * FROM brain_dumps WHERE id = ?", (dump_id,)).fetchone())
         dump["tags"] = get_tags_for(conn, "brain_dump_tags", "brain_dump_id", dump_id)
+        return 202, dump
     finally:
         conn.close()
-
-    # Auto-process after saving
-    try:
-        _, processed_dump = process_brain_dump(dump_id)
-        if isinstance(processed_dump, dict) and "id" in processed_dump:
-            return 201, processed_dump
-    except Exception:
-        pass  # If processing fails, still return the saved dump
-
-    return 201, dump
 
 
 def handle_update_brain_dump(dump_id, body):
@@ -729,11 +735,33 @@ def handle_get_prompt_count():
 # ── Dashboard handler ────────────────────────────────────────────
 
 def handle_generate_prompts():
+    """
+    Queue a prompt-set regeneration job. Coalesced: if a non-terminal
+    prompt_generation row already exists, returns 202 without inserting.
+
+    The 12-hour cooldown logic still lives inside
+    generate_prompts.maybe_generate_prompts(), which the worker calls when it
+    claims this job. If the cooldown rejects, the worker treats the job as
+    done. Per app/contracts/background-processing.md.
+    """
+    conn = get_db()
     try:
-        maybe_generate_prompts()
-        return 200, {"status": "ok"}
-    except Exception as e:
-        return 200, {"status": "skipped", "reason": str(e)}
+        existing = conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM work_queue "
+            "WHERE job_type = 'prompt_generation' "
+            "AND status IN ('queued','processing')) AS has_active"
+        ).fetchone()
+        if existing and existing["has_active"]:
+            # Coalesced — the in-flight job will satisfy this request.
+            return 202, {"queued": True}
+        conn.execute(
+            "INSERT INTO work_queue (job_type, target_id, status) "
+            "VALUES ('prompt_generation', NULL, 'queued')"
+        )
+        conn.commit()
+        return 202, {"queued": True}
+    finally:
+        conn.close()
 
 
 def handle_get_dashboard():

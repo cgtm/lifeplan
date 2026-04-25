@@ -23,7 +23,8 @@ if __package__ is None or __package__ == "":
     from app import auth
     from app.db import get_db, now_utc, rows_to_dicts, get_tags_for, set_tags_for, get_entry_tags, enrich_entries
     from app.processing import (
-        process_brain_dump, handle_process_brain_dump, handle_approve_item,
+        process_brain_dump, handle_process_brain_dump, handle_retry_brain_dump,
+        handle_approve_item,
         GOAL_KEYWORDS, COMMON_WORDS, IMPERATIVE_VERBS, STEM_MAP,
         segment_text, detect_dates, detect_people, detect_tasks, match_goal,
         detect_knowledge, detect_tags, match_goal_links,
@@ -46,7 +47,8 @@ else:
     from . import auth
     from .db import get_db, now_utc, rows_to_dicts, get_tags_for, set_tags_for, get_entry_tags, enrich_entries
     from .processing import (
-        process_brain_dump, handle_process_brain_dump, handle_approve_item,
+        process_brain_dump, handle_process_brain_dump, handle_retry_brain_dump,
+        handle_approve_item,
         GOAL_KEYWORDS, COMMON_WORDS, IMPERATIVE_VERBS, STEM_MAP,
         segment_text, detect_dates, detect_people, detect_tasks, match_goal,
         detect_knowledge, detect_tags, match_goal_links,
@@ -327,6 +329,12 @@ class Handler(SimpleHTTPRequestHandler):
         if method == "POST" and re.match(r'/api/brain-dumps/\d+/process$', path):
             did = int(re.search(r'/api/brain-dumps/(\d+)/process', path).group(1))
             status, data = handle_process_brain_dump(did)
+            self.send_json(status, data)
+            return True
+
+        if method == "POST" and re.match(r'/api/brain-dumps/\d+/retry$', path):
+            did = int(re.search(r'/api/brain-dumps/(\d+)/retry', path).group(1))
+            status, data = handle_retry_brain_dump(did)
             self.send_json(status, data)
             return True
 

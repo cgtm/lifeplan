@@ -1870,8 +1870,127 @@ def process_brain_dump(dump_id):
 
 
 def handle_process_brain_dump(dump_id):
-    """Handler for POST /api/brain-dumps/:id/process"""
-    return process_brain_dump(dump_id)
+    """
+    Re-queue a brain dump for processing.
+
+    Per app/contracts/background-processing.md (POST /api/brain-dumps/<id>/process):
+
+      - 404 if the dump does not exist.
+      - 409 if there is a non-terminal queue row in status='processing' (a
+        worker has it; re-queueing now would be useless and would race the
+        partial-unique-index).
+      - 202 + {processing_status: 'queued'} otherwise. Idempotent: if a
+        'queued' row already exists for this dump, we return 202 without
+        inserting (the partial unique index would reject the duplicate
+        anyway, and the existing row is exactly what the caller wanted).
+
+    The brain_dumps.processing_status cache is synced to 'queued' on insert
+    so the UI badge reflects the requeue immediately.
+    """
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT id FROM brain_dumps WHERE id = ?", (dump_id,)
+        ).fetchone()
+        if not row:
+            return 404, {"error": "not found"}
+
+        # Check for a non-terminal queue row. Two cases:
+        #   - status='processing'  → 409 (worker has it; can't usefully re-queue).
+        #   - status='queued'      → idempotent success, no insert.
+        active = conn.execute(
+            "SELECT status FROM work_queue "
+            "WHERE job_type = 'brain_dump' "
+            "  AND target_id = ? "
+            "  AND status IN ('queued','processing') "
+            "LIMIT 1",
+            (dump_id,),
+        ).fetchone()
+
+        if active and active["status"] == "processing":
+            return 409, {"error": "already processing"}
+
+        if active and active["status"] == "queued":
+            # Already queued — idempotent. Cache should already be 'queued',
+            # but sync defensively in case it drifted.
+            conn.execute(
+                "UPDATE brain_dumps SET processing_status = 'queued' "
+                "WHERE id = ? AND processing_status != 'queued'",
+                (dump_id,),
+            )
+            conn.commit()
+            return 202, {"id": dump_id, "processing_status": "queued"}
+
+        # No non-terminal row — insert one and sync the cache.
+        conn.execute(
+            "INSERT INTO work_queue (job_type, target_id, status) "
+            "VALUES ('brain_dump', ?, 'queued')",
+            (dump_id,),
+        )
+        conn.execute(
+            "UPDATE brain_dumps SET processing_status = 'queued' WHERE id = ?",
+            (dump_id,),
+        )
+        conn.commit()
+        return 202, {"id": dump_id, "processing_status": "queued"}
+    finally:
+        conn.close()
+
+
+def handle_retry_brain_dump(dump_id):
+    """
+    Re-queue a previously-failed brain dump, resetting attempts/error.
+
+    Per app/contracts/background-processing.md (POST /api/brain-dumps/<id>/retry):
+
+      - 404 if the dump does not exist.
+      - 409 if the dump's current processing_status is not 'failed'. Use
+        /process for non-failed re-queues.
+      - 409 (defence-in-depth) if a non-terminal queue row already exists.
+        Shouldn't happen when status='failed', but the check is cheap and
+        prevents a unique-index violation surfacing as a 500.
+      - 202 + {processing_status: 'queued'} otherwise.
+
+    Attempts/error reset is implemented by inserting a NEW work_queue row
+    (defaults: attempts=0, error=NULL) rather than mutating the failed row.
+    The old failed row stays as audit trail. The partial unique index allows
+    the new row because the prior failed row is terminal.
+    """
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT processing_status FROM brain_dumps WHERE id = ?", (dump_id,)
+        ).fetchone()
+        if not row:
+            return 404, {"error": "not found"}
+        if row["processing_status"] != "failed":
+            return 409, {"error": "not in failed state"}
+
+        # Defence: shouldn't happen when status='failed', but check anyway.
+        active = conn.execute(
+            "SELECT 1 FROM work_queue "
+            "WHERE job_type = 'brain_dump' "
+            "  AND target_id = ? "
+            "  AND status IN ('queued','processing') "
+            "LIMIT 1",
+            (dump_id,),
+        ).fetchone()
+        if active:
+            return 409, {"error": "already queued"}
+
+        conn.execute(
+            "INSERT INTO work_queue (job_type, target_id, status) "
+            "VALUES ('brain_dump', ?, 'queued')",
+            (dump_id,),
+        )
+        conn.execute(
+            "UPDATE brain_dumps SET processing_status = 'queued' WHERE id = ?",
+            (dump_id,),
+        )
+        conn.commit()
+        return 202, {"id": dump_id, "processing_status": "queued"}
+    finally:
+        conn.close()
 
 
 def handle_approve_item(dump_id, body):
