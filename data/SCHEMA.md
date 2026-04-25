@@ -1,6 +1,6 @@
 # lifeplan.db -- Schema Documentation
 
-**Version:** 0.4 (background processing work queue)
+**Version:** 0.5 (brain_dump_tags FK repair)
 **Created:** 2026-04-20
 **Last updated:** 2026-04-23
 **Author:** Reed (Knowledge Architect)
@@ -299,6 +299,8 @@ Each content type has its own junction table linking to `tags`. All follow the s
 | task_tags          | tasks <-> tags                | (task_id, tag_id)           |
 | person_tags        | people <-> tags               | (person_id, tag_id)         |
 | knowledge_tags     | knowledge_items <-> tags      | (knowledge_id, tag_id)      |
+
+**brain_dump_tags FK note (v0.5, prod-only fix).** Migration 0001 rebuilt the parent `brain_dumps` table using the rename-then-recreate pattern. Modern SQLite (~3.43, local macOS) auto-rewrites FK references in dependent tables when a parent is renamed; older SQLite (the Ubuntu build on the prod droplet) does not. Result: prod's `brain_dump_tags` was left referencing the (subsequently dropped) `brain_dumps_old`, breaking all new tag inserts. Migration 0002 (`scripts/migrations/0002_fix_brain_dump_tags_fk.sql`) repairs the FK using the canonical 12-step ALTER pattern (create-new -> copy -> drop-old -> rename-new), unconditionally rebuilding the table so the same migration script is safe on local (already correct) and prod (broken). See migration 0002's header for the full post-mortem.
 
 ---
 
