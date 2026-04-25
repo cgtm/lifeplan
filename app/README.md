@@ -16,7 +16,7 @@ Personal knowledge management system — brain dumps, goals, tasks, people, jour
 **Manual:**
 
 ```
-cd /Users/cam/lifeplan/app
+cd ~/dev/personal/lifeplan/app
 python3 server.py
 ```
 
@@ -96,6 +96,6 @@ app/
 
 ## Deployment
 
-Deployed to `https://your-domain.example/lifeplan` on a DigitalOcean droplet with nginx + HTTP Basic Auth. `deploy.sh` pushes updates via rsync.
+Deployed to `https://your-domain.example/lifeplan` on a DigitalOcean droplet with an nginx reverse proxy + app-level cookie session auth. `deploy.sh` pushes updates via rsync.
 
 No external dependencies beyond Python 3 stdlib + SQLite + Ollama. Requires a `.env` file with `MISTRAL_API_KEY` for the cloud API fallback tier.
