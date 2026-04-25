@@ -1,14 +1,25 @@
 #!/usr/bin/env bash
-# server-setup.sh -- one-time server setup (run ON the droplet with sudo)
+# server-setup.sh -- configure lifeplan on a droplet that already has nginx + TLS in place.
+#
+# This is NOT from-scratch droplet provisioning. It assumes the surrounding
+# infrastructure already exists and only wires lifeplan into it.
+#
+# Preconditions (must be true before this script runs):
+#   - Ubuntu droplet with sudo access for the running user
+#   - nginx installed, with /etc/nginx/sites-available/your-domain.example present and
+#     already TLS-configured (certbot/Let's Encrypt cert issued and renewing)
+#   - Python 3.10+ available as /usr/bin/python3
+#   - The your-user:your-user system user exists
+#   - App files already rsynced to /home/your-user/lifeplan-staging/
 #
 # Usage: sudo bash /home/your-user/lifeplan-staging/server-setup.sh
 #
-# Prerequisites: app files already rsynced to /home/your-user/lifeplan-staging/
-# This script:
+# What this script does (idempotent where it can be):
 #   1. Moves the app to /opt/lifeplan/ (owned by your-user)
 #   2. Creates the systemd service
-#   3. Adds nginx location block for /lifeplan
+#   3. Installs the canonical your-domain.example nginx vhost + authzone fragment from ops/nginx/
 #   4. Sets up daily SQLite backup cron
+#   5. Installs the deploy sudoers rule and verifies cookie-auth env vars
 
 set -euo pipefail
 
@@ -16,7 +27,13 @@ APP_USER="your-user"
 APP_DIR="/opt/lifeplan"
 STAGING_DIR="/home/$APP_USER/lifeplan-staging"
 NGINX_CONF="/etc/nginx/sites-available/your-domain.example"
+NGINX_AUTHZONE_CONF="/etc/nginx/conf.d/authzone.conf"
 BACKUP_DIR="/opt/lifeplan/backups"
+
+# Resolve the directory this script lives in so we can find sibling ops/ files.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+NGINX_SRC_SITE="$SCRIPT_DIR/ops/nginx/your-domain.example.conf"
+NGINX_SRC_AUTHZONE="$SCRIPT_DIR/ops/nginx/authzone.conf"
 
 echo "==> lifeplan server setup"
 echo ""
@@ -84,56 +101,59 @@ systemctl daemon-reload
 systemctl enable lifeplan
 echo "    service created and enabled"
 
-# ── 3. Nginx location block ─────────────────────────────────────
+# ── 3. Nginx vhost + authzone ────────────────────────────────────
+# Ship the canonical nginx config from the repo rather than building it inline.
+# Source of truth: ops/nginx/your-domain.example.conf and ops/nginx/authzone.conf.
 echo ""
 echo "--- configuring nginx ---"
 
-# Check if the lifeplan location block already exists
-if grep -q "location /lifeplan" "$NGINX_CONF"; then
-    echo "    /lifeplan location block already exists in nginx config, skipping"
+# Sanity-check the source files are present in this checkout.
+for src in "$NGINX_SRC_SITE" "$NGINX_SRC_AUTHZONE"; do
+    if [ ! -f "$src" ]; then
+        echo "    ERROR: missing $src"
+        echo "    Make sure the staging dir has the full repo, including ops/nginx/."
+        exit 1
+    fi
+done
+
+# 3a. http{}-context fragment: limit_req_zone authzone definition.
+# /etc/nginx/conf.d/*.conf is auto-included from the http{} block, which is
+# exactly where limit_req_zone needs to live. Leave any existing copy alone
+# unless the contents differ, in which case overwrite (and back up first).
+if [ ! -f "$NGINX_AUTHZONE_CONF" ]; then
+    cp "$NGINX_SRC_AUTHZONE" "$NGINX_AUTHZONE_CONF"
+    chmod 0644 "$NGINX_AUTHZONE_CONF"
+    echo "    installed $NGINX_AUTHZONE_CONF"
+elif cmp -s "$NGINX_SRC_AUTHZONE" "$NGINX_AUTHZONE_CONF"; then
+    echo "    $NGINX_AUTHZONE_CONF already up to date"
 else
-    # Insert the location block before the closing } of the HTTPS server block
-    # We find the last "location / {" block and add our block before it,
-    # or we insert before the final closing brace of the server block.
-
-    # Create a temp file with the new config
-    python3 - "$NGINX_CONF" <<'PYEOF'
-import sys
-
-conf_path = sys.argv[1]
-with open(conf_path, "r") as f:
-    content = f.read()
-
-lifeplan_block = """
-    # lifeplan -- Tailscale-only reverse proxy
-    location /lifeplan/ {
-        # Allow Tailscale CGNAT range only
-        allow 100.64.0.0/10;
-        deny all;
-
-        # Strip /lifeplan prefix before proxying
-        proxy_pass http://127.0.0.1:3131/;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-"""
-
-# Insert before the last closing brace of the HTTPS server block
-lines = content.rstrip().rsplit("}", 1)
-if len(lines) == 2:
-    new_content = lines[0] + lifeplan_block + "\n}"
-    with open(conf_path, "w") as f:
-        f.write(new_content)
-    print("    location block added")
-else:
-    print("    ERROR: could not find insertion point in nginx config")
-    sys.exit(1)
-PYEOF
+    cp -a "$NGINX_AUTHZONE_CONF" "$NGINX_AUTHZONE_CONF.bak.$(date +%Y%m%d-%H%M%S)"
+    cp "$NGINX_SRC_AUTHZONE" "$NGINX_AUTHZONE_CONF"
+    chmod 0644 "$NGINX_AUTHZONE_CONF"
+    echo "    updated $NGINX_AUTHZONE_CONF (previous version backed up)"
 fi
 
-# Test nginx config
+# 3b. Site config: drop in the canonical your-domain.example vhost.
+# If the existing file is byte-identical, skip. Otherwise back up and overwrite.
+if [ -f "$NGINX_CONF" ] && cmp -s "$NGINX_SRC_SITE" "$NGINX_CONF"; then
+    echo "    $NGINX_CONF already up to date"
+else
+    if [ -f "$NGINX_CONF" ]; then
+        cp -a "$NGINX_CONF" "$NGINX_CONF.bak.$(date +%Y%m%d-%H%M%S)"
+        echo "    backed up existing $NGINX_CONF"
+    fi
+    cp "$NGINX_SRC_SITE" "$NGINX_CONF"
+    chmod 0644 "$NGINX_CONF"
+    echo "    installed $NGINX_CONF from $NGINX_SRC_SITE"
+fi
+
+# Make sure the site is enabled (idempotent symlink).
+if [ ! -L /etc/nginx/sites-enabled/your-domain.example ]; then
+    ln -s "$NGINX_CONF" /etc/nginx/sites-enabled/your-domain.example
+    echo "    enabled your-domain.example site"
+fi
+
+# 3c. Validate and reload.
 nginx -t 2>&1
 systemctl reload nginx
 echo "    nginx reloaded"
@@ -180,15 +200,22 @@ cat > /opt/lifeplan/SETUP.md <<'README'
 ## What's running
 - **App**: Python 3 HTTP server on port 3131 (localhost only)
 - **Service**: systemd unit `lifeplan.service`
-- **Proxy**: nginx reverse proxy at /lifeplan, Tailscale IPs only
+- **Proxy**: nginx reverse proxy at /lifeplan, public internet, rate-limited (limit_req zone=authzone)
+- **Auth**: app-level cookie session auth (no nginx auth_basic). Configured via env vars in /opt/lifeplan/.env
 - **Backups**: daily SQLite backup at 03:00 UTC, 14-day retention
 
 ## File layout
 - `/opt/lifeplan/app/`       -- application code
 - `/opt/lifeplan/data/`      -- SQLite database
 - `/opt/lifeplan/backups/`   -- daily database backups
-- `/opt/lifeplan/.env`       -- environment variables (API keys, Ollama URL)
+- `/opt/lifeplan/.env`       -- environment variables (API keys, Ollama URL, cookie auth secrets)
 - `/opt/lifeplan/backup.sh`  -- backup script
+
+## Auth env vars (required in /opt/lifeplan/.env, mode 600)
+- `LIFEPLAN_PASSWORD_HASH`   -- generated by `python3 -m app.auth set-password`
+- `LIFEPLAN_AUTH_SALT`       -- generated by `python3 -m app.auth set-password`
+- `LIFEPLAN_SESSION_SECRET`  -- random secret used to sign session cookies
+- `LIFEPLAN_COOKIE_PATH=/lifeplan` -- scope cookie to the proxied path
 
 ## Common commands
 ```
@@ -202,7 +229,7 @@ sudo nginx -t && sudo systemctl reload nginx  # test and reload nginx
 From Cam's Mac: `./deploy.sh` in the lifeplan directory.
 
 ## Access
-Tailscale only: https://your-domain.example/lifeplan
+Public internet, gated by app-level cookie session auth: https://your-domain.example/lifeplan
 README
 
 chown "$APP_USER:$APP_USER" /opt/lifeplan/SETUP.md
@@ -218,7 +245,43 @@ chmod 0440 /etc/sudoers.d/lifeplan
 visudo -c -f /etc/sudoers.d/lifeplan
 echo "    sudoers rule installed"
 
-# ── 7. Start the service ─────────────────────────────────────────
+# ── 7. Auth env var check ────────────────────────────────────────
+echo ""
+echo "--- checking auth env vars in $APP_DIR/.env ---"
+ENV_FILE="$APP_DIR/.env"
+MISSING_VARS=()
+if [ -f "$ENV_FILE" ]; then
+    chmod 600 "$ENV_FILE"
+    chown "$APP_USER:$APP_USER" "$ENV_FILE"
+    for var in LIFEPLAN_PASSWORD_HASH LIFEPLAN_AUTH_SALT LIFEPLAN_SESSION_SECRET LIFEPLAN_COOKIE_PATH; do
+        if ! grep -q "^${var}=" "$ENV_FILE"; then
+            MISSING_VARS+=("$var")
+        fi
+    done
+else
+    echo "    NOTE: $ENV_FILE does not exist yet -- create it (mode 600, owner your-user)"
+    MISSING_VARS=(LIFEPLAN_PASSWORD_HASH LIFEPLAN_AUTH_SALT LIFEPLAN_SESSION_SECRET LIFEPLAN_COOKIE_PATH)
+fi
+
+if [ ${#MISSING_VARS[@]} -gt 0 ]; then
+    echo ""
+    echo "    !!! Cookie session auth env vars are missing or incomplete:"
+    for v in "${MISSING_VARS[@]}"; do
+        echo "        - $v"
+    done
+    echo ""
+    echo "    To set them, from the lifeplan repo on your Mac run:"
+    echo "        python3 -m app.auth set-password"
+    echo "    That prints LIFEPLAN_PASSWORD_HASH and LIFEPLAN_AUTH_SALT lines."
+    echo "    Add those plus a random LIFEPLAN_SESSION_SECRET and"
+    echo "    LIFEPLAN_COOKIE_PATH=/lifeplan to $ENV_FILE (chmod 600)."
+    echo ""
+    echo "    Without these, the app will refuse to authenticate any request."
+else
+    echo "    auth env vars present"
+fi
+
+# ── 8. Start the service ─────────────────────────────────────────
 echo ""
 echo "--- starting lifeplan service ---"
 systemctl start lifeplan
@@ -238,5 +301,5 @@ fi
 echo ""
 echo "==> setup complete"
 echo ""
-echo "    App is running at https://your-domain.example/lifeplan (Tailscale only)"
+echo "    App is running at https://your-domain.example/lifeplan (public internet, gated by app-level cookie session auth)"
 echo "    Future deploys: run ./deploy.sh from Cam's Mac"

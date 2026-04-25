@@ -75,7 +75,7 @@ echo "    http:    $HTTP_CODE"
 
 if [[ "$HTTP_CODE" == "200" ]]; then
     echo ""
-    echo "==> deploy complete. App at https://your-domain.example/lifeplan (Tailscale only)"
+    echo "==> deploy complete. App is running at https://your-domain.example/lifeplan (public internet, gated by app-level cookie session auth)"
 else
     echo "    WARNING: expected 200, got $HTTP_CODE"
     echo "    check: ssh $SERVER journalctl -u lifeplan -n 30"
