@@ -7,9 +7,11 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="theme-color" content="#fafaf9" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#1c1917" media="(prefers-color-scheme: dark)">
-  <link rel="manifest" href="manifest.json">
-  <link rel="apple-touch-icon" href="apple-touch-icon.png">
-  <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+  <link rel="manifest" href="/lifeplan/manifest.json">
+  <link rel="apple-touch-icon" sizes="180x180" href="/lifeplan/apple-touch-icon.png">
+  <link rel="apple-touch-icon-precomposed" sizes="180x180" href="/lifeplan/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/lifeplan/icon-192.png">
+  <link rel="icon" type="image/png" sizes="512x512" href="/lifeplan/icon-512.png">
   <title>lifeplan</title>
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -29,6 +31,7 @@
         <a class="nav-link nav-desktop" data-view="knowledge">Knowledge</a>
         <a class="nav-link nav-more" id="navMoreBtn">More</a>
         <button class="theme-toggle nav-desktop" id="themeToggle" title="Toggle theme">auto</button>
+        <button class="nav-logout nav-desktop" id="navLogoutDesktopBtn" title="Log out" aria-label="Log out">Log out</button>
       </div>
       <!-- Mobile overflow menu -->
       <div class="nav-more-menu hidden" id="navMoreMenu">
@@ -39,6 +42,7 @@
           <span>Theme</span>
           <span class="nav-more-theme-label" id="mobileThemeLabel">auto</span>
         </div>
+        <a class="nav-more-item" id="navLogoutBtn" style="border-top:1px solid var(--border)">Log out</a>
       </div>
     </nav>
 

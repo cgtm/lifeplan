@@ -1,3 +1,11 @@
+// ── Mount prefix ────────────────────────────────────────
+// The app is served at "/" locally and "/lifeplan/" in production (behind
+// nginx). Compute the mount prefix once from the current pathname so that
+// redirects and fetches resolve correctly regardless of where we're mounted.
+// Strips any trailing path segment (e.g. "/lifeplan/index.html" → "/lifeplan/")
+// so this works even if the page URL doesn't end in "/".
+const MOUNT = window.location.pathname.replace(/[^/]*$/, '');
+
 // ── Theme Manager ───────────────────────────────────────
 const ThemeManager = (() => {
   const STORAGE_KEY = 'lifeplan-theme';
@@ -148,12 +156,29 @@ function typePill(type) {
 }
 
 async function api(path, opts = {}) {
-  const res = await fetch(`api${path}`, {
+  const res = await fetch(`${MOUNT}api${path}`, {
     headers: { 'Content-Type': 'application/json' },
     ...opts,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
+  if (res.status === 401) {
+    window.location.href = `${MOUNT}login`;
+    // Return a never-resolving promise so callers don't error mid-redirect
+    return new Promise(() => {});
+  }
   return res.json();
+}
+
+// ── Logout ─────────────────────────────────────────────
+async function logout() {
+  try {
+    await fetch(`${MOUNT}logout`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+  } catch (_) { /* ignore — we redirect regardless */ }
+  window.location.href = `${MOUNT}login`;
 }
 
 // ── Modal helpers ──────────────────────────────────────
@@ -232,6 +257,12 @@ $$('.nav-link, .nav-brand').forEach(el => {
   });
 });
 
+// Desktop log out chip
+const navLogoutDesktopBtn = $('#navLogoutDesktopBtn');
+if (navLogoutDesktopBtn) {
+  navLogoutDesktopBtn.addEventListener('click', logout);
+}
+
 // Mobile "More" menu
 const navMoreBtn = $('#navMoreBtn');
 const navMoreMenu = $('#navMoreMenu');
@@ -241,7 +272,14 @@ if (navMoreBtn && navMoreMenu) {
     navMoreMenu.classList.toggle('hidden');
   });
   $$('.nav-more-item').forEach(el => {
-    el.addEventListener('click', () => navigate(el.dataset.view));
+    el.addEventListener('click', () => {
+      if (el.id === 'navLogoutBtn') {
+        navMoreMenu.classList.add('hidden');
+        logout();
+        return;
+      }
+      navigate(el.dataset.view);
+    });
   });
   document.addEventListener('click', (e) => {
     if (!e.target.closest('.nav-more-menu') && !e.target.closest('#navMoreBtn')) {
@@ -259,7 +297,7 @@ async function loadHome() {
   renderHome(data);
   loadPrompts();
   // Refresh prompts in the background — don't block the UI
-  fetch('api/prompts/generate', { method: 'POST' }).catch(() => {});
+  api('/prompts/generate', { method: 'POST' }).catch(() => {});
 }
 
 function renderHome(data) {

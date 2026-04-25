@@ -2167,6 +2167,36 @@ main {
   background: var(--accent-bg);
 }
 
+/* ── Desktop log out chip (mirrors theme-toggle) ─────────── */
+.nav-logout {
+  font-family: var(--font);
+  font-size: 0.625rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-3);
+  cursor: pointer;
+  margin-left: 6px;
+  white-space: nowrap;
+  transition: color var(--transition), background var(--transition), border-color var(--transition);
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.nav-logout:hover {
+  color: var(--text-2);
+  background: var(--accent-bg);
+}
+
+.nav-logout:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 /* Mobile: theme toggle in More menu */
 .nav-more-theme {
   display: none;
@@ -2175,6 +2205,7 @@ main {
 @media (max-width: 640px) {
   /* Hide desktop theme toggle on mobile */
   .theme-toggle.nav-desktop { display: none; }
+  .nav-logout.nav-desktop { display: none; }
 
   /* Show theme toggle in More menu */
   .nav-more-theme {

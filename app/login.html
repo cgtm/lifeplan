@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="theme-color" content="#fafaf9" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1c1917" media="(prefers-color-scheme: dark)">
+  <link rel="apple-touch-icon" sizes="180x180" href="/lifeplan/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/lifeplan/icon-192.png">
+  <link rel="icon" type="image/png" sizes="512x512" href="/lifeplan/icon-512.png">
+  <title>Lifeplan — Sign in</title>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg:        #fafaf9;
+      --surface:   #ffffff;
+      --border:    #e7e5e4;
+      --border-lt: #f5f5f4;
+      --text:      #1c1917;
+      --text-2:    #78716c;
+      --text-3:    #a8a29e;
+      --accent:    #292524;
+      --accent-bg: #f5f5f4;
+      --danger:    #dc2626;
+      --danger-bg: #fef2f2;
+      --focus:     #a8a29e;
+      --radius:    8px;
+      --radius-sm: 5px;
+      --radius-lg: 12px;
+      --shadow:    0 1px 3px rgba(0,0,0,0.04), 0 1px 2px rgba(0,0,0,0.02);
+      --font:      -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;
+      --transition: 150ms ease;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg:        #1c1917;
+        --surface:   #292524;
+        --border:    #44403c;
+        --border-lt: #352f2b;
+        --text:      #fafaf9;
+        --text-2:    #a8a29e;
+        --text-3:    #78716c;
+        --accent:    #e7e5e4;
+        --accent-bg: #352f2b;
+        --danger:    #ef4444;
+        --danger-bg: #3b1314;
+        --focus:     #78716c;
+      }
+      html { color-scheme: dark; }
+    }
+
+    html {
+      font-size: 16px;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      min-height: 100vh;
+      min-height: 100dvh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      padding-top: calc(24px + env(safe-area-inset-top));
+      padding-bottom: calc(24px + env(safe-area-inset-bottom));
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow);
+      padding: 32px 28px;
+      width: 100%;
+      max-width: 360px;
+    }
+
+    .brand {
+      font-size: 1.25rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      color: var(--text);
+      margin-bottom: 4px;
+    }
+
+    .subtitle {
+      font-size: 0.8125rem;
+      color: var(--text-3);
+      margin-bottom: 28px;
+    }
+
+    .form-label {
+      display: block;
+      font-size: 0.6875rem;
+      font-weight: 600;
+      color: var(--text-3);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 6px;
+    }
+
+    .form-input {
+      font-family: var(--font);
+      font-size: 16px; /* prevent iOS zoom on focus */
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+      color: var(--text);
+      width: 100%;
+      outline: none;
+      transition: border-color var(--transition), box-shadow var(--transition);
+      -webkit-appearance: none;
+      appearance: none;
+    }
+
+    .form-input:focus {
+      border-color: var(--focus);
+      box-shadow: 0 0 0 3px rgba(168, 162, 158, 0.15);
+    }
+
+    .btn-primary {
+      font-family: var(--font);
+      font-size: 0.875rem;
+      font-weight: 500;
+      padding: 11px 18px;
+      border: none;
+      border-radius: var(--radius-sm);
+      background: var(--accent);
+      color: white;
+      cursor: pointer;
+      width: 100%;
+      margin-top: 16px;
+      transition: opacity var(--transition);
+      min-height: 44px;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      .btn-primary { color: var(--bg); }
+    }
+
+    .btn-primary:hover { opacity: 0.85; }
+    .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .error {
+      font-size: 0.75rem;
+      color: var(--danger);
+      background: var(--danger-bg);
+      border-radius: var(--radius-sm);
+      padding: 8px 10px;
+      margin-top: 12px;
+      display: none;
+      line-height: 1.45;
+    }
+
+    .error.visible { display: block; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1 class="brand">Lifeplan</h1>
+    <p class="subtitle">Sign in to continue</p>
+
+    <form id="loginForm" novalidate>
+      <label class="form-label" for="password">Password</label>
+      <input
+        type="password"
+        id="password"
+        name="password"
+        class="form-input"
+        autocomplete="current-password"
+        autofocus
+        required
+      >
+
+      <button type="submit" class="btn-primary" id="submitBtn">Sign in</button>
+
+      <div class="error" id="error" role="alert"></div>
+    </form>
+  </main>
+
+  <script>
+    (function () {
+      var form = document.getElementById('loginForm');
+      var input = document.getElementById('password');
+      var btn = document.getElementById('submitBtn');
+      var err = document.getElementById('error');
+
+      function showError(msg) {
+        err.textContent = msg;
+        err.classList.add('visible');
+      }
+      function clearError() {
+        err.textContent = '';
+        err.classList.remove('visible');
+      }
+
+      form.addEventListener('submit', async function (e) {
+        e.preventDefault();
+        clearError();
+        var pw = input.value;
+        if (!pw) { input.focus(); return; }
+
+        btn.disabled = true;
+        try {
+          // Path-relative on purpose. login.html is a self-contained,
+          // pre-auth document — it deliberately doesn't load app.js or
+          // styles.css (both are gated), so it has no MOUNT constant and
+          // shouldn't grow one. The page is served at "<mount>login", so
+          // the browser resolves "login" → the right endpoint in both
+          // dev ("/") and prod ("/lifeplan/"). See app/contracts/cookie-auth.md
+          // — "Mount story". Do not replace with a root-absolute path.
+          var res = await fetch('login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password: pw })
+          });
+
+          if (res.status === 200) {
+            // "./" = the directory containing this page = the app root
+            // under whichever prefix we're mounted at. Same rationale as
+            // the relative fetch above.
+            window.location.href = './';
+            return;
+          }
+          if (res.status === 401) {
+            showError('Wrong password');
+            input.value = '';
+            input.focus();
+          } else if (res.status === 429) {
+            showError('Too many attempts. Try again in a few minutes.');
+            input.value = '';
+          } else {
+            showError('Something went wrong. Try again.');
+          }
+        } catch (_) {
+          showError('Network error. Try again.');
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
