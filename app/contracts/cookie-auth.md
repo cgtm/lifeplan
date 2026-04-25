@@ -2,7 +2,7 @@
 
 **Authors:** Vault (server), Lumen (client)
 **Status:** accepted
-**Last updated:** 2026-04-23
+**Last updated:** 2026-04-23 (HEAD coverage reissue)
 
 Retroactive contract. The cookie-auth feature shipped before this document
 existed; three identical root-absolute-path bugs were the cost. This is the
@@ -70,6 +70,27 @@ shipped three times. Allowed forms:
 All paths below are **post-mount-strip** as the Python server sees them
 (nginx strips `/lifeplan` before proxying). Browser-facing URLs prepend the
 mount prefix.
+
+**HEAD coverage.** Every endpoint that supports `GET` also supports `HEAD`,
+returning the same status code and headers as the corresponding `GET` with
+**no body** (RFC 7231 §4.3.2). This includes:
+
+- `HEAD /login` (public) — 200, `Content-Type: text/html; charset=utf-8`,
+  empty body. Public — same `_authenticate()` bypass as `GET /login`.
+- `HEAD /api/*` (auth required) — same status and headers as `GET /api/*`,
+  empty body. Auth policy is identical to `GET`: missing/invalid cookie
+  produces 401 (no `Accept: text/html`) or 302 to `auth.login_url()` (with
+  `Accept: text/html`). 401 carries an empty body; 302 already carries
+  `Content-Length: 0`.
+- `HEAD /` and other static document paths (auth required) — delegated to
+  the stdlib `SimpleHTTPRequestHandler.do_HEAD` after auth and routing
+  checks have passed. Returns headers for the resolved file with no body.
+
+The auth middleware (`_authenticate()`) treats `HEAD` identically to `GET`
+for public-path matching, redirect logic, and the 401-vs-302 branch.
+Body-write sites (`send_json`, `_serve_login_page`) suppress the body when
+`self.command == "HEAD"`. Practice ref: `docs/processes/team-practices.md`
+§9 ("HTTP method coverage on handler overrides").
 
 ### `GET /login` (public)
 

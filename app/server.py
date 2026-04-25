@@ -121,7 +121,10 @@ class Handler(SimpleHTTPRequestHandler):
         if set_cookie:
             self.send_header("Set-Cookie", set_cookie)
         self.end_headers()
-        self.wfile.write(body)
+        # RFC 7231 §4.3.2: HEAD response = GET response minus the body.
+        # Same status, same headers (including Content-Length), no body.
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     def read_body(self):
         length = int(self.headers.get("Content-Length", 0) or 0)
@@ -191,11 +194,16 @@ class Handler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
 
+        # HEAD is treated as GET for auth-policy purposes (public-path match,
+        # redirect vs 401 branch). RFC 7231 §4.3.2: HEAD must return the same
+        # status and headers as GET. So the auth decision must be identical.
+        method = "GET" if self.command == "HEAD" else self.command
+
         # Public paths bypass auth entirely. Login POST is also public — we
         # check method+path explicitly so a path-only check can't be tricked.
         if path in auth.PUBLIC_PATHS:
             return True
-        if self.command == "POST" and path == "/login":
+        if method == "POST" and path == "/login":
             return True
 
         cookie_value = self._get_session_cookie()
@@ -210,7 +218,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "auth.cookie_invalid ip=%s reason=%s path=%s",
                     self._client_ip(), reason, path,
                 )
-            self._deny(want_html_redirect=self._accepts_html() and self.command == "GET")
+            self._deny(want_html_redirect=self._accepts_html() and method == "GET")
             return False
 
         # Sliding refresh: re-issue when past half-life. The new cookie is
@@ -523,7 +531,9 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        # HEAD: same status/headers, no body (RFC 7231 §4.3.2).
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     def _handle_login(self):
         """POST /login. Public. Rate-limited per IP. Constant-time password
@@ -598,6 +608,18 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if not self.route("GET"):
             super().do_GET()
+
+    def do_HEAD(self):
+        # Practice §9: HEAD must mirror GET on every overridden route.
+        # Same auth policy, same routing, same status/headers — body
+        # suppression handled at the body-write sites (send_json,
+        # _serve_login_page) gated on self.command == "HEAD". For static
+        # files we delegate to the stdlib's do_HEAD, which correctly emits
+        # headers without a body for files that exist on disk.
+        if not self._authenticate():
+            return
+        if not self.route("GET"):
+            super().do_HEAD()
 
     def do_POST(self):
         if not self._authenticate():
