@@ -541,6 +541,40 @@ The old `processed` column (INTEGER 0/1) is retained for backward compatibility.
 
 6. **Backward compatibility.** Keep setting the old `processed` column to 1 when processing completes, so existing queries in SCHEMA.md continue to work.
 
-7. **Error handling.** If processing fails partway through, set `processing_status` back to `'unprocessed'` and log the error. Do not leave it in `'processing'` state. Consider a timeout -- if a dump has been `'processing'` for more than 5 minutes, treat it as failed.
+7. **Error handling.** Exceptions during extraction are now caught by the worker and recorded as `error` on the corresponding `work_queue` row. Up to 3 attempts; the 3rd failure moves the row (and the dump's cache) to `failed`. The watchdog reclaims any `processing` row whose `claimed_at` is older than 5 minutes, so a crashed worker can't leave a dump stuck. See "Lifecycle and async processing" below.
 
 8. **Testing.** Build a test suite with at least 10 sample brain dumps covering: pure tasks, pure knowledge, mixed content, ambiguous content, empty/minimal text, text with no extractable items.
+
+---
+
+## Lifecycle and async processing
+
+As of 2026-04-23, brain-dump extraction runs **asynchronously** on a server-side worker daemon, not inline in the HTTP request. The full design lives in [`/Users/cam/dev/personal/lifeplan/app/contracts/background-processing.md`](../app/contracts/background-processing.md); this section is the user-facing summary of what changed for processing.
+
+### How a dump moves through the system
+
+1. **Submission.** `POST /api/brain-dumps` writes the `brain_dumps` row and inserts a matching `work_queue` row in the same transaction. The dump's `processing_status` is `'queued'`. The HTTP response returns 202 immediately -- no LLM call on the request thread.
+2. **Claim.** The worker polls `work_queue` every 2 seconds. When it finds a `queued` row it claims it atomically (a single `UPDATE ... WHERE id=(SELECT ... LIMIT 1)` inside `BEGIN IMMEDIATE`), increments `attempts`, sets `claimed_at`, and updates the dump's cache to `'processing'`.
+3. **Processing.** Same extraction pipeline as before (Rules 1-7). The worker runs it. On success, the worker writes `processed_items`, sets `work_queue.status='done'` and the dump's `processing_status` to `'processed'` or `'needs_review'` depending on confidence.
+4. **Failure.** On exception, attempts < 3 means re-queue (`status='queued'`, `claimed_at=NULL`, `error` recorded). Attempts >= 3 means terminal (`status='failed'`, dump's cache set to `'failed'`). Both finalisation writes carry a `claimed_at` guard to defeat watchdog races.
+5. **Watchdog.** Every ~60s the worker reclaims any `processing` row whose `claimed_at` is older than 5 minutes -- protection against a worker process that died mid-job.
+6. **Retry.** A dump in `'failed'` exposes a Retry button in the UI (`POST /api/brain-dumps/<id>/retry`). That endpoint inserts a **new** queue row with `attempts=0`; the prior `failed` row stays as audit. Cam can keep retrying as long as the dump is failed.
+
+### What this means for the rules above
+
+The extraction rules themselves (1-7) are unchanged. What changed is:
+
+- **No inline processing on the request thread.** The user gets an immediate 202; the badge says "Pending" until the worker finishes.
+- **One source of truth for state.** `work_queue.status` is authoritative. `brain_dumps.processing_status` is a denormalised cache the worker keeps in sync. Don't read state from the cache for orchestration logic -- read from `work_queue`.
+- **Idempotent re-queueing.** A partial unique index on `work_queue` ensures that re-queueing a brain dump (whether by user action or by code) collapses to a no-op if a non-terminal row already exists. Build on this; don't fight it.
+- **Coalescing on prompt regeneration.** Multiple rapid `POST /api/prompts/generate` calls collapse into one in-flight job by the same mechanism.
+
+### Polling
+
+The frontend polls the dump-list endpoint every 3 seconds while any visible row is in `{queued, unprocessed, processing}`. As soon as no in-flight rows are visible, polling stops. Retry restarts it. See the contract's "Polling contract" section for the full details.
+
+### Cross-references
+
+- Schema: [`SCHEMA.md`](./SCHEMA.md) -- `work_queue` table + amended `brain_dumps.processing_status` enum.
+- Contract: [`app/contracts/background-processing.md`](../app/contracts/background-processing.md) -- authoritative on lifecycle, endpoints, error matrix, security, and operational properties.
+- Migration: [`scripts/migrations/0001_work_queue.sql`](../scripts/migrations/0001_work_queue.sql) -- creates the queue table and extends the dump CHECK enum.

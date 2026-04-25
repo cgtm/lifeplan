@@ -1,6 +1,6 @@
 # lifeplan.db -- Schema Documentation
 
-**Version:** 0.3 (brain dump auto-processing)
+**Version:** 0.4 (background processing work queue)
 **Created:** 2026-04-20
 **Last updated:** 2026-04-23
 **Author:** Reed (Knowledge Architect)
@@ -51,7 +51,7 @@ Raw capture zone. Zero-friction input -- just text and a timestamp. No categoris
 | captured_at        | TEXT    | NOT NULL, default now | When Cam typed it                    |
 | processed          | INTEGER | NOT NULL, default 0  | 0 = unprocessed, 1 = triaged (legacy, kept for backward compat) |
 | processed_at       | TEXT    | nullable          | When it was triaged                      |
-| processing_status  | TEXT    | NOT NULL, default 'unprocessed', CHECK in (unprocessed, processing, processed, needs_review) | Richer processing state |
+| processing_status  | TEXT    | NOT NULL, default 'unprocessed', CHECK in (unprocessed, queued, processing, processed, needs_review, failed) | Richer processing state -- denormalised cache of `work_queue.status` |
 | processed_items    | TEXT    | nullable (JSON)   | JSON object with all extracted items, confidence scores, and created row IDs. Schema defined in PROCESSING_RULES.md |
 | created_at         | TEXT    | NOT NULL, default now | Row insertion timestamp (UTC)        |
 | updated_at         | TEXT    | NOT NULL, default now | Last modification (UTC)              |
@@ -59,12 +59,76 @@ Raw capture zone. Zero-friction input -- just text and a timestamp. No categoris
 **Indexes:** `idx_brain_dumps_processed` on `processed`, `idx_brain_dumps_captured` on `captured_at`, `idx_brain_dumps_processing_status` on `processing_status`
 
 **Processing status values:**
-- `unprocessed` -- freshly captured, not yet analysed
-- `processing` -- currently being analysed (transient state)
-- `processed` -- fully processed, all extracted items were auto-created (high confidence)
-- `needs_review` -- processed but contains suggested items awaiting Cam's approval
+- `unprocessed` -- legacy default for pre-migration rows; renders identically to `queued` in the UI
+- `queued` -- a `work_queue` row exists with `status='queued'` waiting for the worker
+- `processing` -- the worker has claimed the queue row (`work_queue.status='processing'`)
+- `processed` -- queue row terminal (`status='done'`); all extracted items were auto-created (high confidence)
+- `needs_review` -- queue row terminal (`status='done'`); contains suggested items awaiting Cam's approval
+- `failed` -- queue row terminal (`status='failed'`); worker exhausted retries. Cam can re-queue via `POST /api/brain-dumps/<id>/retry`
 
-**Retrieval scenarios:** "Show me everything I dumped this week that hasn't been processed yet." / "What did I capture on Tuesday?" / "What brain dumps need my review?"
+**Cache relationship.** `processing_status` is a denormalised display cache of the corresponding `work_queue` row's `status`. The worker writes both inside the same transaction so the UI can render badges from a single row read without joining. `work_queue` is the source of truth (e.g. for watchdog math on `claimed_at`); `brain_dumps.processing_status` exists purely to keep list views fast. See [`app/contracts/background-processing.md`](../app/contracts/background-processing.md) for the full state machine and sync rules.
+
+**Retrieval scenarios:** "Show me everything I dumped this week that hasn't been processed yet." / "What did I capture on Tuesday?" / "What brain dumps need my review?" / "Which dumps are waiting on the worker right now?"
+
+---
+
+### work_queue
+
+Operational queue for background jobs. The async worker (`python3 -m app.worker`) polls this table at 2-second intervals, claims one job at a time, runs it, and writes the outcome back here. Two job types today: brain-dump processing and prompt-set regeneration. **Source of truth** for job state; `brain_dumps.processing_status` is a denormalised cache. See [`app/contracts/background-processing.md`](../app/contracts/background-processing.md) for the full lifecycle.
+
+| Column       | Type    | Constraints | Description |
+|--------------|---------|-------------|-------------|
+| id           | INTEGER | PK, autoincrement | Unique identifier |
+| job_type     | TEXT    | NOT NULL, CHECK in (brain_dump, prompt_generation) | What kind of work |
+| target_id    | INTEGER | nullable | When `job_type='brain_dump'`, the `brain_dumps.id` this job is for. NULL for `prompt_generation` (one canonical prompt-set; no id needed). **Intentionally not a foreign key** -- the queue is operational history, and a brain-dump deletion shouldn't fail or cascade into queue audit rows. |
+| status       | TEXT    | NOT NULL, default 'queued', CHECK in (queued, processing, done, failed) | Job lifecycle state |
+| attempts     | INTEGER | NOT NULL, default 0 | Incremented at claim time, not at finalisation. A crash mid-job consumes an attempt -- deliberate poison-pill defence. Max 3 before terminal `failed`. |
+| error        | TEXT    | nullable | Last exception's `f"{type(exc).__name__}: {exc}"`. No tracebacks (those go to the worker log). NULL on the `done` path. |
+| queued_at    | TEXT    | NOT NULL, default now | When the row was inserted (UTC) |
+| claimed_at   | TEXT    | nullable | When the worker most recently claimed the row. Used by the watchdog: any `processing` row older than 5 minutes is reclaimed back to `queued`. |
+| completed_at | TEXT    | nullable | When the row reached a terminal state (`done` or `failed`) |
+
+**Indexes:**
+
+| Name | Definition | Purpose |
+|------|------------|---------|
+| `idx_work_queue_claim` | `(status, queued_at) WHERE status='queued'` | Covers the worker's claim query: pick the oldest queued row. Partial -- only indexes work waiting to be done. |
+| `idx_work_queue_one_active_per_dump` | UNIQUE `(job_type, target_id) WHERE job_type='brain_dump' AND status IN ('queued','processing')` | Enforces "at most one non-terminal queue entry per brain_dump." Terminal `failed` rows stay in place as audit; a retry inserts a new row. |
+| `idx_work_queue_one_active_prompt` | UNIQUE `(job_type) WHERE job_type='prompt_generation' AND status IN ('queued','processing')` | Coalescing: rapid `POST /api/prompts/generate` calls collapse into the in-flight job. |
+
+**Status values:**
+- `queued` -- waiting for the worker
+- `processing` -- claimed by the worker, currently being run
+- `done` -- terminal, completed successfully (kept as audit trail; no auto-prune)
+- `failed` -- terminal, ran out of retries (`attempts >= 3`). Re-queue via `POST /api/brain-dumps/<id>/retry`, which inserts a new row and leaves the failed one in place.
+
+**Retrieval scenarios:** "What's currently queued?" / "Show me anything that's failed in the last week." / "How long has the oldest in-flight job been running?" / "How many times did this dump retry before succeeding?"
+
+```sql
+-- Worker's atomic claim (the central query of the system, inside BEGIN IMMEDIATE):
+UPDATE work_queue
+   SET status='processing', claimed_at = datetime('now'), attempts = attempts + 1
+ WHERE id = (SELECT id FROM work_queue WHERE status='queued' ORDER BY queued_at ASC LIMIT 1)
+RETURNING id, job_type, target_id, attempts, claimed_at;
+
+-- Watchdog reclaim (every ~60s):
+UPDATE work_queue
+   SET status='queued', claimed_at = NULL
+ WHERE status = 'processing' AND claimed_at < datetime('now','-5 minutes');
+
+-- Anything stuck right now?
+SELECT id, job_type, target_id, attempts, claimed_at,
+       CAST((julianday('now') - julianday(claimed_at)) * 86400 AS INTEGER) AS age_seconds
+FROM work_queue
+WHERE status = 'processing'
+ORDER BY claimed_at ASC;
+
+-- Failure audit
+SELECT id, job_type, target_id, attempts, error, completed_at
+FROM work_queue
+WHERE status = 'failed'
+ORDER BY completed_at DESC;
+```
 
 ---
 
@@ -256,11 +320,23 @@ People can be linked to goals and tasks with a role describing the relationship.
 -- BRAIN DUMPS
 -- ============================================================
 
--- Unprocessed brain dumps (triage queue)
-SELECT * FROM brain_dumps WHERE processing_status = 'unprocessed' ORDER BY captured_at DESC;
+-- In-flight brain dumps (anything not yet at a terminal state)
+SELECT * FROM brain_dumps
+ WHERE processing_status IN ('unprocessed','queued','processing')
+ ORDER BY captured_at DESC;
 
 -- Brain dumps needing Cam's review (have suggested items)
 SELECT * FROM brain_dumps WHERE processing_status = 'needs_review' ORDER BY captured_at DESC;
+
+-- Brain dumps that failed processing (retry candidates)
+SELECT b.id, b.captured_at, w.attempts, w.error
+FROM brain_dumps b
+LEFT JOIN work_queue w
+       ON w.job_type = 'brain_dump'
+      AND w.target_id = b.id
+      AND w.status   = 'failed'
+WHERE b.processing_status = 'failed'
+ORDER BY w.completed_at DESC;
 
 -- Legacy query (still works via backward-compat processed column)
 -- SELECT * FROM brain_dumps WHERE processed = 0 ORDER BY captured_at DESC;
@@ -433,8 +509,10 @@ knowledge_items ----tags----> tags
 8. **Status fields use CHECK constraints.** Prevents typos and makes valid states explicit. Easy to extend by altering the constraint if new statuses emerge.
 9. **completed_at is separate from status.** Knowing *when* something completed enables time-based queries ("what did I finish last month?").
 10. **All timestamps default to `datetime('now')`.** Reduces capture friction -- just insert the content, timestamps handle themselves.
-11. **`processing_status` replaces boolean `processed` for brain dumps.** The old column is kept for backward compatibility, but new code should use `processing_status` which supports richer states: `unprocessed`, `processing`, `processed`, `needs_review`.
+11. **`processing_status` replaces boolean `processed` for brain dumps.** The old column is kept for backward compatibility, but new code should use `processing_status` which supports richer states: `unprocessed`, `queued`, `processing`, `processed`, `needs_review`, `failed`.
 12. **`processed_items` stores extraction results as JSON.** This keeps the full extraction history (including rejected suggestions) in the brain dump row, enabling audit trails and reprocessing. Schema defined in `PROCESSING_RULES.md`.
+13. **`work_queue` is the source of truth; `brain_dumps.processing_status` is a cache.** The worker writes both inside the same transaction. The denormalisation is deliberate: list views render badges from a single `brain_dumps` row read without joining to `work_queue`, and a row-by-row join in a hot list path was the alternative. Watchdog math (`claimed_at < now − 5m`) lives only on the queue, so there's exactly one place that arbitrates state. `work_queue.target_id` deliberately has no FK to `brain_dumps.id` so deletions don't cascade into audit history -- the queue is operational, not relational ground truth.
+14. **`work_queue` partial unique indexes encode the coalescing contract.** `idx_work_queue_one_active_per_dump` and `idx_work_queue_one_active_prompt` ensure that re-queueing a brain dump or trigging prompt regeneration is naturally idempotent at the DB layer -- the handler can attempt the insert and treat a UNIQUE-constraint failure as "already queued, no-op." Terminal `done`/`failed` rows are excluded from the index so they don't block legitimate re-queues.
 
 ## Extension Points
 
