@@ -1,0 +1,18 @@
+{
+  "name": "lifeplan-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "description": "End-to-end verification suite for Lifeplan. Owned by Probe.",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:webkit-only": "playwright test --project=webkit",
+    "test:chromium-only": "playwright test --project=chromium",
+    "test:ui": "playwright test --ui",
+    "report": "playwright show-report",
+    "install-browsers": "playwright install"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.49.1"
+  }
+}
