@@ -70,7 +70,7 @@ else
 fi
 
 # Quick HTTP check via localhost on the server
-HTTP_CODE=$(ssh "$SERVER" "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3131/")
+HTTP_CODE=$(ssh "$SERVER" "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3131/login")
 echo "    http:    $HTTP_CODE"
 
 if [[ "$HTTP_CODE" == "200" ]]; then
