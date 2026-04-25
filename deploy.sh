@@ -40,6 +40,17 @@ if [[ "$MODE" != "--db" ]]; then
         --exclude='*.pyc' \
         "$LOCAL_DIR/app/" \
         "$SERVER:$REMOTE_BASE/app/"
+
+    # Sync migration scripts so DB migrations land on the droplet alongside
+    # code. Migrations are applied manually by Forge (not by deploy.sh) but
+    # the file needs to be present on the host.
+    echo "--- syncing migration scripts ---"
+    ssh "$SERVER" "mkdir -p $REMOTE_BASE/scripts/migrations"
+    rsync -avz \
+        --exclude='__pycache__' \
+        --exclude='*.pyc' \
+        "$LOCAL_DIR/scripts/" \
+        "$SERVER:$REMOTE_BASE/scripts/"
 fi
 
 # ── Sync database (only with explicit flag) ──────────────────────
