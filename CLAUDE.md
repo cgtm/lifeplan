@@ -26,6 +26,9 @@ All team member definitions live in `/team/`. Each file is a self-contained pers
 | **Reed** | Knowledge Architect | `team/reed.md` |
 | **Lumen** | Product/Design Engineer | `team/lumen.md` |
 | **Forge** | Infrastructure Engineer | `team/forge.md` |
+| **Vault** | Backend Engineer (Application & Web Security) | `team/vault.md` |
+| **Probe** | Ship Verifier | `team/probe.md` |
+| **Cairn** | Tech Lead (Engineering Practice Owner) | `team/cairn.md` |
 
 ## Addressing Team Members
 Cam can directly address any team member by name (e.g. "Sage, research..." or "Nova, hire..."). Atlas will route accordingly.
@@ -43,3 +46,6 @@ Cam can directly address any team member by name (e.g. "Sage, research..." or "N
 2. Sage researches: what does a real human professional in this field know, do, and prioritise?
 3. Nova takes Sage's research and creates a new team member file in `/team/` with full persona, identity, and specialist instructions.
 4. Atlas updates this roster table.
+
+## Engineering Practice
+Cairn owns engineering *practice* and *process* on an ongoing basis: written artefacts (primers, runbooks, ADRs), retros, code review across persona boundaries, and the canonical `docs/processes/team-practices.md`. Cairn does not dispatch work (Atlas), verify deploys (Probe), or write app code (Vault/Lumen/Forge/Reed) — Cairn sits alongside those loops, reviewing inputs and outputs.
