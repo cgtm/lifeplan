@@ -40,6 +40,32 @@ Probe will not begin a gate run unless **all** of the following are true:
    password" step in the normal pass. If `.env` is missing, Probe
    surfaces the missing-file message from the auth fixture and
    suspends the run; Cam re-runs `./setup.sh` himself in his terminal.
+5. The login rate limiter is **not currently tripped**. The local
+   server's in-process limiter is 5 wrong-password attempts per IP per
+   15 minutes (`RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW` in `app/auth.py`).
+   The default suite fires 2 wrong-password attempts (one per browser
+   project), and a previous run that ended mid-retry — or any manual
+   poking at `/login` with the wrong password — can leave the limiter
+   close to or over the threshold. **Symptom:** the suite fails with a
+   cascade of unrelated-looking errors (logout 401s, "session cookie
+   should be present after login" — undefined, fixture login failing).
+   **Fix:** restart the local app to clear the in-process limiter, then
+   re-run:
+
+   ```sh
+   /Users/cam/dev/personal/lifeplan/lp restart
+   # wait until /login responds 200, then:
+   cd tests/e2e && npm test
+   ```
+
+   This is **not** a flake — it's deterministic state from the
+   limiter. A clean restart before each Probe pass is the safest
+   default when the prior state is unknown.
+6. Playwright browsers are installed. `npm install` does **not** pull
+   the browser binaries; `npx playwright install` does. `./setup.sh`
+   runs both. If you set up the suite by some other path and see
+   "Executable doesn't exist" or "browserType.launch: ... missing
+   dependencies," run `npx playwright install` from `tests/e2e/`.
 
 If any precondition fails, the gate run is **suspended**, not failed.
 Probe writes one line to Atlas naming the missing precondition.

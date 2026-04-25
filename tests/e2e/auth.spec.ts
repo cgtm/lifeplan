@@ -214,8 +214,10 @@ test.describe('GET / (auth-required)', () => {
     const res = await loggedInPage.goto(mountPrefix);
     expect(res?.status()).toBe(200);
     const body = await loggedInPage.content();
-    // The app HTML is index.html — its <title> is 'Lifeplan' and it contains the nav scaffold.
-    expect(body).toMatch(/<title>Lifeplan/);
+    // The app HTML is index.html — it has a <title> containing "lifeplan"
+    // (case-insensitive — branding casing is Lumen's call, not Probe's contract)
+    // and it contains the nav scaffold.
+    expect(body).toMatch(/<title>[^<]*lifeplan/i);
     expect(body).toMatch(/id=["']navMoreBtn["']/);
   });
 
