@@ -1636,28 +1636,191 @@ def _auto_create_item(conn, item, dump_id):
     return None
 
 
+def process_brain_dump_for_worker(conn, dump_id):
+    """
+    Worker-callable form of brain-dump processing.
+
+    Performs the LLM/regex extraction and writes any auto-created items via
+    `_auto_create_item`, but does NOT update `brain_dumps.processing_status`
+    and does NOT commit. Caller (the worker) owns:
+      * the `processing_status` cache transition (queued -> processing -> ...)
+      * the transactional boundary (commit / rollback)
+      * finalisation guard semantics on `work_queue`
+
+    Returns a dict with the fields the caller needs to finalise:
+
+        {
+            "processing_status": "processed" | "needs_review",
+            "processed_items_json": "<json string>",
+            "processed_at": "<iso ts>",
+            "auto_count": int,
+            "suggest_count": int,
+            "extraction_method": "llm" | "regex",
+        }
+
+    Raises on unrecoverable failure -- the worker's failure handler is
+    responsible for routing that into the retry / terminal-failure path on
+    `work_queue`.
+
+    Privacy invariant: this function may print debug context (counts, ids,
+    extraction method); it does NOT log or return brain-dump content. The
+    worker's logger never receives raw content from us.
+    """
+    row = conn.execute(
+        "SELECT * FROM brain_dumps WHERE id = ?", (dump_id,)
+    ).fetchone()
+    if not row:
+        # Caller's handle_failure will route this into retry / terminal.
+        raise ValueError(f"brain_dump {dump_id} not found")
+
+    dump = dict(row)
+    content = dump["content"]
+    preview = content[:80].replace("\n", " ")
+    print(f"  [processing] Starting brain dump #{dump_id}: \"{preview}...\"")
+    t_start = time.time()
+
+    # Load reference data from DB
+    goals_data = rows_to_dicts(
+        conn.execute("SELECT id, title, description, status FROM goals").fetchall()
+    )
+    known_people = rows_to_dicts(
+        conn.execute("SELECT id, name FROM people").fetchall()
+    )
+    known_tags = rows_to_dicts(
+        conn.execute("SELECT id, name FROM tags").fetchall()
+    )
+    print(f"  [processing] Context: {len(goals_data)} goals, {len(known_people)} people, {len(known_tags)} tags")
+
+    # Parse reference date from captured_at
+    captured_at = dump["captured_at"]
+    try:
+        ref_date = datetime.strptime(captured_at, "%Y-%m-%d %H:%M:%S")
+    except (ValueError, TypeError):
+        ref_date = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    # Primary path: LLM extraction via Ollama / Mistral fallback
+    llm_items = process_brain_dump_llm(
+        dump_id, conn, dump, goals_data, known_people, known_tags, ref_date
+    )
+
+    if llm_items is not None:
+        all_items = llm_items
+        extraction_method = "llm"
+    else:
+        # Fallback: regex-based extraction
+        extraction_method = "regex"
+        print("  [regex] Running regex-based extraction")
+
+        segments = segment_text(content)
+        print(f"  [regex] Split into {len(segments)} segments")
+
+        all_items = []
+        seen_person_ids = set()
+        seen_new_names = set()
+
+        for seg in segments:
+            seg_dates = detect_dates(seg, ref_date)
+
+            people_items = detect_people(seg, known_people)
+            for pi in people_items:
+                if pi["type"] == "person_mention":
+                    pid = pi["data"]["person_id"]
+                    if pid not in seen_person_ids:
+                        seen_person_ids.add(pid)
+                        all_items.append(pi)
+                elif pi["type"] == "person_new":
+                    name_key = pi["data"]["name"].lower()
+                    if name_key not in seen_new_names:
+                        seen_new_names.add(name_key)
+                        all_items.append(pi)
+
+            goal_new_items = detect_goals(seg, known_people, ref_date)
+            all_items.extend(goal_new_items)
+
+            if not goal_new_items:
+                task_items = detect_tasks(seg, goals_data, seg_dates)
+                all_items.extend(task_items)
+
+            knowledge_items = detect_knowledge(seg, dump_id)
+            all_items.extend(knowledge_items)
+
+        goal_links = match_goal_links(content, dump_id, goals_data)
+        all_items.extend(goal_links)
+
+        tag_items = detect_tags(content, all_items, known_tags)
+        all_items.extend(tag_items)
+
+        type_counts = Counter(i["type"] for i in all_items)
+        summary = ", ".join(f"{cnt} {t}" for t, cnt in sorted(type_counts.items()))
+        print(f"  [regex] Extracted {len(all_items)} items: {summary}")
+
+    # Confidence filtering -- discard items below 0.50
+    filtered_items = [
+        item for item in all_items if item["confidence"] >= 0.50
+    ]
+
+    # Auto-create high-confidence items
+    auto_count = 0
+    suggest_count = 0
+    for item in filtered_items:
+        if item["confidence"] >= 0.80:
+            item["status"] = "auto_created"
+            created_id = _auto_create_item(conn, item, dump_id)
+            item["created_id"] = created_id
+            auto_count += 1
+        else:
+            item["status"] = "suggested"
+            suggest_count += 1
+
+    has_suggestions = any(
+        item["status"] == "suggested" for item in filtered_items
+    )
+    processing_status = "needs_review" if has_suggestions else "processed"
+
+    elapsed = time.time() - t_start
+    print(f"  [processing] Done #{dump_id} in {elapsed:.1f}s via {extraction_method}: "
+          f"{auto_count} auto-created, {suggest_count} suggested, "
+          f"status={processing_status}")
+
+    ts = now_utc()
+    processed_json = json.dumps({
+        "version": 1,
+        "processed_at": ts,
+        "extraction_method": extraction_method,
+        "items": filtered_items,
+    }, ensure_ascii=False)
+
+    return {
+        "processing_status": processing_status,
+        "processed_items_json": processed_json,
+        "processed_at": ts,
+        "auto_count": auto_count,
+        "suggest_count": suggest_count,
+        "extraction_method": extraction_method,
+    }
+
+
 def process_brain_dump(dump_id):
     """
-    Main processing pipeline for a brain dump.
-    Implements the full pipeline from PROCESSING_RULES.md.
-    Tries LLM extraction first, falls back to regex if unavailable.
+    Main processing pipeline for a brain dump (synchronous / HTTP-handler form).
+
+    This is the legacy synchronous entrypoint, kept for backward compat with
+    `handle_process_brain_dump`. Phase 3 will swap that handler over to the
+    queue, at which point this wrapper can be retired.
+
+    Today's behaviour is preserved: we open a connection, drive
+    `process_brain_dump_for_worker`, sync the brain_dumps cache, commit, and
+    return an HTTP-shaped tuple.
     """
     conn = get_db()
     try:
-        # Fetch the brain dump
         row = conn.execute(
-            "SELECT * FROM brain_dumps WHERE id = ?", (dump_id,)
+            "SELECT id FROM brain_dumps WHERE id = ?", (dump_id,)
         ).fetchone()
         if not row:
             return 404, {"error": "Brain dump not found"}
 
-        dump = dict(row)
-        content = dump["content"]
-        preview = content[:80].replace("\n", " ")
-        print(f"  [processing] Starting brain dump #{dump_id}: \"{preview}...\"")
-        t_start = time.time()
-
-        # Set status to processing
+        # Mark processing (mirrors prior behaviour for any UI peeking mid-run).
         conn.execute(
             "UPDATE brain_dumps SET processing_status = 'processing' WHERE id = ?",
             (dump_id,),
@@ -1665,167 +1828,42 @@ def process_brain_dump(dump_id):
         conn.commit()
 
         try:
-            # Load reference data from DB
-            goals_data = rows_to_dicts(
-                conn.execute("SELECT id, title, description, status FROM goals").fetchall()
-            )
-            known_people = rows_to_dicts(
-                conn.execute("SELECT id, name FROM people").fetchall()
-            )
-            known_tags = rows_to_dicts(
-                conn.execute("SELECT id, name FROM tags").fetchall()
-            )
-            print(f"  [processing] Context: {len(goals_data)} goals, {len(known_people)} people, {len(known_tags)} tags")
-
-            # Parse reference date from captured_at
-            captured_at = dump["captured_at"]
-            try:
-                ref_date = datetime.strptime(captured_at, "%Y-%m-%d %H:%M:%S")
-            except (ValueError, TypeError):
-                ref_date = datetime.now(timezone.utc).replace(tzinfo=None)
-
-            # Primary path: LLM extraction via Ollama
-            llm_items = process_brain_dump_llm(
-                dump_id, conn, dump, goals_data, known_people, known_tags, ref_date
-            )
-
-            if llm_items is not None:
-                # LLM succeeded -- use its output
-                all_items = llm_items
-                extraction_method = "llm"
-            else:
-                # Fallback: regex-based extraction
-                extraction_method = "regex"
-                print("  [regex] Running regex-based extraction")
-
-                # Step 1: Segment splitting
-                segments = segment_text(content)
-                print(f"  [regex] Split into {len(segments)} segments")
-
-                all_items = []
-                seen_person_ids = set()
-                seen_new_names = set()
-
-                # Step 2-5: Process each segment
-                for seg in segments:
-                    # Step 2: Date detection
-                    seg_dates = detect_dates(seg, ref_date)
-
-                    # Step 3: People detection
-                    people_items = detect_people(seg, known_people)
-                    for pi in people_items:
-                        if pi["type"] == "person_mention":
-                            pid = pi["data"]["person_id"]
-                            if pid not in seen_person_ids:
-                                seen_person_ids.add(pid)
-                                all_items.append(pi)
-                        elif pi["type"] == "person_new":
-                            name_key = pi["data"]["name"].lower()
-                            if name_key not in seen_new_names:
-                                seen_new_names.add(name_key)
-                                all_items.append(pi)
-
-                    # Step 4a: Goal creation detection (before tasks so
-                    # "create a goal ..." isn't misclassified as a task)
-                    goal_new_items = detect_goals(seg, known_people, ref_date)
-                    all_items.extend(goal_new_items)
-
-                    # Step 4b: Task detection (skip if segment was a goal creation)
-                    if not goal_new_items:
-                        task_items = detect_tasks(seg, goals_data, seg_dates)
-                        all_items.extend(task_items)
-
-                    # Step 5: Knowledge extraction
-                    knowledge_items = detect_knowledge(seg, dump_id)
-                    all_items.extend(knowledge_items)
-
-                # Step 6: Goal relevance (standalone links)
-                goal_links = match_goal_links(content, dump_id, goals_data)
-                all_items.extend(goal_links)
-
-                # Step 7: Tag generation
-                tag_items = detect_tags(content, all_items, known_tags)
-                all_items.extend(tag_items)
-
-                # Summarise regex results
-                type_counts = Counter(i["type"] for i in all_items)
-                summary = ", ".join(f"{cnt} {t}" for t, cnt in sorted(type_counts.items()))
-                print(f"  [regex] Extracted {len(all_items)} items: {summary}")
-
-            # Step 8: Confidence filtering -- discard items below 0.50
-            filtered_items = [
-                item for item in all_items if item["confidence"] >= 0.50
-            ]
-
-            # Step 9: Auto-create high-confidence items
-            auto_count = 0
-            suggest_count = 0
-            for item in filtered_items:
-                if item["confidence"] >= 0.80:
-                    item["status"] = "auto_created"
-                    created_id = _auto_create_item(conn, item, dump_id)
-                    item["created_id"] = created_id
-                    auto_count += 1
-                else:
-                    item["status"] = "suggested"
-                    suggest_count += 1
-
-            # Determine processing status
-            has_suggestions = any(
-                item["status"] == "suggested" for item in filtered_items
-            )
-            processing_status = "needs_review" if has_suggestions else "processed"
-
-            elapsed = time.time() - t_start
-            print(f"  [processing] Done #{dump_id} in {elapsed:.1f}s via {extraction_method}: "
-                  f"{auto_count} auto-created, {suggest_count} suggested, "
-                  f"status={processing_status}")
-
-            ts = now_utc()
-            processed_json = json.dumps({
-                "version": 1,
-                "processed_at": ts,
-                "extraction_method": extraction_method,
-                "items": filtered_items,
-            }, ensure_ascii=False)
-
-            # Update brain dump row
-            conn.execute(
-                "UPDATE brain_dumps SET "
-                "processing_status = ?, processed_items = ?, processed_at = ?, "
-                "processed = ?, updated_at = ? "
-                "WHERE id = ?",
-                (
-                    processing_status,
-                    processed_json,
-                    ts,
-                    1 if processing_status == "processed" else 0,
-                    ts,
-                    dump_id,
-                ),
-            )
-            conn.commit()
-
-            # Return the updated dump
-            updated = dict(
-                conn.execute("SELECT * FROM brain_dumps WHERE id = ?", (dump_id,)).fetchone()
-            )
-            updated["tags"] = get_tags_for(conn, "brain_dump_tags", "brain_dump_id", dump_id)
-            # Parse JSON for the response
-            if updated.get("processed_items"):
-                updated["processed_items"] = json.loads(updated["processed_items"])
-            return 200, updated
-
+            result = process_brain_dump_for_worker(conn, dump_id)
         except Exception as e:
-            elapsed = time.time() - t_start
-            print(f"  [processing] ERROR #{dump_id} after {elapsed:.1f}s: {e}")
-            # On error, reset status and re-raise
+            # Mirror legacy reset-to-unprocessed on synchronous failure.
+            print(f"  [processing] ERROR #{dump_id}: {type(e).__name__}: {e}")
             conn.execute(
                 "UPDATE brain_dumps SET processing_status = 'unprocessed' WHERE id = ?",
                 (dump_id,),
             )
             conn.commit()
             return 500, {"error": f"Processing failed: {str(e)}"}
+
+        ts = result["processed_at"]
+        processing_status = result["processing_status"]
+        conn.execute(
+            "UPDATE brain_dumps SET "
+            "processing_status = ?, processed_items = ?, processed_at = ?, "
+            "processed = ?, updated_at = ? "
+            "WHERE id = ?",
+            (
+                processing_status,
+                result["processed_items_json"],
+                ts,
+                1 if processing_status == "processed" else 0,
+                ts,
+                dump_id,
+            ),
+        )
+        conn.commit()
+
+        updated = dict(
+            conn.execute("SELECT * FROM brain_dumps WHERE id = ?", (dump_id,)).fetchone()
+        )
+        updated["tags"] = get_tags_for(conn, "brain_dump_tags", "brain_dump_id", dump_id)
+        if updated.get("processed_items"):
+            updated["processed_items"] = json.loads(updated["processed_items"])
+        return 200, updated
 
     finally:
         conn.close()
