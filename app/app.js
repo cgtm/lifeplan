@@ -226,6 +226,8 @@ function actionsHtml(editFn, deleteFn) {
 let currentView = 'home';
 
 function navigate(view) {
+  // Stop brain-dump polling when leaving any dump-rendering surface.
+  if (view !== 'dump' && view !== 'home') stopBrainDumpPolling();
   currentView = view;
   $$('.view').forEach(v => v.classList.remove('active'));
   $(`#view-${view}`).classList.add('active');
@@ -399,6 +401,12 @@ function renderHome(data) {
   } else {
     $('#homeRecentDumps').innerHTML = '';
   }
+
+  // Polling: kick off if a recent dump is in flight.
+  if (currentView === 'home') {
+    if (_hasInflightDump()) startBrainDumpPolling();
+    else stopBrainDumpPolling();
+  }
 }
 
 // ── Home brain dump ─────────────────────────────────────
@@ -424,21 +432,21 @@ async function submitHomeDump() {
   homeDump.value = '';
   homeDumpSend.classList.remove('visible');
   autoResize(homeDump);
-  showDumpStatus(homeDumpStatus, 'processing', 'Captured. Processing with AI...');
+  showDumpStatus(homeDumpStatus, 'processing', 'Capturing...');
 
   try {
     const result = await api('/brain-dumps', { method: 'POST', body: { content } });
 
     if (result && result.error) {
-      showDumpStatus(homeDumpStatus, 'error', 'Something went wrong. Your text has been saved — try refreshing.');
+      showDumpStatus(homeDumpStatus, 'error', 'Couldn’t save dump. Try again.');
     } else {
-      // Phase 3: completion feedback
-      const msg = buildCompletionMessage(result);
-      showDumpStatus(homeDumpStatus, 'success', msg);
-      scheduleDumpStatusClear(homeDumpStatus, 4500);
+      // 202 Accepted — dump queued; worker will process in background.
+      showDumpStatus(homeDumpStatus, 'success', 'Captured. Processing in background.');
+      scheduleDumpStatusClear(homeDumpStatus, 3500);
     }
 
-    // Refresh home data
+    // Refresh home data — loadHome() will see the new queued row and
+    // startBrainDumpPolling() is called from renderHome's tail.
     loadHome();
   } catch (err) {
     showDumpStatus(homeDumpStatus, 'error', 'Something went wrong. Your text has been saved — try refreshing.');
@@ -679,16 +687,147 @@ async function loadDumps() {
   updateDumpBadge(reviewCount);
 }
 
+// Background-processing contract — Visual states.
+// `unprocessed` (legacy) renders identically to `queued`.
 function processingStatusLabel(d) {
   const st = d.processing_status || (d.processed ? 'processed' : 'unprocessed');
-  const labels = {
-    'unprocessed': 'unprocessed',
-    'processing': 'processing',
-    'processed': 'processed',
-    'needs_review': 'needs review',
-  };
-  const cssClass = st === 'needs_review' ? 'needs-review' : st;
-  return `<span class="dump-processed ${esc(cssClass)}">${esc(labels[st] || st)}</span>`;
+  if (st === 'queued' || st === 'unprocessed') {
+    return `<span class="dump-badge pending" data-dump-status="${esc(st)}">Pending</span>`;
+  }
+  if (st === 'processing') {
+    return `<span class="dump-badge processing" data-dump-status="processing"><span class="dump-badge-spinner"></span>Processing</span>`;
+  }
+  if (st === 'processed') {
+    return `<span class="dump-badge done" data-dump-status="processed">Done</span>`;
+  }
+  if (st === 'needs_review') {
+    return `<span class="dump-badge review" data-dump-status="needs_review">Needs review</span>`;
+  }
+  if (st === 'failed') {
+    return `<span class="dump-badge failed" data-dump-status="failed">Failed</span>`;
+  }
+  // Defensive — unknown status, render as pending so it never looks terminal.
+  return `<span class="dump-badge pending" data-dump-status="${esc(st)}">${esc(st)}</span>`;
+}
+
+// Inline button that sits next to a Failed badge.
+function retryButton(d) {
+  if (d.processing_status !== 'failed') return '';
+  return `<button class="dump-retry-btn" data-dump-id="${d.id}" data-action="retry">Retry</button>`;
+}
+
+// ── Brain-dump polling (background-processing contract) ─────
+// 3s setTimeout recursion (NOT setInterval). Bound to currentView so it
+// stops on navigation. Stops once no visible dump is in {queued, unprocessed,
+// processing}. Restarts after Retry.
+const POLL_INTERVAL_MS = 3000;
+const INFLIGHT_STATES = new Set(['queued', 'unprocessed', 'processing']);
+let _dumpPollTimer = null;
+
+function _pageShowsDumps() {
+  return currentView === 'dump' || currentView === 'home';
+}
+
+function _hasInflightDump() {
+  // Source list depends on which view is showing dumps.
+  if (currentView === 'dump') {
+    return allDumps.some(d => INFLIGHT_STATES.has(d.processing_status));
+  }
+  if (currentView === 'home') {
+    const cards = document.querySelectorAll('#homeRecentDumps .dump-badge[data-dump-status]');
+    for (const c of cards) {
+      if (INFLIGHT_STATES.has(c.dataset.dumpStatus)) return true;
+    }
+  }
+  return false;
+}
+
+async function _pollOnce() {
+  _dumpPollTimer = null;
+  if (!_pageShowsDumps()) return;
+  try {
+    if (currentView === 'dump') {
+      await loadDumps();
+    } else if (currentView === 'home') {
+      // Only the recent-dumps strip needs refresh; reuse loadHome but it's
+      // cheap and also keeps prompts/goals fresh.
+      const data = await api('/dashboard');
+      renderHome(data);
+    }
+  } catch (_) {
+    // Network error — keep polling; the contract says "polling will resync".
+  }
+  if (_pageShowsDumps() && _hasInflightDump()) {
+    _dumpPollTimer = setTimeout(_pollOnce, POLL_INTERVAL_MS);
+  }
+}
+
+function startBrainDumpPolling() {
+  if (_dumpPollTimer) return; // already polling
+  if (!_pageShowsDumps()) return;
+  if (!_hasInflightDump()) return;
+  _dumpPollTimer = setTimeout(_pollOnce, POLL_INTERVAL_MS);
+}
+
+function stopBrainDumpPolling() {
+  if (_dumpPollTimer) { clearTimeout(_dumpPollTimer); _dumpPollTimer = null; }
+}
+
+// ── Tiny toast (used for retry race feedback) ───────────────
+let _toastTimer = null;
+function showToast(msg) {
+  let el = document.getElementById('lpToast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'lpToast';
+    el.className = 'lp-toast';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  requestAnimationFrame(() => el.classList.add('visible'));
+  if (_toastTimer) clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => el.classList.remove('visible'), 2800);
+}
+
+// ── Retry handler (background-processing contract) ──────────
+async function retryBrainDump(id) {
+  const dump = allDumps.find(d => d.id === id);
+  // Optimistic flip — mutate local model, re-render, then fire request.
+  if (dump) dump.processing_status = 'queued';
+  if (currentView === 'dump') renderDumps();
+  try {
+    const res = await fetch(`${MOUNT}api/brain-dumps/${id}/retry`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    if (res.status === 401) { window.location.href = `${MOUNT}login`; return; }
+    if (res.status === 202) {
+      // Optimistic flip already applied; just kick polling.
+      startBrainDumpPolling();
+      return;
+    }
+    if (res.status === 409) {
+      showToast('Could not retry: already in progress.');
+      // Resync from server so badge reflects truth.
+      if (currentView === 'dump') loadDumps();
+      else if (currentView === 'home') loadHome();
+      return;
+    }
+    if (res.status === 404) {
+      showToast('That dump no longer exists.');
+      if (currentView === 'dump') loadDumps();
+      return;
+    }
+    showToast('Retry failed.');
+    // Roll the badge back to failed.
+    if (dump) dump.processing_status = 'failed';
+    if (currentView === 'dump') renderDumps();
+  } catch (_) {
+    showToast('Network error.');
+    if (dump) dump.processing_status = 'failed';
+    if (currentView === 'dump') renderDumps();
+  }
 }
 
 function processingResultsPills(d) {
@@ -802,6 +941,7 @@ function renderDumps() {
         <div class="dump-item-header">
           <span class="dump-time">${fmtRelative(d.captured_at)}</span>
           ${processingStatusLabel(d)}
+          ${retryButton(d)}
           <span style="flex:1"></span>
           ${needsReview && suggestedCount > 0 ? `
             <button class="btn-review" data-dump-id="${d.id}">
@@ -840,8 +980,21 @@ function renderDumps() {
     });
   });
 
+  // Bind retry buttons (failed rows)
+  el.querySelectorAll('.dump-retry-btn[data-action="retry"]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = parseInt(btn.dataset.dumpId);
+      btn.disabled = true;
+      retryBrainDump(id);
+    });
+  });
+
   // Bind clickable result pills
   bindResultPills(el);
+
+  // Polling: kick off if any visible dump is in flight; stop otherwise.
+  if (_hasInflightDump()) startBrainDumpPolling();
+  else stopBrainDumpPolling();
 }
 
 // Dump filter pills
@@ -874,20 +1027,20 @@ dumpSend.addEventListener('click', async () => {
   dumpInput.value = '';
   dumpSend.classList.remove('visible');
   autoResize(dumpInput);
-  showDumpStatus(dumpStatus, 'processing', 'Captured. Processing with AI...');
+  showDumpStatus(dumpStatus, 'processing', 'Capturing...');
 
   try {
     const result = await api('/brain-dumps', { method: 'POST', body: { content } });
 
     if (result && result.error) {
-      showDumpStatus(dumpStatus, 'error', 'Something went wrong. Your text has been saved — try refreshing.');
+      showDumpStatus(dumpStatus, 'error', 'Couldn’t save dump. Try again.');
     } else {
-      // Phase 3: completion feedback
-      const msg = buildCompletionMessage(result);
-      showDumpStatus(dumpStatus, 'success', msg);
-      scheduleDumpStatusClear(dumpStatus, 4500);
+      // 202 Accepted — dump queued; worker will process in background.
+      showDumpStatus(dumpStatus, 'success', 'Captured. Processing in background.');
+      scheduleDumpStatusClear(dumpStatus, 3500);
     }
 
+    // loadDumps() will renderDumps() which kicks polling if anything in flight.
     loadDumps();
   } catch (err) {
     showDumpStatus(dumpStatus, 'error', 'Something went wrong. Your text has been saved — try refreshing.');

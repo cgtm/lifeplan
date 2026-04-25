@@ -1100,6 +1100,85 @@ main {
 .dump-processed.unprocessed { background: var(--amber-bg); color: var(--amber); }
 .dump-processed.processed   { background: var(--green-bg); color: var(--green); }
 
+/* ── Brain dump processing badges (background-processing contract) ── */
+.dump-badge {
+  font-size: 0.5625rem;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 100px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.dump-badge.pending    { background: var(--accent-bg); color: var(--text-2); }
+.dump-badge.processing { background: var(--accent-bg); color: var(--text-2); }
+.dump-badge.done       { background: var(--green-bg); color: var(--green); }
+.dump-badge.review     { background: var(--amber-bg); color: var(--amber); }
+.dump-badge.failed     { background: var(--danger-bg); color: var(--danger); }
+
+.dump-badge-spinner {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  animation: dumpBadgeSpin 700ms linear infinite;
+  opacity: 0.85;
+}
+
+@keyframes dumpBadgeSpin {
+  to { transform: rotate(360deg); }
+}
+
+.dump-retry-btn {
+  font-family: var(--font);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  padding: 3px 10px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--danger);
+  cursor: pointer;
+  margin-left: 6px;
+  transition: background var(--transition), color var(--transition);
+}
+
+.dump-retry-btn:hover { background: var(--danger); color: white; }
+.dump-retry-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* ── Tiny floating toast (used for retry race feedback) ───── */
+.lp-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 32px;
+  transform: translateX(-50%) translateY(20px);
+  background: var(--text);
+  color: var(--bg);
+  font-size: 0.8125rem;
+  padding: 10px 18px;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 200ms ease, transform 200ms ease;
+  z-index: 300;
+  max-width: calc(100vw - 48px);
+}
+
+.lp-toast.visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+@media (max-width: 640px) {
+  .lp-toast { bottom: 88px; }
+}
+
 .dump-item-content {
   font-size: 0.9375rem;
   line-height: 1.6;
