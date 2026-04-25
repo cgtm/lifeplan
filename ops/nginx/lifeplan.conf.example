@@ -1,0 +1,48 @@
+# HTTP: redirect everything to HTTPS
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name your-domain.example www.your-domain.example;
+
+    return 301 https://$host$request_uri;
+}
+
+# HTTPS: serve the site
+server {
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+    server_name your-domain.example www.your-domain.example;
+
+    ssl_certificate /etc/letsencrypt/live/your-domain.example/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/your-domain.example/privkey.pem;
+
+    # Security headers
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    # Security headers
+
+    root /var/www/html;
+    index index.html index.htm;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+
+    # lifeplan -- reverse proxy (auth handled by app via cookie session)
+    location /lifeplan/ {
+        limit_req zone=authzone burst=20 nodelay;
+
+        # Strip /lifeplan prefix before proxying
+        proxy_pass http://127.0.0.1:3131/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+}
