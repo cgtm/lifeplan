@@ -21,19 +21,27 @@ rationale second, appendix last.
 Operational how-to. Goal · preconditions · numbered steps · verification ·
 failure modes and recovery. Written for the next person.
 
+- **[remote-sudo.md](runbooks/remote-sudo.md)** — how to do privileged
+  operations on the droplet.
+- **[verify-droplet-network-posture.md](runbooks/verify-droplet-network-posture.md)** —
+  real checks (not banner-reading) for SSH, firewall, Tailscale, and
+  exposed-port posture on the droplet.
+- **[probe-manual-checklist.md](runbooks/probe-manual-checklist.md)** —
+  Probe's manual verification checklist for qualifying features.
+- **[probe-go-no-go.md](runbooks/probe-go-no-go.md)** — Probe's go/no-go
+  decision procedure and reporting format.
+
 *Queued (from the cookie-auth retro):*
-- `verify-droplet-network-posture.md` — replace banner-reading with real
-  checks.
-- `remote-sudo.md` — how to do privileged operations on the droplet.
 - `deploy-sh-health-check.md` — fix the 401 warning under cookie auth.
 
 ### [Decisions](decisions/)
 ADRs in Nygard format. Numbered, never edited after acceptance, only
 superseded.
 
-*Queued:*
-- `0001-http-method-coverage-on-handler-overrides.md` — handler overrides
-  must cover GET *and* HEAD.
+*No active ADRs yet.* The previously-queued
+`0001-http-method-coverage-on-handler-overrides` was closed as below the
+ADR threshold (reversal cost is trivial). The rule lives in
+[`team-practices.md` §9](processes/team-practices.md#9-http-method-coverage-on-handler-overrides).
 
 ### [Onboarding](onboarding/)
 Per-role primers for new personas joining the team. What to read, in what

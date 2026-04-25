@@ -180,4 +180,7 @@ Do not do any of these.
 
 - The cookie-auth session retro: `/Users/cam/dev/personal/lifeplan/docs/retrospectives/2026-04-25-cookie-auth.md`. Forge encountered the non-interactive `sudo` failure mode while staging an nginx config change; the atomic backup-swap-test-rollback block crystallised there.
 - Earlier sessions established that `your-user`-owned paths (notably `/opt/lifeplan/.env`) do not require any of this — `scp` + `mv` is enough.
-- `NOPASSWD`-for-narrow-commands was discussed in the same session and rejected without an ADR; revisit only via the ADR process if the staging pattern starts costing real time.
+- `NOPASSWD`-for-narrow-commands was discussed in the same session and rejected without an ADR. **Status: monitored.** Revisit (write the ADR) when *either* trigger fires:
+    1. Three deploy/ops sessions in a row where the staging pattern adds >5 minutes of friction per session, or
+    2. A single session where interactive-`sudo` blocks a time-critical fix (e.g. a production rollback waiting on an SSH password prompt).
+  Until then, the staging pattern stands. If the trigger fires, Forge raises it with Cairn for ADR drafting before changing sudoers.

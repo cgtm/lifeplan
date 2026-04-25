@@ -22,6 +22,7 @@ changes, update this file; the persona files only carry pointers to it.
 6. [Rule of Two](#6-rule-of-two) — accepted
 7. [Stay-in-lane handoffs](#7-stay-in-lane-handoffs) — proposed
 8. [Probe verification mandatory](#8-probe-verification-mandatory) — accepted
+9. [HTTP method coverage on handler overrides](#9-http-method-coverage-on-handler-overrides) — accepted
 
 ---
 
@@ -301,6 +302,42 @@ any feature that falls into their remit."*
   is not required. When in doubt, dispatch to Probe.
 
 **Status:** accepted (2026-04-23).
+
+---
+
+## 9. HTTP method coverage on handler overrides
+
+**Statement.** When a request handler overrides one HTTP method for a route
+(e.g. `do_GET`), it must also cover the semantically-paired methods that
+clients can reasonably send for the same route. Concretely: any route that
+overrides `do_GET` must also handle `HEAD`, returning the same status code
+and headers as the corresponding `GET` (with no body). The default fallback
+to `SimpleHTTPRequestHandler.do_HEAD` is not acceptable for routes the
+handler claims to own, because it will 404 on virtual routes.
+
+**Why.** Vault's `do_GET` override for `/login` did not cover `HEAD`, so
+`curl -sI` and the original `deploy.sh` health probe both 404'd against a
+route that real users (browsers, on `GET`) reach without issue. Two
+occurrences across two surfaces = Rule of Two. Reversal cost is trivial,
+so this lives as a practice rather than an ADR.
+
+**How to apply.**
+
+- For each `do_GET` override, add a `do_HEAD` that delegates to the same
+  routing logic and suppresses the body. The simplest correct form is
+  usually `do_HEAD = do_GET` *if* the handler also routes by method
+  internally, otherwise an explicit `do_HEAD` that calls a shared
+  `_route(method)` helper.
+- Health checks and external monitors should prefer `GET` to `HEAD` unless
+  there's a specific reason (bandwidth, idempotence) — but the server-side
+  rule above is the load-bearing one.
+- Review check: Cairn greps every server-side diff for `def do_GET` and
+  flags any route that doesn't have a paired `do_HEAD` (or a documented
+  reason it doesn't need one, e.g. POST-only endpoints).
+
+**Status:** accepted (2026-04-23). Provenance: triage entry of 2026-04-23,
+HEAD-vs-GET 404 on `/login`. Two occurrences (production curl-check;
+`deploy.sh` health probe, since worked-around by switching to GET).
 
 ---
 
