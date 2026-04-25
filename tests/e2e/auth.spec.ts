@@ -138,15 +138,20 @@ test.describe('POST /login (public)', () => {
 // ──────────────────────────────────────────────────────────────────
 // Contract: rate limiting on /login
 //
-// Run last in the describe block, and only against a server with a fresh
-// in-process limiter. The brief allows either a fresh password per run or
-// a server restart in beforeAll. We do the latter when LIFEPLAN_RESTART_CMD
-// is set (e.g. "lp restart"); otherwise the test is skipped with a clear
-// reason so a half-burned limiter doesn't show as a green pass.
+// Skipped by default: this test fires 6 wrong-password attempts, which
+// burns the in-process limiter slots and means the next default `npm test`
+// run would need a server restart to clear. Probe runs default-runs often,
+// rate-limit verification rarely. Gate it behind RATE_LIMIT_TEST=1 — the
+// test then expects LIFEPLAN_RESTART_CMD too so it can reset the limiter
+// in beforeAll.
+//
+// Cadence: run on demand when /login or auth.py rate-limit code changes,
+// not on every Probe pass. See docs/runbooks/probe-go-no-go.md.
 // ──────────────────────────────────────────────────────────────────
 
 test.describe('POST /login rate limit', () => {
   test.beforeAll(async () => {
+    if (process.env.RATE_LIMIT_TEST !== '1') return;
     const restart = process.env.LIFEPLAN_RESTART_CMD;
     if (!restart) return;
     // Best-effort restart. We import lazily so test discovery doesn't pull node:child_process.
@@ -169,8 +174,12 @@ test.describe('POST /login rate limit', () => {
 
   test('contract: 5 failures return 401, 6th returns 429', async ({ apiCtx, page, loginPath }) => {
     test.skip(
+      process.env.RATE_LIMIT_TEST !== '1',
+      'Skipped by default. Set RATE_LIMIT_TEST=1 (and LIFEPLAN_RESTART_CMD) to run; this test burns the in-process limiter slots.',
+    );
+    test.skip(
       !process.env.LIFEPLAN_RESTART_CMD,
-      'Set LIFEPLAN_RESTART_CMD="lp restart" (or equivalent) to run this — without it, prior failed-login tests have already burned slots.',
+      'RATE_LIMIT_TEST=1 also requires LIFEPLAN_RESTART_CMD (e.g. "/path/to/lp restart") so the limiter starts fresh.',
     );
 
     const wrongPw = 'rl-probe-' + Date.now();

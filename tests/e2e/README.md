@@ -3,55 +3,54 @@
 Owned by **Probe** (Ship Verifier). Every test maps to a clause in
 `app/contracts/cookie-auth.md`. New shipped bug → permanent fixture here.
 
-## Install
+The suite is designed to be **Probe-runnable**: any team member who needs
+to verify a build runs `npm test` and gets an answer. Cam writes the
+local-dev password into `tests/e2e/.env` once via `./setup.sh`, and from
+that point on the team is self-serve.
+
+## First-time setup
+
+On a fresh checkout, **Cam** runs this once in his own terminal:
 
 ```sh
 cd tests/e2e
 npm install
 npx playwright install chromium webkit
+./setup.sh
 ```
 
-Browsers are downloaded into `~/Library/Caches/ms-playwright`, not into the
-repo.
+`setup.sh` prompts silently (`read -s`) for the local-dev password,
+writes `tests/e2e/.env` with mode `600`, and exits. The password is never
+echoed, never logged, never committed (`.env` is gitignored).
 
-## Run locally
+Browsers are downloaded into `~/Library/Caches/ms-playwright`, not the repo.
 
-The local server (`lp start`) must be up on `http://localhost:3131/`.
+`tests/e2e/.env.example` is the committed contract — copy it to `.env`
+manually if you'd rather skip the prompt.
+
+## Run the suite (the team — including Probe — does this)
 
 ```sh
-LIFEPLAN_TEST_PASSWORD='<the-current-dev-password>' npm test
+cd tests/e2e
+npm test
 ```
 
-The dev password lives in Vault's notes — **not** in this repo. If unsure
-which password is current, ask Atlas. The previous documented value
-(`testpass-dev`) was rotated.
+`playwright.config.ts` loads `tests/e2e/.env` at startup via `dotenv`, so
+no env vars need to be passed inline. If the file is missing, the auth
+fixture fails with a clear message pointing at `setup.sh`.
 
 ### Headed / single-browser
 
 ```sh
-LIFEPLAN_TEST_PASSWORD='…' npm run test:headed         # show the browser
-LIFEPLAN_TEST_PASSWORD='…' npm run test:webkit-only    # iOS proxy
-LIFEPLAN_TEST_PASSWORD='…' npm run test:chromium-only
+npm run test:headed         # show the browser
+npm run test:webkit-only    # iOS proxy
+npm run test:chromium-only
 ```
 
-### Rate-limit test
+## Override at the command line (ad-hoc / production runs)
 
-The rate-limit test needs a fresh in-process limiter. Set
-`LIFEPLAN_RESTART_CMD` so the test resets the server itself:
-
-```sh
-LIFEPLAN_TEST_PASSWORD='…' \
-LIFEPLAN_RESTART_CMD='/Users/cam/dev/personal/lifeplan/lp restart' \
-  npm test
-```
-
-Without that env var, the rate-limit test is **skipped with a clear
-message** (not silently passed) — Probe rule: a flaky/optional test that
-appears green is worse than a skipped test that surfaces the gap.
-
-## Run against production
-
-The same suite, retargeted via env var:
+Inline env vars override `.env`. To verify against production without
+touching `.env`:
 
 ```sh
 LIFEPLAN_TEST_BASE_URL='https://your-domain.example/lifeplan/' \
@@ -59,13 +58,29 @@ LIFEPLAN_TEST_PASSWORD='<prod-password>' \
   npm test
 ```
 
-Mount-prefix-sensitive tests resolve their expectations from the URL's path
-(`/lifeplan/`), so the same `Location` and `Path=` assertions verify the
-prod mount automatically.
+Mount-prefix-sensitive tests resolve their expectations from the URL's
+path (`/lifeplan/`), so the same `Location` and `Path=` assertions verify
+the prod mount automatically.
 
 **Do not** run the rate-limit test against production unless you know the
-production limiter state — burning 5 prod login slots locks you out for 15
-minutes from your current IP.
+production limiter state — burning 5 prod login slots locks you out for
+15 minutes from your current IP.
+
+## Rate-limit test (skipped by default)
+
+The rate-limit test fires 6 wrong-password attempts. That burns the
+in-process limiter slots for 15 minutes, so it's gated off. Run it on
+demand when `/login` or `app/auth.py` rate-limit code changes:
+
+```sh
+RATE_LIMIT_TEST=1 \
+LIFEPLAN_RESTART_CMD='/Users/cam/dev/personal/lifeplan/lp restart' \
+  npm test
+```
+
+Without `RATE_LIMIT_TEST=1` the test is **skipped with a clear reason** —
+not silently passed (Probe rule: a flaky/optional test that appears green
+is worse than a skipped test that surfaces the gap).
 
 ## Coverage
 
@@ -74,7 +89,7 @@ minutes from your current IP.
 | 1 | `GET /login` 200 + form | `auth.spec.ts` → "GET /login" |
 | 2 | `POST /login` happy path + cookie flags | "POST /login" → correct password |
 | 3 | `POST /login` wrong password 401 + UI message | "POST /login" → wrong password / UI |
-| 4 | `POST /login` rate limit (5 then 429) | "POST /login rate limit" |
+| 4 | `POST /login` rate limit (5 then 429) | "POST /login rate limit" *(opt-in)* |
 | 5 | Authenticated `GET /` 200 | "GET / (auth-required)" → authenticated |
 | 6 | Unauthenticated HTML `GET /` 302 to mount-aware login | "GET / (auth-required)" → 302 (regression) |
 | 7 | Unauthenticated API → 401 JSON, NOT 302 | "API auth gate" |
@@ -120,3 +135,15 @@ For each new feature in Probe's remit:
    authenticated session.
 4. Each `test()` title prefixed with the contract clause ("contract:" /
    "regression:" / "UI:") so failures point at the right artefact.
+
+## Files
+
+- `playwright.config.ts` — Playwright config. Loads `tests/e2e/.env` via
+  `dotenv` at startup; CLI env vars still override.
+- `setup.sh` — first-run interactive prompt. Writes `.env` with mode 600.
+  Re-run on password rotation. **Never sends the password anywhere.**
+- `.env.example` — committed contract showing the expected file format.
+- `.env` — gitignored, generated by `setup.sh`. Read by the suite.
+- `fixtures/auth.ts` — Playwright fixtures (password, mountPrefix,
+  loginPath, loggedInPage, apiCtx).
+- `auth.spec.ts` — the cookie-auth contract verification.

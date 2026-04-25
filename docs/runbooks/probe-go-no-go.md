@@ -2,7 +2,7 @@
 
 **Owner:** Probe
 **Audience:** Atlas, before any `lp deploy` on a feature in Probe's remit.
-**Status:** active.
+**Status:** accepted.
 **Format:** Cairn-style — Goal, Preconditions, Steps, Verification,
 Failure modes.
 
@@ -34,8 +34,12 @@ Probe will not begin a gate run unless **all** of the following are true:
 3. The local server (`lp status`) is on the candidate code, or the deploy
    target is the candidate (production runs are post-deploy verification,
    not pre-deploy gate).
-4. Probe has the current dev password (or production password) via
-   `LIFEPLAN_TEST_PASSWORD`. If unsure, ask Atlas — never guess.
+4. `tests/e2e/.env` exists locally (Cam ran `./setup.sh` once). The
+   suite reads the password from this file automatically. Probe does
+   not handle the password directly — there is no "ask Atlas for the
+   password" step in the normal pass. If `.env` is missing, Probe
+   surfaces the missing-file message from the auth fixture and
+   suspends the run; Cam re-runs `./setup.sh` himself in his terminal.
 
 If any precondition fails, the gate run is **suspended**, not failed.
 Probe writes one line to Atlas naming the missing precondition.
@@ -46,18 +50,37 @@ Probe writes one line to Atlas naming the missing precondition.
 
 ```sh
 cd tests/e2e
-LIFEPLAN_TEST_PASSWORD='…' \
-LIFEPLAN_RESTART_CMD='…/lp restart' \
+npm test
+```
+
+That's it. `playwright.config.ts` loads `tests/e2e/.env` at startup, so
+no inline env vars are needed for a normal Probe pass. For a
+production-target run (post-deploy verification), pass overrides inline
+— they win over `.env`:
+
+```sh
+LIFEPLAN_TEST_BASE_URL='https://your-domain.example/lifeplan/' \
+LIFEPLAN_TEST_PASSWORD='<prod-password>' \
   npm test
 ```
 
 Both `chromium` and `webkit` projects must run. WebKit is non-negotiable
 — Cam's primary device is iOS.
 
-Expected: 100% of tests green. Skipped tests are inspected; a skip with a
-clear precondition reason ("LIFEPLAN_RESTART_CMD not set") is acceptable
-for a single run, but every gate-run for a Probe-remit feature must run
-the full suite at least once with the rate-limit precondition satisfied.
+Expected: 100% of tests green. The rate-limit test is **skipped by
+default** (it burns the in-process limiter for 15 minutes); that skip is
+expected and not a gate failure. Run it on demand when the gated change
+touches `/login` or `app/auth.py` rate-limit code:
+
+```sh
+RATE_LIMIT_TEST=1 \
+LIFEPLAN_RESTART_CMD='/Users/cam/dev/personal/lifeplan/lp restart' \
+  npm test
+```
+
+For an auth-surface deploy, the rate-limit test must have been run green
+at least once against the candidate before sign-off — but not on every
+default Probe pass.
 
 ### 2. HTTP smoke test
 
@@ -138,8 +161,9 @@ Followed by one of:
 ### What does **not** flip the gate
 
 - A skipped test with a documented precondition reason (e.g. rate-limit
-  test skipped because `LIFEPLAN_RESTART_CMD` unset *for that single
-  run*). Note it; do not block on it.
+  test skipped because `RATE_LIMIT_TEST=1` was not set on this default
+  run). Note it; do not block on it. The rate-limit test must be run
+  green on its own pass before any auth-surface deploy.
 - A flake — same test, two consecutive re-runs disagree. **Investigate
   before passing.** A flaky test trains you to ignore failures (Probe
   rule). Either find the cause and fix it, or quarantine the test (and
@@ -156,6 +180,34 @@ Followed by one of:
   asked to ship. Probe writes the issue + Cam's acceptance into the
   report. Atlas may deploy. The paper-cut becomes a permanent test on
   the next pass (Probe rule 8).
+
+## Cadence (decision: on-demand, not scheduled)
+
+Probe runs the suite **on demand** — when Atlas asks for a gate decision
+ahead of a deploy in Probe's remit (practice 8: auth, user-facing,
+mobile). There is no recurring schedule.
+
+Why on-demand only:
+
+- The app is single-user, deploys are infrequent, and the auth surface
+  is now stable. A nightly cron would mostly tell us the test
+  infrastructure still works — that's CI hygiene, not deploy-gate value.
+- The standing rule (practice 8) already names the trigger: "Probe
+  sign-off mandatory before deploys on user-facing/auth/mobile
+  features." That's an event-driven trigger, not a calendar one.
+- Scheduled runs do catch silent regressions in third-party deps and OS
+  updates — but the third-party surface here is small (Playwright +
+  dotenv on the test side; Python stdlib on the server). The marginal
+  catch rate doesn't justify the noise budget for a one-person team.
+- Flaky-test risk: a scheduled run that fires when no-one is watching is
+  the canonical breeding ground for "ignore the red, it always goes
+  green on rerun." Probe rule 6 says no.
+
+If this changes — multi-deploy days, multiple test suites, third-party
+churn picks up — Cairn or Atlas could later wire a recurring run as a
+launchd job, GitHub Action, or scheduled remote agent. Flagging now so
+it's not relitigated later: **the cadence policy is Cairn's call when
+the conditions warrant it.**
 
 ## Provenance
 

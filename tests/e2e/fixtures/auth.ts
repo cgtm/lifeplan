@@ -40,8 +40,9 @@ export const test = base.extend<Fixtures>({
     const pw = process.env.LIFEPLAN_TEST_PASSWORD;
     if (!pw) {
       throw new Error(
-        'LIFEPLAN_TEST_PASSWORD is not set. Probe needs the local dev password to run the suite. ' +
-          'Ask Atlas to confirm the current password (the one in .env was rotated).',
+        'LIFEPLAN_TEST_PASSWORD is not set. Run `./setup.sh` (or `npm run setup`) ' +
+          'from tests/e2e/ to write a local tests/e2e/.env, or pass the var inline ' +
+          'for an ad-hoc run. playwright.config.ts loads tests/e2e/.env at startup.',
       );
     }
     await use(pw);
