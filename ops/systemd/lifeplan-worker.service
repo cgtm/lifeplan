@@ -1,0 +1,28 @@
+[Unit]
+Description=lifeplan background worker
+After=network.target
+Wants=lifeplan.service
+
+[Service]
+Type=simple
+User=your-user
+Group=your-user
+WorkingDirectory=/opt/lifeplan
+ExecStart=/usr/bin/python3 -m app.worker
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=60
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lifeplan-worker
+
+# Hardening (mirrors lifeplan.service)
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/lifeplan/data
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

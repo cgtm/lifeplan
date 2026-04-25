@@ -34,6 +34,7 @@ BACKUP_DIR="/opt/lifeplan/backups"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NGINX_SRC_SITE="$SCRIPT_DIR/ops/nginx/your-domain.example.conf"
 NGINX_SRC_AUTHZONE="$SCRIPT_DIR/ops/nginx/authzone.conf"
+SYSTEMD_SRC_DIR="$SCRIPT_DIR/ops/systemd"
 
 echo "==> lifeplan server setup"
 echo ""
@@ -100,6 +101,31 @@ UNIT
 systemctl daemon-reload
 systemctl enable lifeplan
 echo "    service created and enabled"
+
+# ── 2b. Background worker + prompt-generation timer ──────────────
+# Source of truth: ops/systemd/. We cp -f every time so a re-run picks up
+# any edits to the unit files in the repo.
+echo ""
+echo "--- installing background worker + prompt timer ---"
+for unit in lifeplan-worker.service lifeplan-prompts.service lifeplan-prompts.timer; do
+    src="$SYSTEMD_SRC_DIR/$unit"
+    if [ ! -f "$src" ]; then
+        echo "    ERROR: missing $src"
+        echo "    Make sure the staging dir has the full repo, including ops/systemd/."
+        exit 1
+    fi
+    cp -f "$src" "/etc/systemd/system/$unit"
+    chmod 0644 "/etc/systemd/system/$unit"
+    echo "    installed /etc/systemd/system/$unit"
+done
+
+systemctl daemon-reload
+# Worker is long-running -- enable + start. The prompts timer drives the
+# oneshot service, so enable + start the timer (NOT the .service directly).
+systemctl enable --now lifeplan-worker.service
+systemctl enable --now lifeplan-prompts.timer
+echo "    lifeplan-worker enabled + started"
+echo "    lifeplan-prompts.timer enabled + started (next run: $(systemctl list-timers lifeplan-prompts.timer --no-pager | awk 'NR==2 {print $1, $2}'))"
 
 # ── 3. Nginx vhost + authzone ────────────────────────────────────
 # Ship the canonical nginx config from the repo rather than building it inline.
@@ -238,8 +264,8 @@ chown "$APP_USER:$APP_USER" /opt/lifeplan/SETUP.md
 echo ""
 echo "--- setting up sudoers for deploy ---"
 cat > /etc/sudoers.d/lifeplan <<'SUDOERS'
-# Allow your-user to restart the lifeplan service without a password
-your-user ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart lifeplan, /usr/bin/systemctl stop lifeplan, /usr/bin/systemctl start lifeplan, /usr/bin/systemctl status lifeplan
+# Allow your-user to restart the lifeplan service + worker without a password
+your-user ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart lifeplan, /usr/bin/systemctl stop lifeplan, /usr/bin/systemctl start lifeplan, /usr/bin/systemctl status lifeplan, /usr/bin/systemctl restart lifeplan-worker, /usr/bin/systemctl stop lifeplan-worker, /usr/bin/systemctl start lifeplan-worker, /usr/bin/systemctl status lifeplan-worker
 SUDOERS
 chmod 0440 /etc/sudoers.d/lifeplan
 visudo -c -f /etc/sudoers.d/lifeplan

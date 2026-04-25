@@ -2,7 +2,9 @@
 # lp — lifeplan service manager
 
 PLIST="$HOME/Library/LaunchAgents/com.cam.lifeplan.plist"
+WORKER_PLIST="$HOME/Library/LaunchAgents/com.cam.lifeplan-worker.plist"
 LOG="$(dirname "$0")/data/server.log"
+WORKER_LOG="$(dirname "$0")/data/worker.log"
 BACKUP="$(dirname "$0")/data/backup.sh"
 
 case "${1:-help}" in
@@ -21,7 +23,7 @@ case "${1:-help}" in
     curl -s http://localhost:3131/api/dashboard > /dev/null && echo "lifeplan restarted" || echo "Failed to restart"
     ;;
   status)
-    if launchctl list | grep -q lifeplan 2>/dev/null; then
+    if launchctl list | grep -q "com.cam.lifeplan$" 2>/dev/null; then
       echo "lifeplan is running"
       curl -s -o /dev/null -w "  HTTP: %{http_code}\n" http://localhost:3131/ 2>/dev/null || echo "  Server not responding"
     else
@@ -30,6 +32,37 @@ case "${1:-help}" in
     ;;
   logs)
     tail -f "$LOG"
+    ;;
+  worker)
+    case "${2:-status}" in
+      start)
+        launchctl load "$WORKER_PLIST"
+        echo "worker loaded"
+        ;;
+      stop)
+        launchctl unload "$WORKER_PLIST"
+        echo "worker unloaded"
+        ;;
+      restart)
+        launchctl kickstart -k "gui/$(id -u)/com.cam.lifeplan-worker"
+        echo "worker restarted"
+        ;;
+      status)
+        launchctl list | grep lifeplan-worker || echo "worker not loaded"
+        ;;
+      logs)
+        tail -f "$WORKER_LOG"
+        ;;
+      *)
+        echo "Usage: lp worker <start|stop|restart|status|logs>"
+        ;;
+    esac
+    ;;
+  restart-all)
+    launchctl kickstart -k "gui/$(id -u)/com.cam.lifeplan"
+    launchctl kickstart -k "gui/$(id -u)/com.cam.lifeplan-worker"
+    sleep 1
+    curl -s http://localhost:3131/api/dashboard > /dev/null && echo "lifeplan + worker restarted" || echo "Server not responding after restart"
     ;;
   backup)
     "$BACKUP" "$2"
@@ -54,15 +87,17 @@ case "${1:-help}" in
   *)
     echo "Usage: lp <command>"
     echo ""
-    echo "  start     Start the local service"
-    echo "  stop      Stop the local service"
-    echo "  restart   Restart the local service"
-    echo "  status    Check if it's running"
-    echo "  logs      Tail the server log"
-    echo "  backup    Backup the database (optional: lp backup <label>)"
-    echo "  serve     Run in foreground (for debugging)"
-    echo "  prompts   Manually run prompt generation"
-    echo "  pull-db   Download the droplet database (backs up local first)"
-    echo "  deploy    Deploy to droplet (code only by default, --with-db to include db)"
+    echo "  start         Start the local server"
+    echo "  stop          Stop the local server"
+    echo "  restart       Restart the local server"
+    echo "  status        Check if the server is running"
+    echo "  logs          Tail the server log"
+    echo "  worker <cmd>  Manage the background worker (start|stop|restart|status|logs)"
+    echo "  restart-all   Restart both server and worker"
+    echo "  backup        Backup the database (optional: lp backup <label>)"
+    echo "  serve         Run the server in foreground (for debugging)"
+    echo "  prompts       Manually run prompt generation"
+    echo "  pull-db       Download the droplet database (backs up local first)"
+    echo "  deploy        Deploy to droplet (code only by default, --with-db to include db)"
     ;;
 esac

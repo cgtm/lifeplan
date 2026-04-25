@@ -51,6 +51,18 @@ if [[ "$MODE" != "--db" ]]; then
         --exclude='*.pyc' \
         "$LOCAL_DIR/scripts/" \
         "$SERVER:$REMOTE_BASE/scripts/"
+
+    # Sync ops/ so the canonical systemd units, nginx configs, and launchd
+    # plists land on the droplet. Installation of new systemd units into
+    # /etc/systemd/system/ still needs sudo -- re-run server-setup.sh, or
+    # use the tighter one-liner documented in the unit files.
+    echo "--- syncing ops files ---"
+    ssh "$SERVER" "mkdir -p $REMOTE_BASE/ops"
+    rsync -avz \
+        --exclude='__pycache__' \
+        --exclude='*.pyc' \
+        "$LOCAL_DIR/ops/" \
+        "$SERVER:$REMOTE_BASE/ops/"
 fi
 
 # ── Sync database (only with explicit flag) ──────────────────────
@@ -66,6 +78,10 @@ fi
 echo ""
 echo "--- restarting lifeplan service ---"
 ssh "$SERVER" "sudo systemctl restart lifeplan"
+# Worker shares the codebase; restart so it picks up new code. Skip silently
+# if the unit isn't installed yet (first deploy after Phase 5 lands but
+# before server-setup.sh has been re-run to install the unit file).
+ssh "$SERVER" "systemctl list-unit-files lifeplan-worker.service >/dev/null 2>&1 && sudo systemctl restart lifeplan-worker || echo '    (lifeplan-worker not installed yet -- skipping)'"
 sleep 2
 
 # ── Health check ─────────────────────────────────────────────────

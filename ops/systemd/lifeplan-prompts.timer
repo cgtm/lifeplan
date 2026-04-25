@@ -1,0 +1,11 @@
+[Unit]
+Description=Run lifeplan prompt generation daily at 09:00
+Requires=lifeplan-prompts.service
+
+[Timer]
+OnCalendar=*-*-* 09:00:00
+Persistent=true
+Unit=lifeplan-prompts.service
+
+[Install]
+WantedBy=timers.target
