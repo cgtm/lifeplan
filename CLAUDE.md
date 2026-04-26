@@ -29,6 +29,7 @@ All team member definitions live in `/team/`. Each file is a self-contained pers
 | **Vault** | Backend Engineer (Application & Web Security) | `team/vault.md` |
 | **Probe** | Ship Verifier | `team/probe.md` |
 | **Cairn** | Tech Lead (Engineering Practice Owner) | `team/cairn.md` |
+| **Iris** | Senior Interaction Designer | `team/iris.md` |
 
 ## Addressing Team Members
 Cam can directly address any team member by name (e.g. "Sage, research..." or "Nova, hire..."). Atlas will route accordingly.
