@@ -586,3 +586,10 @@ when picked up; Cairn owns the queue.
   a second status-vs-reality mismatch in any UI. Source: production scan
   2026-04-23 (3 dropped items across 7 dumps; tag and goal_link branches
   hold the same fall-through hazard person_mention had).
+  **Status: in flight (2026-04-23).** Trigger fired on Atlas's prod scan
+  finding two more silent drops (tags `leadership` and `team` in dump #18),
+  bringing the total to three with the original mum case. Audit brief:
+  [`docs/processes/audits/2026-04-23-auto-create-item-status-truthfulness.md`](audits/2026-04-23-auto-create-item-status-truthfulness.md).
+  Vault owns the contract + patch; Probe owns the regression test after the
+  patch lands. Scope explicitly excludes LLM extraction redesign, data-model
+  changes (Reed's lane), and `apply_to` (separate Reed investigation).
