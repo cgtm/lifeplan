@@ -1,15 +1,23 @@
 """
 lifeplan — database helpers
 Database connection, utility functions, tag helpers, and shared LLM utilities.
+
+Privacy invariant: this module's `lifeplan.processing` log entries
+(LLM call sites) record IDs, model names, durations, and exception
+type-and-message strings only. The `messages` payload passed to the
+LLM is NOT logged because it carries brain-dump content.
 """
 
 import json
+import logging
 import os
 import sqlite3
 import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+
+_log = logging.getLogger("lifeplan.processing")
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "lifeplan.db")
 ENV_PATH = os.path.join(os.path.dirname(__file__), "..", ".env")
@@ -54,10 +62,10 @@ def call_mistral_api(messages):
     """
     api_key = get_mistral_api_key()
     if not api_key:
-        print("  [mistral] No MISTRAL_API_KEY found in .env")
+        _log.warning("mistral.api.no_key")
         return None
 
-    print(f"  [mistral] Calling {MISTRAL_API_URL} model={MISTRAL_MODEL}")
+    _log.info("mistral.api.call model=%s", MISTRAL_MODEL)
     payload = json.dumps({
         "model": MISTRAL_MODEL,
         "messages": messages,
@@ -82,12 +90,17 @@ def call_mistral_api(messages):
             result = json.loads(body)
             content = result["choices"][0]["message"]["content"]
             parsed = json.loads(content)
-            print(f"  [mistral] API success in {elapsed:.1f}s")
+            _log.info("mistral.api.ok duration_ms=%d", int(elapsed * 1000))
             return parsed
     except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError,
             OSError, TimeoutError, ValueError, KeyError, IndexError) as e:
         elapsed = time.time() - t0
-        print(f"  [mistral] API failed in {elapsed:.1f}s: {type(e).__name__}: {e}")
+        # Privacy invariant: log error TYPE only -- exception message from
+        # urllib may include response body fragments.
+        _log.warning(
+            "mistral.api.failed duration_ms=%d error_type=%s",
+            int(elapsed * 1000), type(e).__name__,
+        )
         return None
 
 

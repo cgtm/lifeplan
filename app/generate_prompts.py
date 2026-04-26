@@ -3,10 +3,16 @@
 lifeplan -- prompt generation engine
 Analyses the database and generates gentle, Socratic prompts from Reed.
 Run standalone or import maybe_generate_prompts() for on-app-open refresh.
+
+Privacy invariant: the `lifeplan.processing` logger MUST NOT receive
+brain-dump or prompt text, person names, or tag names extracted from
+content. IDs, counts, type strings, durations, and exception type-and-
+message strings only.
 """
 
 import hashlib
 import json
+import logging
 import os
 import sys
 import time
@@ -16,6 +22,8 @@ from datetime import datetime, timezone, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from app.db import get_db, now_utc, rows_to_dicts, call_mistral_api, _load_env
+
+logger = logging.getLogger("lifeplan.processing")
 
 _env = _load_env()
 OLLAMA_URL = _env.get("OLLAMA_URL", "http://localhost:11434") + "/api/chat"
@@ -517,7 +525,7 @@ def call_ollama_for_patterns(summary):
     ]
 
     # Tier 1: Local Ollama
-    print(f"  [prompts] Calling Ollama at {OLLAMA_URL} model={OLLAMA_MODEL} for pattern analysis")
+    logger.info("prompts.ollama.call model=%s purpose=pattern_analysis", OLLAMA_MODEL)
     payload = json.dumps({
         "model": OLLAMA_MODEL,
         "messages": messages,
@@ -541,29 +549,39 @@ def call_ollama_for_patterns(summary):
             content = result.get("message", {}).get("content", "")
             parsed = json.loads(content)
             observations = _parse_pattern_response(parsed)
-            print(f"  [prompts] Ollama pattern analysis success in {elapsed:.1f}s: {len(observations)} observations")
+            logger.info(
+                "prompts.ollama.ok duration_ms=%d observations=%d",
+                int(elapsed * 1000), len(observations),
+            )
             return observations
     except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError,
             OSError, TimeoutError, ValueError, KeyError) as e:
         elapsed = time.time() - t0
-        print(f"  [prompts] Ollama pattern analysis failed in {elapsed:.1f}s: {type(e).__name__}: {e}")
+        # Privacy invariant: log error TYPE only.
+        logger.warning(
+            "prompts.ollama.failed duration_ms=%d error_type=%s",
+            int(elapsed * 1000), type(e).__name__,
+        )
 
     # Tier 2: Mistral cloud API
-    print("  [prompts] Falling back to Mistral cloud API for pattern analysis")
+    logger.info("prompts.llm.fallback from_tier=ollama to_tier=mistral")
     t0 = time.time()
     mistral_result = call_mistral_api(messages)
     elapsed = time.time() - t0
     if mistral_result is not None:
         observations = _parse_pattern_response(mistral_result)
-        print(f"  [prompts] Mistral pattern analysis success in {elapsed:.1f}s: {len(observations)} observations")
+        logger.info(
+            "prompts.mistral.ok duration_ms=%d observations=%d",
+            int(elapsed * 1000), len(observations),
+        )
         return observations
 
-    print(f"  [prompts] All LLM backends failed for pattern analysis ({elapsed:.1f}s)")
+    logger.warning("prompts.llm.failed duration_ms=%d reason=all_backends_failed", int(elapsed * 1000))
     return []
 
 
 def run_llm_analysis(conn):
-    print("  [prompts] Running LLM pattern analysis")
+    logger.info("prompts.llm.analysis.start")
     summary = build_llm_summary(conn)
     observations = call_ollama_for_patterns(summary)
 
@@ -604,7 +622,7 @@ def generate_prompts():
     conn = get_db()
     try:
         t_start = time.time()
-        print("  [prompts] Starting prompt generation")
+        logger.info("prompts.start")
         expire_old_prompts(conn)
 
         total = 0
@@ -616,15 +634,19 @@ def generate_prompts():
         total += check_milestones(conn)
         total += check_patterns(conn)
         rules_count = total
-        print(f"  [prompts] Rule-based checks done: {rules_count} prompts from rules")
+        logger.info("prompts.rules.done count=%d", rules_count)
         total += run_llm_analysis(conn)
 
         conn.commit()
         elapsed = time.time() - t_start
-        print(f"  [prompts] Done in {elapsed:.1f}s: {total} new prompts ({rules_count} rules, {total - rules_count} LLM)")
+        logger.info(
+            "prompts.done duration_ms=%d total=%d rules=%d llm=%d",
+            int(elapsed * 1000), total, rules_count, total - rules_count,
+        )
         return total
     except Exception as e:
-        print(f"  [prompts] Error: {e}")
+        # Privacy invariant: log error TYPE only.
+        logger.warning("prompts.error error_type=%s", type(e).__name__)
         conn.rollback()
         return 0
     finally:
@@ -642,17 +664,23 @@ def maybe_generate_prompts():
         ).fetchone()
 
         if row and row["last_gen"] and row["last_gen"] > cutoff:
-            print("  [prompts] Skipping generation (last run < 12h ago)")
+            logger.info("prompts.skip reason=cooldown_12h")
             return
 
     finally:
         conn.close()
 
-    print("  [prompts] Triggering prompt generation (>12h since last run)")
+    logger.info("prompts.trigger reason=cooldown_elapsed")
     generate_prompts()
 
 
 if __name__ == "__main__":
-    print("  [prompts] Running prompt generation...")
+    # CLI entrypoint: ensure the logger has a handler when run standalone.
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        )
+    logger.info("prompts.cli.start")
     n = generate_prompts()
-    print(f"  [prompts] Done. {n} prompts created.")
+    logger.info("prompts.cli.done created=%d", n)

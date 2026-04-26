@@ -1,9 +1,18 @@
 """
 lifeplan — brain dump processing engine
 All regex functions, LLM functions, and the main process_brain_dump pipeline.
+
+Privacy invariant (CONTRACT, NON-NEGOTIABLE):
+  The `lifeplan.processing` logger MUST NOT receive brain-dump content,
+  prompt text, person names, tag names extracted from content, or any
+  other user-authored text. Only IDs, counts, type-strings, durations,
+  status values, and exception type-and-message strings. This invariant
+  is mirrored from app/contracts/background-processing.md "Security
+  properties".
 """
 
 import json
+import logging
 import re
 import time
 import urllib.error
@@ -12,6 +21,15 @@ from collections import Counter
 from datetime import datetime, timezone, timedelta
 
 from .db import get_db, now_utc, rows_to_dicts, get_tags_for, call_mistral_api, _load_env
+
+logger = logging.getLogger("lifeplan.processing")
+
+
+class BrainDumpNotFound(Exception):
+    """Raised by process_brain_dump_for_worker when the target brain_dump row
+    is gone (e.g. user deleted it after the job was queued/claimed). The
+    worker treats this as a clean no-op rather than a retryable failure.
+    """
 
 _env = _load_env()
 OLLAMA_URL = _env.get("OLLAMA_URL", "http://localhost:11434") + "/api/generate"
@@ -1247,7 +1265,7 @@ def _call_ollama(prompt):
     """Send a prompt to Ollama and return the parsed JSON response.
     Returns the parsed dict on success, or None on failure.
     """
-    print(f"  [ollama] Calling Ollama at {OLLAMA_URL} model={OLLAMA_MODEL}")
+    logger.info("processing.ollama.call model=%s", OLLAMA_MODEL)
     payload = json.dumps({
         "model": OLLAMA_MODEL,
         "prompt": prompt,
@@ -1270,12 +1288,17 @@ def _call_ollama(prompt):
             result = json.loads(body)
             response_text = result.get("response", "")
             parsed = json.loads(response_text)
-            print(f"  [ollama] Success in {elapsed:.1f}s")
+            logger.info("processing.ollama.ok duration_ms=%d", int(elapsed * 1000))
             return parsed
     except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError,
             OSError, TimeoutError, ValueError, KeyError) as e:
         elapsed = time.time() - t0
-        print(f"  [ollama] Failed in {elapsed:.1f}s: {type(e).__name__}: {e}")
+        # Privacy invariant: log error TYPE only -- exception messages from
+        # urllib/json may quote response bodies which we treat as opaque.
+        logger.warning(
+            "processing.ollama.failed duration_ms=%d error_type=%s",
+            int(elapsed * 1000), type(e).__name__,
+        )
         return None
 
 
@@ -1284,7 +1307,7 @@ def _call_mistral(prompt):
     Uses the same prompt as Ollama but via OpenAI-compatible chat/completions.
     Returns the parsed dict on success, or None on failure.
     """
-    print("  [mistral] Calling Mistral cloud API (processing fallback)")
+    logger.info("processing.mistral.call")
     messages = [
         {
             "role": "system",
@@ -1299,9 +1322,9 @@ def _call_mistral(prompt):
     result = call_mistral_api(messages)
     elapsed = time.time() - t0
     if result is not None:
-        print(f"  [mistral] Success in {elapsed:.1f}s")
+        logger.info("processing.mistral.ok duration_ms=%d", int(elapsed * 1000))
     else:
-        print(f"  [mistral] Failed in {elapsed:.1f}s")
+        logger.warning("processing.mistral.failed duration_ms=%d", int(elapsed * 1000))
     return result
 
 
@@ -1472,20 +1495,20 @@ def process_brain_dump_llm(dump_id, conn, dump, goals_data, known_people, known_
 
     # Tier 2: Mistral cloud API
     if llm_data is None:
-        print("  [processing] Ollama unavailable, falling back to Mistral cloud API")
+        logger.info("processing.llm.fallback from_tier=ollama to_tier=mistral")
         llm_data = _call_mistral(prompt)
         tier_used = "mistral"
 
     if llm_data is None:
-        print("  [processing] All LLM backends failed, falling back to regex")
+        logger.warning("processing.llm.fallback from_tier=mistral to_tier=regex reason=all_llms_failed")
         return None
 
     # Validate minimal structure
     if not isinstance(llm_data, dict):
-        print("  [processing] LLM response is not a dict, falling back to regex")
+        logger.warning("processing.llm.fallback from_tier=%s to_tier=regex reason=non_dict_response", tier_used)
         return None
 
-    print(f"  [processing] LLM succeeded via {tier_used}")
+    logger.info("processing.llm.ok tier=%s", tier_used)
     items = _llm_response_to_items(llm_data, dump_id, known_tags)
 
     # Post-processing: Mistral often misclassifies explicit goal requests as tasks.
@@ -1512,9 +1535,13 @@ def process_brain_dump_llm(dump_id, conn, dump, goals_data, known_people, known_
         ]
 
     # Summarise what was extracted
+    # Counts only -- type names are static enum values, never user content.
     type_counts = Counter(i["type"] for i in items)
     summary = ", ".join(f"{cnt} {t}" for t, cnt in sorted(type_counts.items()))
-    print(f"  [processing] Extracted {len(items)} items via {tier_used}: {summary}")
+    logger.info(
+        "processing.llm.extracted tier=%s total=%d counts=%s",
+        tier_used, len(items), summary,
+    )
     return items
 
 
@@ -1670,13 +1697,15 @@ def process_brain_dump_for_worker(conn, dump_id):
         "SELECT * FROM brain_dumps WHERE id = ?", (dump_id,)
     ).fetchone()
     if not row:
-        # Caller's handle_failure will route this into retry / terminal.
-        raise ValueError(f"brain_dump {dump_id} not found")
+        # Sentinel: distinct from generic processing failures so the worker
+        # can treat a missing target as a clean no-op (user deleted the
+        # brain_dump after the job was queued/claimed) instead of retrying.
+        raise BrainDumpNotFound(f"brain_dump {dump_id} not found")
 
     dump = dict(row)
     content = dump["content"]
-    preview = content[:80].replace("\n", " ")
-    print(f"  [processing] Starting brain dump #{dump_id}: \"{preview}...\"")
+    # Privacy invariant: NEVER log a content preview here. ID + counts only.
+    logger.info("processing.start dump_id=%s content_len=%d", dump_id, len(content))
     t_start = time.time()
 
     # Load reference data from DB
@@ -1689,7 +1718,10 @@ def process_brain_dump_for_worker(conn, dump_id):
     known_tags = rows_to_dicts(
         conn.execute("SELECT id, name FROM tags").fetchall()
     )
-    print(f"  [processing] Context: {len(goals_data)} goals, {len(known_people)} people, {len(known_tags)} tags")
+    logger.info(
+        "processing.context dump_id=%s goals=%d people=%d tags=%d",
+        dump_id, len(goals_data), len(known_people), len(known_tags),
+    )
 
     # Parse reference date from captured_at
     captured_at = dump["captured_at"]
@@ -1709,10 +1741,10 @@ def process_brain_dump_for_worker(conn, dump_id):
     else:
         # Fallback: regex-based extraction
         extraction_method = "regex"
-        print("  [regex] Running regex-based extraction")
+        logger.info("processing.regex.start dump_id=%s", dump_id)
 
         segments = segment_text(content)
-        print(f"  [regex] Split into {len(segments)} segments")
+        logger.info("processing.regex.segments dump_id=%s count=%d", dump_id, len(segments))
 
         all_items = []
         seen_person_ids = set()
@@ -1750,9 +1782,13 @@ def process_brain_dump_for_worker(conn, dump_id):
         tag_items = detect_tags(content, all_items, known_tags)
         all_items.extend(tag_items)
 
+        # Counts only -- type names are static enum values, never user content.
         type_counts = Counter(i["type"] for i in all_items)
         summary = ", ".join(f"{cnt} {t}" for t, cnt in sorted(type_counts.items()))
-        print(f"  [regex] Extracted {len(all_items)} items: {summary}")
+        logger.info(
+            "processing.regex.extracted dump_id=%s total=%d counts=%s",
+            dump_id, len(all_items), summary,
+        )
 
     # Confidence filtering -- discard items below 0.50
     filtered_items = [
@@ -1778,9 +1814,12 @@ def process_brain_dump_for_worker(conn, dump_id):
     processing_status = "needs_review" if has_suggestions else "processed"
 
     elapsed = time.time() - t_start
-    print(f"  [processing] Done #{dump_id} in {elapsed:.1f}s via {extraction_method}: "
-          f"{auto_count} auto-created, {suggest_count} suggested, "
-          f"status={processing_status}")
+    logger.info(
+        "processing.done dump_id=%s duration_ms=%d method=%s "
+        "auto_created=%d suggested=%d status=%s",
+        dump_id, int(elapsed * 1000), extraction_method,
+        auto_count, suggest_count, processing_status,
+    )
 
     ts = now_utc()
     processed_json = json.dumps({
@@ -1831,13 +1870,18 @@ def process_brain_dump(dump_id):
             result = process_brain_dump_for_worker(conn, dump_id)
         except Exception as e:
             # Mirror legacy reset-to-unprocessed on synchronous failure.
-            print(f"  [processing] ERROR #{dump_id}: {type(e).__name__}: {e}")
+            # Privacy invariant: log error TYPE only -- the message may carry
+            # text from upstream libs we don't control.
+            logger.warning(
+                "processing.sync.error dump_id=%s error_type=%s",
+                dump_id, type(e).__name__,
+            )
             conn.execute(
                 "UPDATE brain_dumps SET processing_status = 'unprocessed' WHERE id = ?",
                 (dump_id,),
             )
             conn.commit()
-            return 500, {"error": f"Processing failed: {str(e)}"}
+            return 500, {"error": f"Processing failed: {type(e).__name__}"}
 
         ts = result["processed_at"]
         processing_status = result["processing_status"]

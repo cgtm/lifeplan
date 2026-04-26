@@ -263,6 +263,17 @@ def handle_delete_brain_dump(dump_id):
             return 404, {"error": "Brain dump not found"}
         conn.execute("DELETE FROM brain_dump_tags WHERE brain_dump_id = ?", (dump_id,))
         conn.execute("DELETE FROM brain_dumps WHERE id = ?", (dump_id,))
+        # Cascade: drop any non-terminal work_queue rows targeting this
+        # brain_dump so the worker doesn't pick up a job whose target is
+        # gone. Doesn't help if the worker already claimed the row (it
+        # has the dump in memory) -- BrainDumpNotFound + finalise_skipped
+        # in worker.py handles that race. Belt-and-braces.
+        conn.execute(
+            "DELETE FROM work_queue "
+            "WHERE job_type = 'brain_dump' AND target_id = ? "
+            "  AND status IN ('queued','processing')",
+            (dump_id,),
+        )
         conn.commit()
         return 200, {"deleted": dump_id}
     finally:

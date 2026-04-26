@@ -37,7 +37,7 @@ import time
 import traceback
 
 from .db import get_db, now_utc
-from .processing import process_brain_dump_for_worker
+from .processing import process_brain_dump_for_worker, BrainDumpNotFound
 from .generate_prompts import maybe_generate_prompts
 
 
@@ -170,6 +170,32 @@ def run_prompt_generation_job(conn, job):
 # Finalisation (per contract: finalisation guard)
 # -----------------------------------------------------------------------------
 
+def _begin_immediate_if_needed(conn):
+    """
+    Start a writer transaction unless the connection already has an
+    implicit one open from prior DML (sqlite3 default isolation level
+    auto-begins on first INSERT/UPDATE/DELETE).
+
+    Returns True if WE opened the transaction (caller's
+    rollback-on-error must run); False if we're piggybacking on an
+    implicit transaction that the caller already started writes inside
+    (rollback still safe -- it discards the whole txn).
+
+    This matters for brain_dump jobs: `_auto_create_item` issues
+    INSERTs into the worker's connection during processing, which leaves
+    `conn.in_transaction = True`. Without this guard, the explicit
+    `BEGIN IMMEDIATE` here raises OperationalError ("cannot start a
+    transaction within a transaction"), the queue row stays in
+    `processing` until watchdog reclaim, then bounces through retries.
+    Per contract, the auto-created rows and the queue finalisation
+    must commit atomically -- so we DON'T want a separate transaction.
+    """
+    if conn.in_transaction:
+        return False
+    conn.execute("BEGIN IMMEDIATE")
+    return True
+
+
 def finalise_success(conn, job, brain_dump_result=None):
     """
     Mark the queue row done, guarded by (id, status='processing', original
@@ -178,11 +204,13 @@ def finalise_success(conn, job, brain_dump_result=None):
 
     For brain_dump jobs, sync `brain_dumps.processing_status` to the
     extraction outcome (`processed` or `needs_review`) and persist the
-    processed_items JSON. Done in the same transaction as the queue update.
+    processed_items JSON. Done in the same transaction as the queue update
+    AND the same transaction as any auto-created rows from
+    `_auto_create_item` (per contract).
     """
     now = now_utc()
     try:
-        conn.execute("BEGIN IMMEDIATE")
+        _begin_immediate_if_needed(conn)
         cur = conn.execute(
             """
             UPDATE work_queue
@@ -237,6 +265,55 @@ def finalise_success(conn, job, brain_dump_result=None):
         raise
 
 
+def finalise_skipped(conn, job, reason):
+    """
+    Mark the queue row `done` (terminal, no retry) with an explanatory
+    `error` field. Used when the job target is gone (e.g. brain_dump
+    deleted before processing finished) -- there's nothing to retry, so
+    the row should not bounce back through the queue.
+
+    Uses the same finalisation guard as `finalise_success` so a watchdog
+    reclaim that already requeued the row leaves us a no-op. Returns True
+    if we won the race; False if the watchdog beat us to it.
+    """
+    now = now_utc()
+    error_text = reason
+    if len(error_text) > ERROR_MESSAGE_MAX:
+        error_text = error_text[:ERROR_MESSAGE_MAX - 1] + "…"
+    try:
+        _begin_immediate_if_needed(conn)
+        cur = conn.execute(
+            """
+            UPDATE work_queue
+               SET status       = 'done',
+                   completed_at = ?,
+                   error        = ?
+             WHERE id           = ?
+               AND status       = 'processing'
+               AND claimed_at   = ?
+            """,
+            (now, error_text, job["id"], job["claimed_at"]),
+        )
+        if cur.rowcount == 0:
+            conn.execute("ROLLBACK")
+            logger.warning(
+                "worker.skip.superseded job_id=%s job_type=%s target_id=%s",
+                job["id"], job["job_type"], job["target_id"],
+            )
+            return False
+        # No brain_dumps cache update -- the row is gone (that's why we're
+        # skipping). The cascade-delete in handle_delete_brain_dump will
+        # also have removed any other queued rows for this target.
+        conn.execute("COMMIT")
+        return True
+    except sqlite3.Error:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        raise
+
+
 def handle_failure(conn, job, exc):
     """
     Apply the contract's retry policy.
@@ -260,6 +337,16 @@ def handle_failure(conn, job, exc):
         error_text = error_text[:ERROR_MESSAGE_MAX - 1] + "…"
 
     terminal = job["attempts"] >= MAX_ATTEMPTS
+
+    # Failure path: discard any partial writes from processing (e.g. an
+    # _auto_create_item INSERT that left the connection in an implicit
+    # transaction before the exception was raised) so the failure record
+    # doesn't accidentally commit half-built rows alongside it.
+    if conn.in_transaction:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
 
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -445,6 +532,28 @@ def main_loop():
                     # Shouldn't happen -- CHECK constraint guards values --
                     # but fail closed if it does.
                     raise ValueError(f"unknown job_type: {job['job_type']}")
+            except BrainDumpNotFound:
+                # Race: brain_dump was deleted between claim and processing
+                # (or between queue and claim). Mark queue row done with an
+                # explanatory error -- no retries, no backoff, no failure
+                # noise. The brain_dumps cascade-delete in handle_delete_
+                # brain_dump cleans up sibling queued rows; this branch
+                # handles the row already in flight.
+                logger.info(
+                    "worker.job.skipped job_id=%s job_type=%s target_id=%s reason=brain_dump_deleted",
+                    job["id"], job["job_type"], job["target_id"],
+                )
+                try:
+                    finalise_skipped(
+                        conn, job,
+                        "brain_dump deleted before processing completed",
+                    )
+                except sqlite3.Error as db_err:
+                    logger.error(
+                        "worker.skip.error job_id=%s error_type=%s",
+                        job["id"], type(db_err).__name__,
+                    )
+                continue
             except Exception as e:
                 # Privacy invariant: log error TYPE, not the exception's str()
                 # at this layer (the str may carry user content via upstream
