@@ -566,8 +566,12 @@ function renderPrompts() {
   el.innerHTML = allPrompts.map(p => {
     const hasSource = p.source_type && p.source_id;
     const isActivityGap = p.prompt_type === 'activity_gap' && p.trigger_rule && p.trigger_rule.includes('dump');
+    const isKnowledgeGap = p.prompt_type === 'knowledge_gap';
 
     let actionsHtml = `<button class="prompt-btn" onclick="dismissPrompt(${p.id})">Got it</button>`;
+    if (isKnowledgeGap) {
+      actionsHtml += `<button class="prompt-btn prompt-btn-primary" onclick="addNoteFromPrompt(${p.id})">Add a note</button>`;
+    }
     if (hasSource) {
       actionsHtml += `<button class="prompt-btn prompt-btn-primary" onclick="navigateToPromptSource('${esc(p.source_type)}', ${p.source_id})">Take me there</button>`;
     }
@@ -652,6 +656,38 @@ function navigateToPromptSource(sourceType, sourceId) {
 function focusBrainDump() {
   homeDump.focus();
   homeDump.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+// Extract a tag from a knowledge_gap prompt body — first quoted token.
+// Handles both straight ("…") and curly (“…” / ‘…’) quotes. Returns null
+// when no quoted token is present, so callers can fall back gracefully.
+function extractPromptTag(body) {
+  if (!body || typeof body !== 'string') return null;
+  const m = body.match(/["“‘']([^"”’']{1,60})["”’']/);
+  if (!m) return null;
+  const raw = m[1].trim().toLowerCase();
+  if (!raw) return null;
+  // Tags are short single tokens; reject anything that looks like a sentence.
+  if (raw.length > 40) return null;
+  return raw;
+}
+
+function addNoteFromPrompt(promptId) {
+  const p = (allPrompts || []).find(x => x.id === promptId);
+  const tag = p ? extractPromptTag(p.body) : null;
+
+  const params = new URLSearchParams();
+  params.set('addNote', '1');
+  if (tag) {
+    params.set('tag', tag);
+    params.set('prefillTitle', tag);
+  }
+
+  // Push the search params (keep current path so the static SPA still loads
+  // on refresh) — applyKnowledgeUrlParams() will read and then strip them.
+  const newUrl = window.location.pathname + '?' + params.toString();
+  window.history.pushState({}, '', newUrl);
+  navigate('knowledge');
 }
 
 // ══════════════════════════════════════════════════════════
@@ -1922,6 +1958,8 @@ async function loadKnowledge() {
   const qs = params.toString();
   allKnowledge = await api(`/knowledge${qs ? '?' + qs : ''}`);
   renderKnowledge();
+  // Apply any incoming URL params (?addNote=1&tag=...&prefillTitle=...)
+  applyKnowledgeUrlParams();
 }
 
 function renderKnowledge() {
@@ -1932,7 +1970,7 @@ function renderKnowledge() {
   }
 
   el.innerHTML = allKnowledge.map(k => `
-    <div class="card knowledge-card fade-in">
+    <div class="card knowledge-card fade-in" data-knowledge-id="${k.id}">
       <div style="display:flex;align-items:center;gap:8px">
         ${typePill(k.item_type)}
         <span style="flex:1"></span>
@@ -1944,6 +1982,153 @@ function renderKnowledge() {
       ${tagsHtml(k.tags)}
     </div>
   `).join('');
+}
+
+// ── Add knowledge inline form ──────────────────────────────
+let _addKnowledgeSubmitting = false;
+
+function _setAddKnowledgeHint(msg, isError) {
+  const hint = $('#addKnowledgeHint');
+  if (!hint) return;
+  hint.textContent = msg || '';
+  hint.classList.toggle('error', !!isError && !!msg);
+}
+
+function _highlightKnowledgeCard(id) {
+  requestAnimationFrame(() => {
+    const card = document.querySelector(`.knowledge-card[data-knowledge-id="${id}"]`);
+    if (!card) return;
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.classList.remove('highlight-flash');
+    void card.offsetWidth;
+    card.classList.add('highlight-flash');
+  });
+}
+
+function _parseTagsInput(raw) {
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map(t => t.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+async function submitAddKnowledge() {
+  if (_addKnowledgeSubmitting) return;
+  const titleInput = $('#addKnowledgeTitle');
+  const contentInput = $('#addKnowledgeContent');
+  const tagsInput = $('#addKnowledgeTags');
+  const btn = $('#addKnowledgeBtn');
+  if (!titleInput || !btn) return;
+
+  const title = (titleInput.value || '').trim();
+  if (!title) {
+    _setAddKnowledgeHint('Enter a title first.', true);
+    return;
+  }
+
+  const content = (contentInput?.value || '').trim();
+  const tags = _parseTagsInput(tagsInput?.value || '');
+
+  _addKnowledgeSubmitting = true;
+  btn.disabled = true;
+  _setAddKnowledgeHint('');
+
+  const body = { title };
+  if (content) body.content = content;
+  if (tags.length) body.tags = tags;
+
+  try {
+    const res = await fetch(`${MOUNT}api/knowledge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    if (res.status === 401) {
+      window.location.href = `${MOUNT}login`;
+      return;
+    }
+
+    let payload = null;
+    try { payload = await res.json(); } catch (_) { /* ignore parse error */ }
+
+    if (res.status === 201 && payload && payload.id) {
+      titleInput.value = '';
+      if (contentInput) contentInput.value = '';
+      if (tagsInput) tagsInput.value = '';
+      // Optimistic prepend.
+      allKnowledge.unshift(payload);
+      renderKnowledge();
+      _highlightKnowledgeCard(payload.id);
+      _setAddKnowledgeHint('');
+      titleInput.focus();
+      return;
+    }
+
+    if (res.status === 400) {
+      _setAddKnowledgeHint((payload && payload.error) || 'Title is required.', true);
+      return;
+    }
+
+    showToast("Couldn't add. Try again.");
+  } catch (_) {
+    showToast('Network error.');
+  } finally {
+    _addKnowledgeSubmitting = false;
+    const v = ($('#addKnowledgeTitle')?.value || '').trim();
+    if ($('#addKnowledgeBtn')) $('#addKnowledgeBtn').disabled = !v;
+  }
+}
+
+function initAddKnowledgeForm() {
+  const form = $('#addKnowledgeForm');
+  const titleInput = $('#addKnowledgeTitle');
+  const btn = $('#addKnowledgeBtn');
+  if (!form || !titleInput || !btn) return;
+
+  titleInput.addEventListener('input', () => {
+    btn.disabled = !titleInput.value.trim();
+    if (titleInput.value.trim()) _setAddKnowledgeHint('');
+  });
+
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    submitAddKnowledge();
+  });
+}
+
+// Returns true if URL params were consumed (form was prefilled).
+function applyKnowledgeUrlParams() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('addNote') !== '1') return false;
+
+  const titleInput = $('#addKnowledgeTitle');
+  const tagsInput = $('#addKnowledgeTags');
+  const btn = $('#addKnowledgeBtn');
+  const form = $('#addKnowledgeForm');
+  if (!titleInput || !form) return false;
+
+  const prefillTitle = params.get('prefillTitle') || '';
+  const tag = params.get('tag') || '';
+
+  if (prefillTitle) titleInput.value = prefillTitle;
+  if (tag && tagsInput) tagsInput.value = tag;
+  if (btn) btn.disabled = !titleInput.value.trim();
+
+  // Scroll & focus after the view is visible.
+  requestAnimationFrame(() => {
+    form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    titleInput.focus();
+    // Place caret at end so Cam can edit immediately.
+    const v = titleInput.value;
+    titleInput.setSelectionRange(v.length, v.length);
+  });
+
+  // Strip the params from the URL so a refresh doesn't re-apply them.
+  const cleaned = window.location.pathname + window.location.hash;
+  window.history.replaceState({}, '', cleaned);
+  return true;
 }
 
 // Knowledge filters
@@ -2320,4 +2505,14 @@ document.addEventListener('keydown', (e) => {
 // ══════════════════════════════════════════════════════════
 
 initAddPersonForm();
-loadHome();
+initAddKnowledgeForm();
+
+// Deep-link: if the page loaded with ?addNote=1, jump straight to Knowledge.
+{
+  const _params = new URLSearchParams(window.location.search);
+  if (_params.get('addNote') === '1') {
+    navigate('knowledge');
+  } else {
+    loadHome();
+  }
+}

@@ -668,6 +668,57 @@ def handle_get_knowledge(params):
         conn.close()
 
 
+def handle_create_knowledge(body):
+    """
+    Create a new knowledge_items row.
+
+    Contract: app/contracts/create-knowledge.md.
+
+    - 400 {"error": "title is required"} if title missing/empty after strip.
+    - 201 {full enriched row, tags []} on success; matches the row shape
+      from GET /api/knowledge.
+    - Duplicate titles are accepted (deliberate divergence from POST
+      /api/people, which 409s). knowledge_items, especially `note`-type
+      quick captures, are commonly repeat-named.
+    - Default item_type is 'note' (the right default for a manually-added
+      quick capture). Other valid values from the CHECK enum: fact,
+      decision, learning, reference.
+    - tags optional; when provided, applied via set_tags_for on the
+      knowledge_tags junction. Omitting means no tags applied.
+
+    Privacy: never logs title, content, or tag names.
+    """
+    title = (body.get("title") or "").strip()
+    if not title:
+        return 400, {"error": "title is required"}
+
+    content = body.get("content", "")
+    item_type = body.get("item_type", "note")
+    tag_names = body.get("tags")
+
+    conn = get_db()
+    try:
+        ts = now_utc()
+        cur = conn.execute(
+            "INSERT INTO knowledge_items (title, content, item_type, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            (title, content, item_type, ts, ts),
+        )
+        item_id = cur.lastrowid
+
+        if tag_names is not None:
+            set_tags_for(conn, "knowledge_tags", "knowledge_id", item_id, tag_names)
+
+        conn.commit()
+        item = dict(
+            conn.execute("SELECT * FROM knowledge_items WHERE id = ?", (item_id,)).fetchone()
+        )
+        item["tags"] = get_tags_for(conn, "knowledge_tags", "knowledge_id", item_id)
+        return 201, item
+    finally:
+        conn.close()
+
+
 def handle_update_knowledge(item_id, body):
     conn = get_db()
     try:

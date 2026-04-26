@@ -637,3 +637,32 @@ when picked up; Cairn owns the queue.
   moves `proposed → accepted` and this audit closes. Below threshold →
   Cairn dispatches (B) and the paper is superseded. Source: Cam's answer
   to §5 of the apply_to investigation, 2026-04-23.
+
+- **Every prompt type has an action path (UX audit, Lumen + Vault).** The
+  `knowledge_gap` prompt fix (2026-04-23) replaced a dead-end "Got it" with a
+  primary "Add a note" CTA cross-linked to the Knowledge view's Add form.
+  Same root pattern — model surfaces a suggestion, UI offers no path to act
+  — likely affects `stale_goal`, `activity_gap`, `pattern`, and any other
+  prompt type currently rendering only "Got it." Audit shape: enumerate
+  every `prompt_type` value in production, confirm each renders at least
+  one action button that takes the user to the place they would act, and
+  add the missing CTAs. Trigger to pull forward: a second prompt type Cam
+  flags as dead-end, OR the next time a prompt type is added without an
+  action path. Source: Cam's report 2026-04-23 on `knowledge_gap` ("Got it"
+  is useless), echoing the earlier `person_mention` fix — same shape, third
+  occurrence would mean we shipped this rule late.
+
+- **Prompt → resulting-item provenance link (Reed schema decision).** The
+  `prompts` table has `source_type` / `source_id` columns, both null in
+  production for `knowledge_gap` rows. The 2026-04-23 fix relies on the tag
+  string in the prompt body to seed the new knowledge item's tag, not on a
+  structured prompt field. That works for the immediate UX, but it means we
+  can't answer "which prompt did this knowledge item come from?" or measure
+  prompt → action conversion. Audit shape: decide whether prompts should
+  carry structured `referenced_tag_id` (or similar) at generation time, and
+  whether `source_type`/`source_id` should be populated post-action to
+  record the item the prompt produced. Trigger to pull forward: a second
+  prompt type needs structured payload (e.g. `stale_goal` needs the
+  `goal_id`), OR Cam asks for prompt-effectiveness analytics. Source: this
+  session, 2026-04-23 — kept out of scope for the immediate fix to keep
+  parts 1+2+3 shippable without a schema migration.

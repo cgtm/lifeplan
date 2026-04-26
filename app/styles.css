@@ -724,6 +724,68 @@ main {
 }
 
 /* ── Knowledge ────────────────────────────────────────────── */
+.add-knowledge-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.add-knowledge-title {
+  width: 100%;
+}
+
+.add-knowledge-content {
+  width: 100%;
+  min-height: 56px;
+  resize: vertical;
+}
+
+.add-knowledge-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.add-knowledge-tags {
+  flex: 1;
+  min-width: 0;
+}
+
+.add-knowledge-form .btn-primary {
+  flex-shrink: 0;
+}
+
+.add-knowledge-hint {
+  font-size: 0.75rem;
+  color: var(--text-3);
+  min-height: 1em;
+  margin: -6px 0 12px;
+  transition: color var(--transition);
+}
+
+.add-knowledge-hint.error {
+  color: var(--danger, #c0392b);
+}
+
+.knowledge-card.highlight-flash {
+  animation: knowledgeHighlight 1.6s ease-out;
+}
+
+@keyframes knowledgeHighlight {
+  0%   { box-shadow: 0 0 0 3px var(--accent); }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+@media (max-width: 640px) {
+  .add-knowledge-row {
+    flex-direction: column;
+  }
+  .add-knowledge-form .btn-primary {
+    width: 100%;
+  }
+}
+
 .knowledge-card {
   cursor: default;
 }

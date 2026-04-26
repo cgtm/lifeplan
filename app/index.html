@@ -193,6 +193,35 @@
           <p>Facts, decisions, learnings, and references</p>
         </div>
 
+        <form id="addKnowledgeForm" class="add-knowledge-form" autocomplete="off">
+          <input
+            type="text"
+            id="addKnowledgeTitle"
+            class="form-input add-knowledge-title"
+            placeholder="Add a note…"
+            aria-label="New note title"
+            maxlength="200"
+          />
+          <textarea
+            id="addKnowledgeContent"
+            class="form-textarea add-knowledge-content"
+            placeholder="Optional details…"
+            aria-label="Note content"
+            rows="2"
+          ></textarea>
+          <div class="add-knowledge-row">
+            <input
+              type="text"
+              id="addKnowledgeTags"
+              class="form-input add-knowledge-tags"
+              placeholder="Tags (comma-separated)"
+              aria-label="Tags"
+            />
+            <button type="submit" id="addKnowledgeBtn" class="btn-primary" disabled>Add</button>
+          </div>
+        </form>
+        <div id="addKnowledgeHint" class="add-knowledge-hint" role="status" aria-live="polite"></div>
+
         <div class="filters" style="margin-bottom:20px">
           <input type="search" class="search-box" id="knowledgeSearch" placeholder="Search knowledge..." autocomplete="off">
           <span class="filter-pill active" data-filter="all" id="knowledgeFilterAll">All</span>

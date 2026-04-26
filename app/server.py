@@ -38,7 +38,8 @@ if __package__ is None or __package__ == "":
         handle_get_tasks, handle_update_task, handle_delete_task,
         handle_get_people, handle_get_person, handle_create_person,
         handle_update_person, handle_delete_person,
-        handle_get_knowledge, handle_update_knowledge, handle_delete_knowledge,
+        handle_get_knowledge, handle_create_knowledge,
+        handle_update_knowledge, handle_delete_knowledge,
         handle_get_dependencies, handle_get_dashboard,
         handle_get_prompts, handle_update_prompt, handle_get_prompt_count,
         handle_generate_prompts,
@@ -63,7 +64,8 @@ else:
         handle_get_tasks, handle_update_task, handle_delete_task,
         handle_get_people, handle_get_person, handle_create_person,
         handle_update_person, handle_delete_person,
-        handle_get_knowledge, handle_update_knowledge, handle_delete_knowledge,
+        handle_get_knowledge, handle_create_knowledge,
+        handle_update_knowledge, handle_delete_knowledge,
         handle_get_dependencies, handle_get_dashboard,
         handle_get_prompts, handle_update_prompt, handle_get_prompt_count,
         handle_generate_prompts,
@@ -472,6 +474,12 @@ class Handler(SimpleHTTPRequestHandler):
 
         if method == "GET" and path == "/api/knowledge":
             status, data = handle_get_knowledge(params)
+            self.send_json(status, data)
+            return True
+
+        if method == "POST" and path == "/api/knowledge":
+            body = self.read_body()
+            status, data = handle_create_knowledge(body)
             self.send_json(status, data)
             return True
 
