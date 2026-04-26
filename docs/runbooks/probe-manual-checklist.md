@@ -84,7 +84,63 @@ must be the right one, and the launch must not require a Safari round-trip.
 5. Tap **Add**. Find the new icon on the home screen.
 6. Tap it. Verify (A) above end-to-end on this fresh bookmark.
 
-### D. Real-network failure modes (when relevant)
+### D. Background processing (every worker / processing change)
+
+The automated suite (`tests/e2e/background-processing.spec.ts`) covers
+HTTP shape, status transitions, and the in-page polling loop. The items
+here are what automation can't see: cross-process restart behaviour,
+real-device PWA behaviour, sustained-load behaviour, and the privacy
+invariant.
+
+1. **Worker mid-job restart.** Submit a brain dump. Within ~1 s of
+   submitting (while the badge is still "Processing"), restart the
+   worker:
+   ```sh
+   /Users/cam/dev/personal/lifeplan/lp worker restart
+   ```
+   Confirm the dump still completes — either the watchdog (≤ 5 min)
+   reclaims the in-flight row, or the next claim cycle picks it up.
+   The badge eventually flips to a terminal state without any user
+   intervention. May take up to 5 min; that's the contract's reclaim
+   window.
+2. **iOS PWA live transitions.** Launch the home-screen-installed PWA
+   on Cam's actual iPhone (not Safari). Open the Brain Dump page.
+   Submit a new dump. Confirm:
+   - Row appears with "Pending" within ~1 s.
+   - Badge transitions to "Done" / "Needs review" within ~5 s **without
+     pull-to-reload**. Standalone-mode polling has shipped bugs before;
+     this is the regression sentinel.
+3. **Long-running queue (serial processing).** Submit 5 brain dumps in
+   quick succession (one every ~1 s). Confirm:
+   - All 5 appear with "Pending" badges immediately.
+   - They process serially, oldest first, within reasonable time.
+   - Worker log shows one `worker.claimed` event per dump:
+     ```sh
+     /Users/cam/dev/personal/lifeplan/lp worker logs | grep worker.claimed | tail -10
+     ```
+4. **Prompt regeneration.** Visit a prompt-related surface (Home page,
+   prompt list). Trigger prompt regeneration via the UI affordance
+   (the "regenerate prompts" button or equivalent). Confirm:
+   - The button returns immediately (no UI hang — POST is non-blocking).
+   - New prompts appear within ~5 s if the cooldown allows; otherwise
+     the existing set remains and the worker logs `worker.processed`
+     for the prompt_generation job.
+5. **Privacy invariant.** Pick any known dump phrase (Cam knows several)
+   and grep the worker logs:
+   ```sh
+   journalctl -u lifeplan-worker -n 500 2>/dev/null | grep -i "<phrase>"
+   /Users/cam/dev/personal/lifeplan/lp worker logs | grep -i "<phrase>"
+   ```
+   Both must return nothing. If either matches, that's a **blocker** —
+   contract states "Worker logs contain no user content." File to Vault.
+
+   **Known finding (open as of 2026-04-25):** `app/processing.py:1679`
+   `print(f"  [processing] Starting brain dump #{dump_id}: \"{preview}...\"")`
+   currently emits the first 80 chars of dump content via `print(...)`.
+   This is the regression to look for; verify it's fixed before
+   sign-off on any deploy that *was* supposed to fix it.
+
+### E. Real-network failure modes (when relevant)
 
 When testing changes to the login page or session handling:
 

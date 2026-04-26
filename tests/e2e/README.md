@@ -82,6 +82,37 @@ Without `RATE_LIMIT_TEST=1` the test is **skipped with a clear reason** —
 not silently passed (Probe rule: a flaky/optional test that appears green
 is worse than a skipped test that surfaces the gap).
 
+## Background processing tests (`background-processing.spec.ts`)
+
+Six tests run by default. Two are gated:
+
+```sh
+# Failure handling: injects a poison work_queue row with a non-existent
+# target_id, asserts the worker reaches status='failed' after 3 attempts.
+# Needs sqlite3 CLI + LIFEPLAN_DB_PATH (defaults to data/lifeplan.db).
+FORCE_FAIL_TEST=1 npm test -- background-processing.spec.ts
+
+# Watchdog reclaim: injects a stale 'processing' row with claimed_at 10
+# minutes ago, waits for the watchdog (~60 s cycle) to reclaim it, then
+# for the worker to process. Slow on purpose (~90 s+).
+WATCHDOG_TEST=1 npm test -- background-processing.spec.ts
+```
+
+Both gated tests need direct SQLite write access. They auto-skip if
+`sqlite3` isn't on PATH or `LIFEPLAN_DB_PATH` (or the default data/
+location) doesn't exist.
+
+**Expected flake mode:** the happy-path and UI-live-transition tests
+poll for terminal status with a generous (120 s) bound. When the LLM
+tier is degraded (Mistral cloud rate-limited, Ollama dead, etc.) the
+worker falls back to regex extraction at ~25 s/job. Combined with a
+serial backlog from earlier tests, a dump submitted late in the run
+can occasionally exceed 120 s. If you see the happy-path test flake on
+retry, check `lp worker logs` and `lp worker status` before treating
+it as a real bug. The first sub-assertion ("worker claims within 30 s")
+is the daemon-health signal — if THAT trips, the worker really is
+stuck.
+
 ## Coverage
 
 | # | Area | File / case |
@@ -99,6 +130,14 @@ is worse than a skipped test that surfaces the gap).
 | 11 | Tampered cookie → redirect to login | "Tampered cookie" |
 | 12 | Content-Type gate (`x-www-form-urlencoded` → 415) | "POST /login" → Content-Type gate |
 | 13 | Public assets reachable unauthenticated | "Public assets" |
+| 14 | `POST /api/brain-dumps` 202 + queued, claimed within 30 s, terminal within 120 s | `background-processing.spec.ts` → "POST /api/brain-dumps (happy path)" |
+| 15 | `POST /api/brain-dumps` round-trip well under 1 s (was 2-45 s pre-rollout) | "POST /api/brain-dumps non-blocking" |
+| 16 | `POST /api/brain-dumps/<id>/retry` 409 on non-failed dump | "POST /api/brain-dumps/<id>/retry" → non-failed |
+| 17 | `POST /api/brain-dumps/<id>/retry` 404 on non-existent dump | "POST /api/brain-dumps/<id>/retry" → non-existent |
+| 18 | UI: submit → "Pending" badge → terminal badge within 120 s without reload | "UI live transitions" → submit and observe |
+| 19 | UI: leaving the dump page stops polling (no further API calls) | "UI live transitions" → leave page |
+| 20 | Worker failure handling: 3 attempts → status=failed *(opt-in: FORCE_FAIL_TEST=1)* | "Worker failure handling" |
+| 21 | Watchdog reclaims stale 'processing' rows *(opt-in: WATCHDOG_TEST=1)* | "Watchdog reclaim" |
 
 ## What's NOT covered (deferred to manual)
 

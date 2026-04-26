@@ -137,12 +137,83 @@ Expected for local (mount = `/`):
 
 Production: same matrix at `https://your-domain.example/lifeplan/...`.
 
-### 3. Manual checklist
+### 3. Background processing
+
+Phase 6 of the background-processing rollout adds a worker daemon and
+queue table. Verification has both an automated layer and a manual
+layer; both run on every deploy that touches `app/worker.py`,
+`app/processing.py`, the `work_queue` schema, the polling loop in
+`app/app.js`, or any of the `/api/brain-dumps/...` endpoints.
+
+#### Pre-deploy automated
+
+The default suite (`cd tests/e2e && npm test`) now includes
+`background-processing.spec.ts`. Expected: green on chromium and webkit.
+Six tests run by default, four are gated (see below).
+
+Two gated suites that are **not** part of the default Probe pass:
+
+```sh
+# Failure detection — injects a poison work_queue row, asserts status
+# transitions to 'failed' after 3 attempts. Needs direct SQLite access.
+FORCE_FAIL_TEST=1 npm test -- background-processing.spec.ts
+
+# Watchdog reclaim — injects a stale 'processing' row 10 minutes old,
+# waits up to ~90s for the watchdog to reclaim and the worker to process.
+# Slow on purpose; not for every Probe pass.
+WATCHDOG_TEST=1 npm test -- background-processing.spec.ts
+```
+
+Run `FORCE_FAIL_TEST=1` on every deploy that touches the worker's
+failure handler, the retry endpoint, or the `attempts` counter.
+Run `WATCHDOG_TEST=1` on every deploy that touches `_watchdog_pass`,
+the 5-minute reclaim window, or the finalisation guard.
+
+#### Pre-deploy manual
+
+1. Visit the Brain Dump page. Submit a new dump with content
+   `probe go-no-go <date>`. Observe:
+   - Row appears within 1 s with a grey "Pending" badge.
+   - Badge transitions through "Processing" (spinner) to "Done" or
+     "Needs review" within ~5 s without manual reload.
+2. Failure case: hand-set a row to `failed`:
+   ```sh
+   sqlite3 /Users/cam/dev/personal/lifeplan/data/lifeplan.db \
+     "UPDATE brain_dumps SET processing_status='failed' WHERE id=(SELECT MAX(id) FROM brain_dumps);"
+   ```
+   Reload the dump-list page. Observe the affected row shows a red
+   "Failed" badge with a Retry button. Click Retry. Observe the badge
+   flips optimistically to "Pending" and a fresh queue cycle starts.
+3. Worker daemon health (local):
+   ```sh
+   /Users/cam/dev/personal/lifeplan/lp worker status
+   ```
+   Should show the daemon running. On prod:
+   ```sh
+   ssh prod 'systemctl status lifeplan-worker --no-pager | head -5'
+   ```
+   Should report `active (running)`.
+4. Worker logs (local):
+   ```sh
+   /Users/cam/dev/personal/lifeplan/lp worker logs
+   ```
+   On prod:
+   ```sh
+   ssh prod 'journalctl -u lifeplan-worker -n 20'
+   ```
+   Both should show `worker.started`, `worker.claimed`, `worker.processed`
+   events. They must **never** carry brain-dump content (privacy
+   invariant from `app/contracts/background-processing.md` — "Worker
+   logs contain no user content. Only IDs, status, and error
+   type-and-message"). If you see dump text in the log, file a blocker
+   to Vault.
+
+### 4. Manual checklist
 
 Per `docs/runbooks/probe-manual-checklist.md`. Required for deploys
 touching auth, layout chrome, service worker, or anything visible on iOS.
 
-### 4. Production smoke (post-deploy only — listed for completeness)
+### 5. Production smoke (post-deploy only — listed for completeness)
 
 Re-run the automated suite against the production target with
 `LIFEPLAN_TEST_BASE_URL=https://your-domain.example/lifeplan/`. Skip the rate-limit
