@@ -602,25 +602,38 @@ when picked up; Cairn owns the queue.
   LLM extraction redesign, data-model changes (Reed's lane), and
   `apply_to` (separate Reed investigation).
 
-- **`apply_to` LLM-population accuracy review (Reed).** Vault is shipping
+- **`apply_to` LLM-population accuracy review (Reed).** Vault has shipped
   option (C) from
   [`docs/architecture/tag-apply-to-investigation.md`](../architecture/tag-apply-to-investigation.md):
-  the LLM extraction prompt is being extended to populate `apply_to` on each
-  tag item, and `_auto_create_item`'s tag branch will honour it by writing
-  to the per-content-type junction tables. The recommendation flipped on
-  the back of Cam's product answer (2026-04-23) that tag-on-task /
-  tag-on-knowledge / tag-on-goal retrieval is a real workflow he uses or
-  wants to use; option (B) per-segment tagging is held in reserve as the
-  fallback. This audit exists because LLM-supplied `apply_to` is exactly
-  the kind of thing that ships and gets forgotten without a deliberate
-  check-in. Reed defines the measurable bar for "earns its keep" and runs
-  the assessment. **Trigger:** after the first 10 production brain dumps
-  post-deploy of the (C) patch, OR 4 weeks from deploy date, whichever
-  comes first. Reed runs a production scan in the shape of Atlas's earlier
-  prod-scan, reports `apply_to` populated/empty/wrong rates back to
-  Cairn, and flags whether the threshold is met. Below threshold → Cairn
-  pulls forward (B) per-segment tagging as a follow-up dispatch and
-  supersedes the apply_to investigation paper. Above threshold → the
-  investigation paper moves from `proposed` to `accepted` and this audit
-  closes. Source: Cam's answer to §5 of the apply_to investigation,
-  2026-04-23.
+  the LLM extraction prompt now populates `apply_to` on each tag item, and
+  `_auto_create_item`'s tag branch honours it by writing to the
+  per-content-type junction tables. The recommendation flipped on the back
+  of Cam's product answer (2026-04-23) that tag-on-task / tag-on-knowledge
+  / tag-on-goal retrieval is a real workflow he uses or wants to use;
+  option (B) per-segment tagging is held in reserve as the fallback. This
+  audit exists because LLM-supplied `apply_to` is exactly the kind of
+  thing that ships and gets forgotten without a deliberate check-in.
+  **Reed has set the bar** (paper §4a, 2026-04-23):
+
+    - **Passes:** precision ≥ 85 % AND populated-rate ≥ 50 %.
+    - **Marginal:** precision 70-85 % OR populated-rate 30-50 %. Cairn
+      decides keep / iterate-prompt / fall-back.
+    - **Fails:** precision < 70 % OR populated-rate < 30 %. Cairn pulls
+      (B) per-segment tagging forward.
+    - **Sample floor:** ≥ 20 (tag, item) attachments across ≥ 5 dumps
+      before the thresholds bind. Below floor → hold open and re-run.
+
+  **Assessment script:** [`scripts/assess_apply_to.sh`](../../scripts/assess_apply_to.sh).
+  Pulls prod `processed_items`, filters to dumps processed after a
+  configurable `DEPLOY_DATE` constant (must be edited before the script
+  will run), prints per-dump rows for Cam's spot-check plus aggregate
+  metrics. Cam grades correctness by hand from the per-dump rows; the
+  script does not auto-grade.
+
+  **Trigger:** after the first 10 production brain dumps post-deploy of
+  the (C) patch, OR 4 weeks from deploy date, whichever comes first.
+  Atlas schedules Reed to run the script on trigger; Reed reports
+  pass/marginal/fail back to Cairn. Above threshold → investigation paper
+  moves `proposed → accepted` and this audit closes. Below threshold →
+  Cairn dispatches (B) and the paper is superseded. Source: Cam's answer
+  to §5 of the apply_to investigation, 2026-04-23.

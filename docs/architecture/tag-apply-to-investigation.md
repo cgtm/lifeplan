@@ -2,7 +2,7 @@
 
 **Status:** proposed
 **Author:** Reed (Knowledge Architect)
-**Date:** 2026-04-23 (revised 2026-04-23 after Cam's pushback on dump-level fan-out; revised again 2026-04-23 after Cam confirmed tag-on-task retrieval is a real workflow)
+**Date:** 2026-04-23 (revised 2026-04-23 after Cam's pushback on dump-level fan-out; revised again 2026-04-23 after Cam confirmed tag-on-task retrieval is a real workflow; revised again 2026-04-23 with Reed's success criteria after Vault shipped the (C) implementation)
 **Triggered by:** Atlas's production scan — 5/5 tag items in `processed_items` had `apply_to=[]`.
 **Parallel work:** Vault is doing the immediate code fix on Cairn's separate ticket; this paper covers the design question.
 
@@ -76,7 +76,7 @@ Frontend shows the dump's detected tags as chips next to each extracted task/kno
 
 **Active dispatches under (C):**
 - **Vault** — extend the LLM extraction prompt in `app/processing.py` (the `_build_llm_prompt` scaffolding around L1051 and the `process_brain_dump_llm` path) to request `apply_to` on each tag item, with prompt instructions and examples that make it clear the field carries item indices into the same `processed_items.items` array. Stop hard-coding `"apply_to": []` in `_llm_response_to_items` — read the field through. Extend the `tag` branch of `_auto_create_item` so when `apply_to` is non-empty, the tag is attached to the named items via the appropriate junction tables (`task_tags`, `knowledge_tags`, `person_tags`, `goal_tags` — Vault confirms exact table names against `data/SCHEMA.md`). When `apply_to` is empty or absent, behaviour stays as today: insert into `tags`, link only to `brain_dump_tags`. Privacy invariant holds — `apply_to` values are item indices, not text, so they're fine to log; no extracted content is logged.
-- **Reed** — owns the success criteria and the post-deploy assessment. Defines the measurable bar for "earns its keep" (e.g. after N production brain dumps with `apply_to` populated, ≥X% of `(tag, item)` pairs are correct on Cam's spot-check, ≤Y% are incorrect; numbers per Reed's judgment for a single-user system). After Vault's patch ships and Cam has captured a handful of real brain dumps, Reed runs a production scan in the shape of Atlas's earlier scan and reports `apply_to` populated/empty/wrong rates back to Cairn. Below threshold → Cairn pulls (B) per-segment tagging forward as a follow-up.
+- **Reed** — owns the success criteria and the post-deploy assessment. Criteria are now set; see §4a above. The bar: precision ≥ 85 % AND populated-rate ≥ 50 % to pass; precision < 70 % OR populated-rate < 30 % to fail; in-between is marginal and Cairn's judgment call. Sample-size floor: ≥ 20 attachments across ≥ 5 dumps before the thresholds bind. The assessment script lives at `scripts/assess_apply_to.sh`; it pulls prod data, prints per-dump rows for Cam's spot-check, and reports the aggregate metrics. Atlas schedules Reed to run it when the trigger fires (10 dumps post-deploy, or 4 weeks, whichever comes first).
 - **Probe** — regression coverage. At minimum: existing tag flow (empty `apply_to`) does not break. New path is exercised by an e2e test that asserts a tag with non-empty `apply_to` attaches to the named items in the DB via the correct junction tables.
 
 **Watch entry:** Reed's assessment is queued in `docs/processes/team-practices.md` under "Queued audits" with a 10-dumps-or-4-weeks trigger so the check-in doesn't get forgotten.
@@ -89,6 +89,72 @@ Frontend shows the dump's detected tags as chips next to each extracted task/kno
 3. **(D) Drop `apply_to`** — last resort if the auto-extraction approaches don't pan out *and* Cam's manual-tagging discipline is sufficient. Still on the table; no longer the recommendation.
 
 **Why not (E) standalone:** UI chips are good but they're a Lumen build and they relocate friction to a review step rather than removing it. Held in reserve as part of (F).
+
+## 4a. Success criteria — "earns its keep" threshold (Reed, 2026-04-23)
+
+Per Cairn's dispatch, Reed owns the bar that decides whether (C) is good
+enough to keep, or whether Cairn falls back to (B) per-segment tagging.
+
+**The metric.** Each `(tag, item)` attachment the LLM caused via a non-empty
+`apply_to` is one trial. Cam grades each as **correct** (he would have made
+the same attachment manually) or **incorrect** (cross-contamination, wrong
+item, or attached to nothing he'd want). "Missing" attachments — tags the
+LLM emitted with empty `apply_to` that Cam would have attached somewhere —
+are tracked separately as a softer signal, since false negatives are
+recoverable via the manual UI tagging path.
+
+**Asymmetric cost reasoning.** False positives (wrong attachments) pollute
+retrieval and are hard to notice — they're the load-bearing failure mode.
+False negatives (missed attachments) are easy to spot and easy to fix from
+the UI. So the precision bar is the load-bearing threshold; the
+populated-rate bar is the secondary signal that the LLM is actually trying
+rather than always defaulting to `[]`.
+
+**Sample-size floor.** With small numbers, percentage thresholds are noisy.
+The assessment requires **≥ 20 (tag, item) attachments graded across ≥ 5
+distinct dumps** before the thresholds bind. Below the floor, the
+assessment is held open and re-run after the next batch of dumps. Don't
+grade noise.
+
+**Thresholds.**
+
+| Outcome   | Precision (correct ÷ total attachments) | Populated-rate (tag items with non-empty `apply_to` ÷ all tag items) | Action |
+|---|---|---|---|
+| **Passes**   | ≥ 85 %                | ≥ 50 %                | Status moves `proposed → accepted`. Audit closes. |
+| **Marginal** | 70 – 85 %             | OR 30 – 50 %          | Cairn's call: keep, iterate the LLM prompt, or fall back to (B). |
+| **Fails**    | < 70 %                | OR < 30 %             | Cairn pulls (B) per-segment tagging forward. This paper is superseded. |
+
+Both passes conditions must hold for an unambiguous pass; either fails
+condition triggers fallback. "Marginal" is anything in between that needs
+Cairn's judgment — typically a single iteration of the LLM prompt before a
+re-assessment.
+
+**Why these numbers.** 85 % precision means Cam tolerates ~1 wrong
+attachment per ~7 — at single-user volumes (a handful of brain dumps a
+week), that's a manual cleanup cost of seconds per week, well below the
+retrieval payoff of cross-content tag queries actually working. Below
+70 %, retrieval becomes net-noise: every tag query result needs manual
+verification, defeating the purpose. The 50 % populated-rate is the
+"is the LLM even trying" floor — if the model returns `apply_to: []`
+more often than not, the prompt isn't carrying its weight and (B) is
+strictly better. Below 30 %, (C) is effectively (D)-with-extra-steps.
+
+**The script.** `/Users/cam/dev/personal/lifeplan/scripts/assess_apply_to.sh`
+pulls production `processed_items` from prod, filters to dumps processed
+after a configurable `DEPLOY_DATE` constant, and prints per-dump rows for
+Cam's spot-check plus aggregate metrics (populated-rate, attachments
+landed in junction tables, suspicious-empty and suspicious-noisy flags).
+The script does not auto-grade correctness — Cam reads the rows and
+scores each `(tag, item)` attachment by hand. That's deliberate: the
+precision number is exactly the thing the LLM can't grade itself.
+
+**Cadence.** Triggered when **10 production brain dumps** have been
+processed post-deploy of (C), OR **4 weeks** from deploy date, whichever
+comes first. The "Queued audits" entry in `team-practices.md` carries the
+trigger; Atlas schedules. Reed runs the script, scores the spot-check,
+classifies pass/marginal/fail, and reports back to Cairn. On pass, this
+paper moves to `accepted` and the audit closes. On marginal/fail, Cairn
+dispatches accordingly per the table above.
 
 ## 5. Question for Cam (product input needed)
 
