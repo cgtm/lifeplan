@@ -14,6 +14,7 @@ Privacy invariant (CONTRACT, NON-NEGOTIABLE):
 import json
 import logging
 import re
+import sqlite3
 import time
 import urllib.error
 import urllib.request
@@ -24,12 +25,55 @@ from .db import get_db, now_utc, rows_to_dicts, get_tags_for, call_mistral_api, 
 
 logger = logging.getLogger("lifeplan.processing")
 
+# Hard cap on `sqlite3.Error` message length for log lines. The contract notes
+# constraint-violation messages occasionally cite the offending parameter
+# value; we truncate as a best-effort hedge against user content leaking via
+# error text. NOT a guarantee -- the privacy story stays "log only IDs and
+# enum-shaped fields where possible."
+_ERROR_MSG_TRUNCATE_LEN = 500
+
+
+def _truncate_error_message(msg: str) -> str:
+    """Truncate an error message to `_ERROR_MSG_TRUNCATE_LEN` chars."""
+    if msg is None:
+        return ""
+    if len(msg) <= _ERROR_MSG_TRUNCATE_LEN:
+        return msg
+    return msg[:_ERROR_MSG_TRUNCATE_LEN] + "...[truncated]"
+
 
 class BrainDumpNotFound(Exception):
     """Raised by process_brain_dump_for_worker when the target brain_dump row
     is gone (e.g. user deleted it after the job was queued/claimed). The
     worker treats this as a clean no-op rather than a retryable failure.
     """
+
+
+class MalformedItemData(Exception):
+    """LLM produced an item dict missing a required key for its branch.
+
+    Carries `branch` (the dispatch enum value, e.g. "task") and `missing_key`
+    (the absent dict key, e.g. "title"). Both fields are static enum-shaped
+    strings -- safe to log per the privacy invariant.
+    """
+
+    def __init__(self, branch: str, missing_key: str):
+        self.branch = branch
+        self.missing_key = missing_key
+        super().__init__(f"{branch}: missing required key '{missing_key}'")
+
+
+class UnknownItemType(Exception):
+    """`_auto_create_item` reached its dispatcher's else with no matching branch.
+
+    Programming bug, not a data bug -- propagates to the caller.
+    `itype` is LLM-supplied; the `!r` repr in the message is bounded by the
+    truncation cap upstream when the worker logs it.
+    """
+
+    def __init__(self, itype: str):
+        self.itype = itype
+        super().__init__(f"unknown itype: {itype!r}")
 
 _env = _load_env()
 OLLAMA_URL = _env.get("OLLAMA_URL", "http://localhost:11434") + "/api/generate"
@@ -1546,13 +1590,40 @@ def process_brain_dump_llm(dump_id, conn, dump, goals_data, known_people, known_
 
 
 def _auto_create_item(conn, item, dump_id):
-    """Create a database row for an auto-created item. Returns the new row ID or None."""
+    """Create a database row for an auto-created item.
+
+    Contract: app/contracts/auto-create-item.md.
+
+    Returns the new (or matched) row id on success, or `None` when the caller
+    should treat the item as not-created. `None` is a deliberate contract
+    signal -- the caller MUST mark the item `failed` and set `created_id`
+    to None. Never let `None` reach a status of `auto_created` or `approved`
+    (invariant 1).
+
+    Raises:
+      * `UnknownItemType` if `itype` doesn't match any branch -- not caught
+        here; the caller routes per its own policy (worker retries, approve
+        handler returns 500-with-class-name).
+      * `BrainDumpNotFound` propagates from upstream; not raised here.
+      * `AssertionError` for invariant violations (e.g. `INSERT OR IGNORE`
+        on UNIQUE leaving no readable row) -- programming bug, propagate.
+
+    Caught and logged as `processing.auto_create.failed` (returns None):
+      * `MalformedItemData` -- LLM omitted a required key for the branch.
+      * `sqlite3.Error` -- DB-level failure on a single item. Per Cairn's
+        decision (2026-04-23 audit open question): drop the one item, keep
+        the dump going. If this fires repeatedly, that's a separate audit
+        trigger at the worker / connection layer.
+    """
     ts = now_utc()
     itype = item["type"]
     data = item["data"]
 
     try:
         if itype == "task":
+            # Recovery shape: log + None via MalformedItemData.
+            if "title" not in data:
+                raise MalformedItemData("task", "title")
             cur = conn.execute(
                 "INSERT INTO tasks (title, description, goal_id, status, due_date, "
                 "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1568,6 +1639,9 @@ def _auto_create_item(conn, item, dump_id):
             return cur.lastrowid
 
         elif itype == "knowledge":
+            # Recovery shape: log + None via MalformedItemData.
+            if "title" not in data:
+                raise MalformedItemData("knowledge", "title")
             cur = conn.execute(
                 "INSERT INTO knowledge_items (title, content, item_type, source, "
                 "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -1582,12 +1656,12 @@ def _auto_create_item(conn, item, dump_id):
             return cur.lastrowid
 
         elif itype == "tag":
+            # Recovery shape: log + None via MalformedItemData if tag_name
+            # is absent. Otherwise: fall-through to create-new when LLM said
+            # is_new=False but didn't supply matched_existing_id.
+            if "tag_name" not in data:
+                raise MalformedItemData("tag", "tag_name")
             tag_name = data["tag_name"]
-            # Recovery: when the LLM marked is_new=False but couldn't supply a
-            # matched_existing_id, fall through to the create-new path using
-            # the LLM's tag_name. Same shape as the person_mention recovery --
-            # without this we'd silently return None and the row would show
-            # in the UI as auto_created with no DB record behind it.
             if not data.get("is_new") and not data.get("matched_existing_id"):
                 # Privacy: do not log tag_name; dump_id + reason only.
                 logger.info(
@@ -1602,14 +1676,19 @@ def _auto_create_item(conn, item, dump_id):
                 tag_row = conn.execute(
                     "SELECT id FROM tags WHERE name = ?", (tag_name,)
                 ).fetchone()
-                if tag_row:
-                    # Link to the brain dump
-                    conn.execute(
-                        "INSERT OR IGNORE INTO brain_dump_tags (brain_dump_id, tag_id) "
-                        "VALUES (?, ?)",
-                        (dump_id, tag_row["id"]),
-                    )
-                    return tag_row["id"]
+                # Invariant: INSERT OR IGNORE on UNIQUE(name) always leaves
+                # a readable row. If this fails, it's a programming /
+                # schema-corruption bug, not data bug -- propagate.
+                assert tag_row is not None, (
+                    f"INSERT OR IGNORE on UNIQUE(name) failed for tag={tag_name!r}"
+                )
+                # Link to the brain dump
+                conn.execute(
+                    "INSERT OR IGNORE INTO brain_dump_tags (brain_dump_id, tag_id) "
+                    "VALUES (?, ?)",
+                    (dump_id, tag_row["id"]),
+                )
+                return tag_row["id"]
             else:
                 tag_id = data["matched_existing_id"]
                 conn.execute(
@@ -1620,6 +1699,9 @@ def _auto_create_item(conn, item, dump_id):
                 return tag_id
 
         elif itype == "goal_new":
+            # Recovery shape: log + None via MalformedItemData.
+            if "title" not in data:
+                raise MalformedItemData("goal_new", "title")
             cur = conn.execute(
                 "INSERT INTO goals (title, description, status, target_date, "
                 "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -1633,36 +1715,60 @@ def _auto_create_item(conn, item, dump_id):
             )
             goal_id = cur.lastrowid
 
-            # Link detected people via goal_people
+            # Link detected people via goal_people. Per contract: bad person_id
+            # FK violation does NOT roll back the goal create; log per-link
+            # warning and continue.
             for person_id in data.get("people_ids", []):
-                conn.execute(
-                    "INSERT OR IGNORE INTO goal_people (goal_id, person_id, role) "
-                    "VALUES (?, ?, ?)",
-                    (goal_id, person_id, "involved"),
-                )
+                try:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO goal_people (goal_id, person_id, role) "
+                        "VALUES (?, ?, ?)",
+                        (goal_id, person_id, "involved"),
+                    )
+                except sqlite3.Error as link_err:
+                    logger.warning(
+                        "processing.auto_create.goal_new.link_failed "
+                        "dump_id=%s goal_id=%s person_id=%s "
+                        "error_class=%s error_message=%s",
+                        dump_id, goal_id, person_id,
+                        type(link_err).__name__,
+                        _truncate_error_message(str(link_err)),
+                    )
 
             return goal_id
 
-        elif itype == "person_new" or itype == "person_mention":
-            # person_mention with a matched person_id: nothing to insert.
-            if itype == "person_mention" and data.get("person_id") is not None:
-                return data.get("person_id")
+        elif itype == "person_new":
+            # Recovery shape: log + None via MalformedItemData.
+            if "name" not in data:
+                raise MalformedItemData("person_new", "name")
+            name = data["name"]
+            relationship = data.get("inferred_relationship", "unknown")
+            notes = data.get("notes", data.get("context", ""))
+            cur = conn.execute(
+                "INSERT INTO people (name, relationship, notes, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (name, relationship, notes, ts, ts),
+            )
+            return cur.lastrowid
 
-            # Otherwise (person_new, or person_mention with no match) insert
-            # a new row in `people`. Map the person_mention data shape into
-            # the same fields person_new uses, so the INSERT lives in one place.
-            if itype == "person_mention":
-                name = (data.get("person_name") or "").strip()
-                if not name:
-                    # Nothing usable to insert; bail without raising.
-                    return None
-                relationship = data.get("inferred_relationship", "unknown")
-                notes = data.get("notes", data.get("context", ""))
-            else:
-                name = data["name"]
-                relationship = data.get("inferred_relationship", "unknown")
-                notes = data.get("notes", data.get("context", ""))
-
+        elif itype == "person_mention":
+            # Per contract: matched person_id -> return it (no insert).
+            # Otherwise: fall-through to create-new from person_name.
+            # Empty-name guard returns None with a logged drop (no
+            # MalformedItemData here -- person_mention is allowed to have
+            # neither person_id nor person_name in pathological cases, and
+            # we already had a silent-drop path; we just made it loud).
+            if data.get("person_id") is not None:
+                return data["person_id"]
+            name = (data.get("person_name") or "").strip()
+            if not name:
+                logger.warning(
+                    "processing.auto_create.person_mention.drop dump_id=%s "
+                    "reason=empty_person_name", dump_id,
+                )
+                return None
+            relationship = data.get("inferred_relationship", "unknown")
+            notes = data.get("notes", data.get("context", ""))
             cur = conn.execute(
                 "INSERT INTO people (name, relationship, notes, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?)",
@@ -1671,34 +1777,49 @@ def _auto_create_item(conn, item, dump_id):
             return cur.lastrowid
 
         elif itype == "goal_link":
-            # Only report a created_id when a goal was actually linked.
-            # Unlike `tag` and `person_mention`, there is no "create new" recovery
-            # here -- a goal_link by definition refers to an EXISTING goal; we
-            # have no goal title/description to synthesise one from. If the LLM
-            # failed to produce a goal_id, the link is unrecoverable.
-            #
-            # Why warn-and-return-None rather than raise: the enclosing
-            # try/except in this function swallows exceptions and returns None
-            # anyway (see bottom of function), so raising would be silently
-            # absorbed and indistinguishable from any other failure. Logging
-            # explicitly is the only way to surface the bug class. The caller
-            # (process_brain_dump_for_worker) already tolerates None as
-            # "auto_created with no created_id" -- the residual UX is the same
-            # as the historical bug, but now diagnosable from logs.
+            # No "create new" recovery -- a goal_link by definition refers to
+            # an EXISTING goal; we have no title/description to synthesise.
+            # Per contract: log + None when goal_id is missing.
             goal_id = data.get("goal_id")
             if goal_id is not None:
                 return goal_id
             # Privacy: dump_id + reason only; never log free-text goal text.
+            logger.info(
+                "processing.auto_create.no_target dump_id=%s item_type=goal_link",
+                dump_id,
+            )
             logger.warning(
                 "processing.auto_create.goal_link.drop dump_id=%s "
                 "reason=missing_goal_id", dump_id,
             )
             return None
 
-    except Exception:
-        pass  # Don't fail the whole pipeline for one item
+        else:
+            # Explicit dispatcher else (was implicit/silent before). Future
+            # branch additions can't accidentally drop a whole class of items.
+            # Not caught here -- the caller treats this as a programming bug.
+            raise UnknownItemType(itype)
 
-    return None
+    except MalformedItemData as e:
+        # Privacy: branch + missing_key are static enum-shaped strings.
+        logger.warning(
+            "processing.auto_create.malformed dump_id=%s item_type=%s "
+            "branch=%s missing_key=%s",
+            dump_id, itype, e.branch, e.missing_key,
+        )
+        return None
+    except sqlite3.Error as e:
+        # Per Cairn's decision: drop the one item, keep the dump going.
+        # error_message is truncated as a best-effort hedge -- sqlite3 error
+        # text occasionally embeds parameter values from constraint violations.
+        logger.warning(
+            "processing.auto_create.db_error dump_id=%s item_type=%s "
+            "error_class=%s error_message=%s",
+            dump_id, itype,
+            type(e).__name__,
+            _truncate_error_message(str(e)),
+        )
+        return None
 
 
 def process_brain_dump_for_worker(conn, dump_id):
@@ -1833,14 +1954,30 @@ def process_brain_dump_for_worker(conn, dump_id):
         item for item in all_items if item["confidence"] >= 0.50
     ]
 
-    # Auto-create high-confidence items
+    # Auto-create high-confidence items.
+    # Status set AFTER the call (invariant 1 from the auto-create contract):
+    # `_auto_create_item` returns None to signal "couldn't create"; the
+    # status MUST then be `failed`, never `auto_created`. dropped_count
+    # tracks the failed branch so operators can reconcile len(items)
+    # against reported counts in the processing.done log line.
     auto_count = 0
     suggest_count = 0
-    for item in filtered_items:
+    dropped_count = 0
+    for idx, item in enumerate(filtered_items):
         if item["confidence"] >= 0.80:
-            item["status"] = "auto_created"
             created_id = _auto_create_item(conn, item, dump_id)
-            item["created_id"] = created_id
+            if created_id is None:
+                item["status"] = "failed"
+                item["created_id"] = None
+                dropped_count += 1
+                logger.warning(
+                    "processing.auto_create.dropped dump_id=%s item_index=%d "
+                    "item_type=%s caller=worker",
+                    dump_id, idx, item["type"],
+                )
+            else:
+                item["status"] = "auto_created"
+                item["created_id"] = created_id
             auto_count += 1
         else:
             item["status"] = "suggested"
@@ -1854,9 +1991,9 @@ def process_brain_dump_for_worker(conn, dump_id):
     elapsed = time.time() - t_start
     logger.info(
         "processing.done dump_id=%s duration_ms=%d method=%s "
-        "auto_created=%d suggested=%d status=%s",
+        "auto_created=%d suggested=%d dropped=%d status=%s",
         dump_id, int(elapsed * 1000), extraction_method,
-        auto_count, suggest_count, processing_status,
+        auto_count, suggest_count, dropped_count, processing_status,
     )
 
     ts = now_utc()
@@ -2104,9 +2241,30 @@ def handle_approve_item(dump_id, body):
         elif action in ("approve", "edit_approve"):
             if edit_data:
                 item["data"].update(edit_data)
-            created_id = _auto_create_item(conn, item, dump_id)
-            item["created_id"] = created_id
-            item["status"] = "approved"
+            # Per auto-create contract: UnknownItemType propagates here as
+            # a typed catch -> 500 with class-name only (no exception text
+            # leak). Any other unexpected exception bubbles to the framework
+            # 500 handler unchanged. We do NOT broaden to `except Exception`
+            # -- that would re-introduce the swallow this audit is killing.
+            try:
+                created_id = _auto_create_item(conn, item, dump_id)
+            except UnknownItemType as e:
+                return 500, {"error": f"internal error: {type(e).__name__}"}
+            if created_id is None:
+                # Invariant 1: status MUST NOT be `approved` when no row was
+                # created. Mark `failed`, surface via the returned dump.
+                # HTTP shape unchanged -- 200, the approve action was accepted;
+                # the underlying create is what failed.
+                item["status"] = "failed"
+                item["created_id"] = None
+                logger.warning(
+                    "processing.auto_create.dropped dump_id=%s item_index=%d "
+                    "item_type=%s caller=approve",
+                    dump_id, item_index, item["type"],
+                )
+            else:
+                item["created_id"] = created_id
+                item["status"] = "approved"
 
         # Update processed_items JSON
         ts = now_utc()
