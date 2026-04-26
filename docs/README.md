@@ -63,6 +63,15 @@ Dated, per-feature. Every feature touching more than one persona ends here.
   cookie-session auth, replacing HTTP Basic Auth. Three identical path bugs,
   one false premise, ten lessons mapped to artefacts. First retro under the
   new practice.
+- **[2026-04-25-background-processing.md](retrospectives/2026-04-25-background-processing.md)** —
+  background processing rollout (brain-dump POST 2–45s → <1s). Timeline
+  retro + 5-Whys per notable bug across a phased rollout. Three new
+  practices (§10, §11, §12), three queued follow-ups, two latent bugs
+  caught by Probe's contract-driven gate.
+- **[2026-04-25-background-processing-summary.md](retrospectives/2026-04-25-background-processing-summary.md)** —
+  Cam-facing narrative summary of the same rollout. Plain-language version
+  of the engineering retro, under 800 words. Read this first; the full
+  retro is the deep-dive.
 
 ---
 

@@ -23,6 +23,9 @@ changes, update this file; the persona files only carry pointers to it.
 7. [Stay-in-lane handoffs](#7-stay-in-lane-handoffs) — proposed
 8. [Probe verification mandatory](#8-probe-verification-mandatory) — accepted
 9. [HTTP method coverage on handler overrides](#9-http-method-coverage-on-handler-overrides) — accepted
+10. [Canonical 12-step ALTER for SQLite schema rebuilds](#10-canonical-12-step-alter-for-sqlite-schema-rebuilds) — accepted
+11. [Privileged-config changes are operator-applied](#11-privileged-config-changes-are-operator-applied) — accepted
+12. [Deploys do not include uncommitted work](#12-deploys-do-not-include-uncommitted-work) — accepted
 
 ---
 
@@ -338,6 +341,143 @@ so this lives as a practice rather than an ADR.
 **Status:** accepted (2026-04-23). Provenance: triage entry of 2026-04-23,
 HEAD-vs-GET 404 on `/login`. Two occurrences (production curl-check;
 `deploy.sh` health probe, since worked-around by switching to GET).
+
+---
+
+## 10. Canonical 12-step ALTER for SQLite schema rebuilds
+
+**Statement.** Every SQLite schema rebuild that touches a parent table
+referenced by a foreign key uses the canonical 12-step ALTER pattern
+(create new table → copy data → drop old → rename new). Never rename the
+parent table out of the way and then recreate under the original name.
+The "rename, recreate, copy, drop" shorthand is forbidden for any table
+that has child references.
+
+**Why.** Migration 0001 of the background-processing rollout used the
+"rename parent, recreate" pattern. Modern SQLite (~3.25+) auto-rewrites
+FK references in dependent tables when the parent is renamed; older
+SQLite (the prod droplet) does not. Local came up green; prod showed 19
+FK violations and broken `brain_dump_tags` INSERTs. Required a 0002
+hot-fix migration. Provenance:
+[`docs/retrospectives/2026-04-25-background-processing.md`](../retrospectives/2026-04-25-background-processing.md),
+Bug A and Lesson L1.
+
+**How to apply.**
+
+1. For any schema rebuild on a table with FK children, follow the
+   canonical pattern from the SQLite docs (sqlite.org/lang_altertable.html
+   §7 "Making Other Kinds Of Table Schema Changes"):
+    - `PRAGMA foreign_keys=OFF;`
+    - `BEGIN TRANSACTION;`
+    - Create the new table under a temporary name.
+    - Copy data from the old table.
+    - Drop the old table.
+    - Rename the new table to the old name.
+    - Recreate indexes, triggers, views.
+    - `PRAGMA foreign_key_check;` — must return zero rows before commit.
+    - `COMMIT;`
+    - `PRAGMA foreign_keys=ON;`
+2. Renaming a *child* table is safe across all SQLite versions because
+   nothing else holds an FK pointing at it. Renames of childless tables
+   are also fine.
+3. Every migration script that rebuilds a parent table includes a
+   comment naming this practice and the retro that produced it, so the
+   pattern is discoverable at the call site.
+4. Reed owns schema migrations. Cairn checks at review.
+
+**Status:** accepted (2026-04-25). Provenance: background-processing
+retro, Bug A. Single-incident rule (no Rule of Two needed): the cost of
+re-learning is a prod migration recovery, which is too expensive to wait
+for a second occurrence.
+
+---
+
+## 11. Privileged-config changes are operator-applied
+
+**Statement.** Changes to privileged configuration — sudoers, systemd
+unit installs, package installs, anything requiring root on the
+target host — are applied by the operator running `server-setup.sh`
+(or the equivalent privileged script), never by `deploy.sh`.
+`deploy.sh`'s contract is **code only**: rsync the application code
+and the unprivileged scripts; restart only services whose new
+configuration is already live; never assume new privileges exist.
+
+**Why.** Phase 5 of the background-processing rollout extended
+`server-setup.sh` with a sudoers entry granting NOPASSWD systemctl
+verbs for `lifeplan-worker`, so that `deploy.sh` could restart the
+worker without prompting. The script was not re-run on prod after the
+deploy. `deploy.sh`'s restart line had no privilege; it failed silently
+(see practice §12 follow-up); prod ran old code for ~3 hours.
+Provenance: [`docs/retrospectives/2026-04-25-background-processing.md`](../retrospectives/2026-04-25-background-processing.md),
+Bug C and Lesson L3.
+
+**How to apply.**
+
+- **deploy.sh contract:** rsync code, restart application services
+  (`lifeplan`), restart unprivileged worker daemons whose units are
+  already installed and whose privileges already exist. Never install
+  units. Never modify sudoers. Never `apt install`. Never `cp`
+  anything into `/etc/`.
+- **server-setup.sh contract:** install / update privileged config.
+  Idempotent. Re-runnable. Operator runs it explicitly when the diff
+  touches privileged surfaces; the runbook for that operation is
+  `docs/runbooks/remote-sudo.md`.
+- **Diff-time signal:** any commit that modifies `server-setup.sh`
+  must include in its commit message the explicit operator instruction
+  "re-run `server-setup.sh` on prod after deploy lands." Cairn enforces
+  at review.
+- **Forge's lane:** Forge owns both scripts and is responsible for
+  keeping the contracts honest. If a deploy.sh feature would require
+  new privileges, Forge moves the install half into server-setup.sh
+  and the apply half into the operator runbook before adding the
+  deploy.sh feature.
+
+**Status:** accepted (2026-04-25). Provenance: background-processing
+retro, Bug C. Single-incident rule (3-hour prod stale-code window
+established the cost).
+
+---
+
+## 12. Deploys do not include uncommitted work
+
+**Statement.** `deploy.sh` refuses to deploy when the working tree is
+non-empty. The check is `git status --porcelain`; non-empty output
+aborts the deploy with a clear error naming the dirty paths.
+
+**Why.** `deploy.sh` rsyncs the working tree, not the committed state.
+Phase 5 of the background-processing rollout accidentally rsynced
+uncommitted Vault and Lumen changes to prod alongside Forge's
+committed Phase 5 changes. The mismatch between "what's in git" and
+"what's on prod" defeated bisect-and-revert. Provenance:
+[`docs/retrospectives/2026-04-25-background-processing.md`](../retrospectives/2026-04-25-background-processing.md),
+Lesson L5.
+
+**How to apply.**
+
+- The guard lives in `deploy.sh`, not in Atlas's discipline. A
+  script-level check is enforceable; a persona-level rule is a vibe.
+- Top of `deploy.sh` (after `set -euo pipefail`):
+
+  ```sh
+  if [ -n "$(git status --porcelain)" ]; then
+    echo "deploy.sh: working tree is dirty; commit or stash before deploying" >&2
+    git status --short >&2
+    exit 1
+  fi
+  ```
+
+- Override is permitted only via an explicit `LIFEPLAN_DEPLOY_DIRTY=1`
+  environment variable, used **only** during a controlled emergency
+  rollback. The override is not muscle memory; using it logs a warning
+  to chat at the next review.
+- Forge owns the script change as a queued ticket out of the
+  background-processing retro. The practice is in force from this
+  retro's date; the script-level enforcement lands when the ticket
+  closes.
+
+**Status:** accepted (2026-04-25). Provenance: background-processing
+retro, Lesson L5. Sister practice to §3 (commit cadence): §3 is "commit
+often"; §12 is "the deploy enforces the result."
 
 ---
 
