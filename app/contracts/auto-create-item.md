@@ -1,8 +1,9 @@
 # Contract: auto-create-item
 
 **Authors:** Vault (server), supervised by Cairn
-**Status:** proposed
+**Status:** accepted
 **Last updated:** 2026-04-23
+**Cairn approved:** 2026-04-23 — ready for Vault to patch (separate dispatch).
 
 Internal helper contract carved out of
 [`background-processing.md`](./background-processing.md). Spec for the
@@ -364,34 +365,70 @@ Probe owns the regression test. The contract requires it cover:
    `status == "failed"`, and the dump's `processing_status` is **not**
    regressed to `processed` if other suggestions remain.
 
-## Open questions
+## Open questions — resolved by Cairn 2026-04-23
 
 - **Should a DB-level error (`sqlite3.OperationalError`) abort the
-  whole dump, or just drop the one item?** Today: drop the one item
-  (because the bare-except did). After patch: same (catching
-  `sqlite3.Error` keeps the behaviour, just logged now). Cairn /
-  product call whether to escalate. *Default: keep current behaviour;
-  revisit if it causes pain.*
-- **`dropped_count` reporting in `processing.done` log line.** Worth
-  adding alongside `auto_created` and `suggested`? Trivial change;
-  flagging for Cairn's call so the patch scope is bounded.
-- **Lumen's badge for per-item `status="failed"`.** Out of scope for
-  this audit (the audit is back-end truthfulness; UX of the new
-  per-item state is a separate dispatch). Frontend filter
-  (`app.js:508`, `:839`) will need a one-line update to either include
-  or explicitly exclude `failed` from its counts. Flagged here so it
-  isn't forgotten.
-- **`UnknownItemType` from `handle_approve_item`.** Currently the
-  approve path would 500. That is the correct shape (programming
-  error), but the response body should match the cookie-auth /
-  background-processing convention of `{"error": "..."}` with no
-  exception text. Patch will need to wrap the call in `handle_approve_item`
-  with a try/except for `UnknownItemType` and return
-  `500, {"error": "internal error"}` — confirm this is the desired
-  shape with Cairn before patching.
+  whole dump, or just drop the one item?** **DECISION: drop the one
+  item (keep current behaviour).** Rationale: aborting the whole dump
+  on a single per-item DB error punishes nine good items for one bad
+  one, and the new structured logging gives us the signal we were
+  missing. If we see a pattern of `OperationalError` (e.g. recurring
+  `database is locked`), that's a separate audit trigger — fix at the
+  worker / connection layer, not by escalating per-item failures.
+  Revisit if the logs show this firing more than once per week.
+- **`dropped_count` in the `processing.done` log line.** **DECISION:
+  YES, add it.** Rationale: cheap (one int), and the line already
+  reports `auto_created` + `suggested`. Without `dropped_count` an
+  operator reading the log can't reconcile `len(items)` against the
+  reported counts when drops occur — exactly the silent-loss shape
+  this audit exists to eliminate. Field name: `dropped` (matches the
+  terse style of `auto_created` / `suggested`). In scope for this
+  patch.
+- **`UnknownItemType` from `handle_approve_item` — 500 body shape.**
+  **DECISION: `500, {"error": f"internal error: {type(e).__name__}"}`**
+  Rationale: matches the existing pattern at `processing.py:1922`
+  (`f"Processing failed: {type(e).__name__}"`) — class name only, no
+  message text, no leak risk. Lowercase, short, consistent with the
+  rest of the handler shapes (`processing.py:1898/1978/1993/...`).
+  Plain `{"error": "internal error"}` would also be acceptable house
+  style but loses the class-name signal that's already conventional
+  here. Wrap the `_auto_create_item` call in `handle_approve_item`
+  with a typed `except UnknownItemType` only — do NOT broaden to
+  `except Exception` (that would re-introduce the swallow this audit
+  is killing). Any other unexpected exception bubbles to the framework
+  500 handler unchanged.
+- **Lumen's badge for per-item `status="failed"`.** **DECISION:
+  accept the gap; queue as separate dispatch.** Rationale: backend
+  truthfulness is the load-bearing fix; without it, the UI has nothing
+  honest to render. Shipping the contract + patch + regression test
+  first means `failed` rows exist and are inspectable in the JSON
+  before Lumen designs the badge. The frontend filter
+  (`app.js:508`, `:839`) will continue to render unknown statuses
+  with default styling — ugly but not wrong, and not user-visible
+  until a `failed` row actually appears in production. Atlas to queue
+  a separate Lumen dispatch (`failed` badge + filter copy) after this
+  patch lands and Probe's regression test goes green.
 
-Status: `proposed` until Cairn signs off; then `accepted`, then patch
-lands in the same PR.
+## Cairn confirmations on Vault's branch-recovery shape
+
+- **`goal_link` → log + None.** Confirmed. No recoverable create
+  shape; the documented behaviour is correct.
+- **`person_mention` + `tag` → fall-through to create-new.** Confirmed
+  as documented option (opt-in per branch, not default). The
+  contract's wording in "Branch-specific notes" is the canonical
+  statement of the pattern; future branches reference it rather than
+  re-derive it.
+- **`tag`'s `if tag_row:` → `assert tag_row is not None`.** Confirmed.
+  `INSERT OR IGNORE` on `UNIQUE` always leaves a readable row; the
+  guard was hiding a programming-error shape as a data-error shape.
+  The assertion is correct and surfaces loudly if the invariant is
+  ever violated.
+- **`MalformedItemData` exception class.** Confirmed. Constructor
+  shape (`branch`, `missing_key`) is right — both fields are static
+  enum-ish strings, safe to log.
+- **`UnknownItemType` exception class.** Confirmed. Not caught by
+  `_auto_create_item`; caller responsibility (worker retry/terminal,
+  approve-handler 500-with-class-name per decision above).
 
 ## Provenance
 
