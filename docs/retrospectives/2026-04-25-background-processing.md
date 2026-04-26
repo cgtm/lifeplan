@@ -282,7 +282,7 @@ floating observations.
 | #   | Lesson | Artefact | Status |
 |-----|---|---|---|
 | L1  | All SQLite schema rebuilds use the canonical 12-step ALTER pattern (drop-then-rename, never rename-then-recreate of a parent table) | **New practice §10** in `docs/processes/team-practices.md` | accepted (this retro) |
-| L2  | Local–prod SQLite skew can hide migration bugs that depend on FK-rewrite-on-rename behaviour | **Queued ticket** for joint Reed + Probe follow-up: add `sqlite_version()` assertion to the e2e gate before any schema-touching deploy | queued |
+| L2  | Local–prod SQLite skew can hide migration bugs that depend on FK-rewrite-on-rename behaviour | ~~**Queued ticket** for joint Reed + Probe follow-up: add `sqlite_version()` assertion to the e2e gate before any schema-touching deploy~~ **CANCELLED 2026-04-23 per Cam** — replaced by direct version alignment, see Practice §13 (Pinned target versions for load-bearing dependencies). Rationale: address local/prod skew at the env layer, not by coding around it in tests | cancelled |
 | L3  | Privileged config changes (sudoers, systemd unit installs) require operator action; deploy.sh never assumes the new privileges are live | **New practice §11** in `docs/processes/team-practices.md`. Documents the deploy.sh contract: code-only, sudoers/units operator-applied separately | accepted (this retro) |
 | L4  | Plan-time line-count estimates for novel subsystems are noise; discoverability of the resulting code is the load-bearing property | **Explicit decision-not-to-act**, dated. Rationale: a single data point (worker 430 lines vs 120–180 estimate) is not enough to change planning practice. Cairn watches for a second occurrence; if the next plan's estimate is also off by 2×+ on a discoverability-positive overshoot, write it up as a planning practice change. Rule of Two applies to process changes too | won't-act (dated 2026-04-25) |
 | L5  | Deploys must not include uncommitted work; deploy.sh syncs working tree, not committed state | **New practice §12** in `docs/processes/team-practices.md`: codified at the deploy.sh layer (refuse to deploy when `git status --porcelain` is non-empty), not at the Atlas-discipline layer. Rationale: a script-level guard is enforceable; an Atlas-discipline rule is a vibe. Forge owns the script change as a queued ticket | accepted as practice; **queued ticket** for Forge to land the script guard |
@@ -314,9 +314,13 @@ between retros.
 - **Ticket — Forge:** add a working-tree-clean check at the top of
   `deploy.sh` that aborts with a clear error if `git status --porcelain`
   is non-empty (Lesson L5, codifies Practice §12).
-- **Ticket — Reed + Probe (joint):** add a `sqlite_version()` assertion
+- ~~**Ticket — Reed + Probe (joint):** add a `sqlite_version()` assertion
   to the Probe e2e gate that fails the suite if local–prod SQLite skew
-  crosses a known FK-rewrite-behaviour boundary (Lesson L2).
+  crosses a known FK-rewrite-behaviour boundary (Lesson L2).~~
+  **CANCELLED 2026-04-23 per Cam** — replaced by direct version alignment
+  at the env layer. See Practice §13 (Pinned target versions for
+  load-bearing dependencies) and `docs/runbooks/target-versions.md`
+  (owned by Forge).
 
 ## Decisions taken in this retro
 

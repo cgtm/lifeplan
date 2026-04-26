@@ -66,6 +66,16 @@ Probe will not begin a gate run unless **all** of the following are true:
    runs both. If you set up the suite by some other path and see
    "Executable doesn't exist" or "browserType.launch: ... missing
    dependencies," run `npx playwright install` from `tests/e2e/`.
+7. Local and prod target-version alignment per Practice §13. Run the
+   equivalence-check one-liner from
+   [`docs/runbooks/target-versions.md`](target-versions.md) (owned by
+   Forge). If the check reports a mismatch on any pinned dependency
+   (Python, SQLite, OpenSSL, or anything else listed there), the gate
+   is **suspended** and Probe routes the alignment task to Forge.
+   Deploy is blocked until alignment is restored. This catches a class
+   of bug the e2e suite cannot see by design — env skew between local
+   and prod (see cookie-auth retro Lesson L5; background-processing
+   retro Bug A).
 
 If any precondition fails, the gate run is **suspended**, not failed.
 Probe writes one line to Atlas naming the missing precondition.

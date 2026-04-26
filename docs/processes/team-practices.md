@@ -26,6 +26,7 @@ changes, update this file; the persona files only carry pointers to it.
 10. [Canonical 12-step ALTER for SQLite schema rebuilds](#10-canonical-12-step-alter-for-sqlite-schema-rebuilds) — accepted
 11. [Privileged-config changes are operator-applied](#11-privileged-config-changes-are-operator-applied) — accepted
 12. [Deploys do not include uncommitted work](#12-deploys-do-not-include-uncommitted-work) — accepted
+13. [Pinned target versions for load-bearing dependencies](#13-pinned-target-versions-for-load-bearing-dependencies) — accepted
 
 ---
 
@@ -481,6 +482,71 @@ often"; §12 is "the deploy enforces the result."
 
 ---
 
+## 13. Pinned target versions for load-bearing dependencies
+
+**Statement.** Every load-bearing runtime dependency the app links
+against — Python, SQLite, OpenSSL, and any future addition — has a
+documented target version in
+[`docs/runbooks/target-versions.md`](../runbooks/target-versions.md)
+(Forge is writing this runbook in parallel). Local and prod must both
+satisfy the target. The runbook's one-liner equivalence check is the
+source of truth. When the equivalence check disagrees between
+environments, **deploy is blocked** until alignment is restored. New
+runtime dependencies require a documented target in the runbook before
+they ship.
+
+**Why.** Two version-skew bugs cost real engineering time and shipped
+bugs to prod:
+
+- Cookie-auth: Apple system Python lacked `hashlib.scrypt`, forcing a
+  launchd plist edit out-of-lane (cookie-auth retro, Lesson L5).
+- Background-processing: Ubuntu's older SQLite handled FK rewrites on
+  parent-rename differently than local's modern SQLite, producing 19
+  prod FK violations and a hot-fix migration
+  ([background-processing retro](../retrospectives/2026-04-25-background-processing.md),
+  Bug A).
+
+Cam's directive (this conversation, 2026-04-23): *"if local and server
+software versions are out of sync, that's something we should probably
+address directly rather than forcing the team to jump through hoops in
+code to get around it."* Pinning at the env level beats coding around
+skew at the app or test layer. This practice replaces the queued
+follow-up from the background-processing retro that would have added a
+`sqlite_version()` assertion to the e2e gate (cancelled — see
+retro Lesson L2).
+
+**How to apply.**
+
+- **Forge** owns the alignment work and the
+  [`docs/runbooks/target-versions.md`](../runbooks/target-versions.md)
+  runbook. Forge is responsible for the equivalence-check one-liner and
+  for keeping local and prod in sync.
+- **Atlas** runs the equivalence check before any deploy if more than
+  ~one week has elapsed since the last check. If the check reports a
+  mismatch, deploy is blocked and the work is routed to Forge for
+  alignment.
+- **Probe** treats the equivalence check as a precondition in the
+  go/no-go runbook (see
+  [`docs/runbooks/probe-go-no-go.md`](../runbooks/probe-go-no-go.md)).
+- **New dependencies:** any persona introducing a new runtime
+  dependency (a new `apt`/`brew`-installed package the app links
+  against, a new system library) writes the target into the runbook
+  before the dependency ships. No "we'll document it later."
+
+**Provenance.**
+
+- Cam's directive, this conversation (2026-04-23).
+- [Cookie-auth retro](../retrospectives/2026-04-25-cookie-auth.md),
+  Lesson L5 (Apple Python missing `scrypt`).
+- [Background-processing retro](../retrospectives/2026-04-25-background-processing.md),
+  Bug A and Lesson L2 (SQLite FK-rewrite skew).
+
+**Status:** accepted (2026-04-23). Single-directive rule from Cam
+(supersedes Rule of Two): a standing directive lands accepted, not
+proposed.
+
+---
+
 ## Practice lifecycle
 
 - **proposed:** entered on a single piece of evidence, awaiting a second
@@ -489,3 +555,19 @@ often"; §12 is "the deploy enforces the result."
   Violations show up at Cairn's review.
 - **deprecated:** kept in the file, marked clearly, with a pointer to the
   superseding practice or a note explaining why it aged out. Never deleted.
+
+## Queued audits
+
+Items below are not practices yet — they are flagged questions awaiting a
+second occurrence or accumulated evidence before a deeper revisit. Reed owns
+when picked up; Cairn owns the queue.
+
+- **Person model audit — should `person_mention` and `person_new` extraction
+  types unify?** Today the LLM emits two item types; an unmatched
+  `person_mention` was a no-op on approval until the 2026-04-23 fix that
+  routes unmatched mentions through the `person_new` create-path. Revisit
+  after ~20 production brain dumps reveal the mention/new split in practice.
+  Trigger to pull forward: noisy duplicate people from common nouns ("mum",
+  "boss"), OR a second case where approval semantics surprise Cam. Source:
+  brain dump #32, "i need to pay back mum" produced an approved
+  `person_mention` with `person_id: null` and no row in `people`.
