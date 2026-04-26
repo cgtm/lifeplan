@@ -149,6 +149,19 @@
           <p>Who matters and how they connect</p>
         </div>
 
+        <form id="addPersonForm" class="add-person-form" autocomplete="off">
+          <input
+            type="text"
+            id="addPersonInput"
+            class="form-input add-person-input"
+            placeholder="Add a person…"
+            aria-label="New person name"
+            maxlength="120"
+          />
+          <button type="submit" id="addPersonBtn" class="btn-primary" disabled>Add</button>
+        </form>
+        <div id="addPersonHint" class="add-person-hint" role="status" aria-live="polite"></div>
+
         <div id="peopleList"></div>
       </div>
 

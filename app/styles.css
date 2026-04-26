@@ -630,6 +630,43 @@ main {
 }
 
 /* ── People ───────────────────────────────────────────────── */
+.add-person-form {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+  align-items: stretch;
+}
+
+.add-person-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.add-person-form .btn-primary {
+  flex-shrink: 0;
+}
+
+.add-person-hint {
+  font-size: 0.75rem;
+  color: var(--text-3);
+  min-height: 1em;
+  margin: -6px 0 12px;
+  transition: color var(--transition);
+}
+
+.add-person-hint.error {
+  color: var(--danger, #c0392b);
+}
+
+.person-card.highlight-flash {
+  animation: personHighlight 1.6s ease-out;
+}
+
+@keyframes personHighlight {
+  0%   { box-shadow: 0 0 0 3px var(--accent); }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
 .person-card {
   cursor: pointer;
 }

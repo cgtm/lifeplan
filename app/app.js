@@ -1609,7 +1609,7 @@ function renderPeople() {
     const tasksList = (p.tasks || []).map(t => `<div class="person-conn-item">${esc(t.title)} ${statusPill(t.status)}</div>`).join('');
 
     return `
-      <div class="card person-card fade-in">
+      <div class="card person-card fade-in" data-person-id="${p.id}">
         <div class="person-header">
           <div class="person-avatar">${initials}</div>
           <div style="flex:1">
@@ -1629,6 +1629,119 @@ function renderPeople() {
       </div>
     `;
   }).join('');
+}
+
+// ── Inline "Add Person" affordance ───────────────────────
+let _addPersonSubmitting = false;
+
+function _setAddPersonHint(msg, isError) {
+  const hint = $('#addPersonHint');
+  if (!hint) return;
+  hint.textContent = msg || '';
+  hint.classList.toggle('error', !!isError && !!msg);
+}
+
+function _highlightPersonCard(personId) {
+  // Wait a tick so the row is in the DOM after any re-render.
+  requestAnimationFrame(() => {
+    const card = document.querySelector(`.person-card[data-person-id="${personId}"]`);
+    if (!card) return;
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.classList.remove('highlight-flash');
+    // Force reflow so the animation re-triggers if user re-adds same name.
+    void card.offsetWidth;
+    card.classList.add('highlight-flash');
+  });
+}
+
+async function submitAddPerson() {
+  if (_addPersonSubmitting) return;
+  const input = $('#addPersonInput');
+  const btn = $('#addPersonBtn');
+  if (!input || !btn) return;
+
+  const name = (input.value || '').trim();
+  if (!name) {
+    _setAddPersonHint('Enter a name first.', true);
+    return;
+  }
+
+  _addPersonSubmitting = true;
+  btn.disabled = true;
+  _setAddPersonHint('');
+
+  try {
+    const res = await fetch(`${MOUNT}api/people`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+
+    if (res.status === 401) {
+      window.location.href = `${MOUNT}login`;
+      return;
+    }
+
+    let payload = null;
+    try { payload = await res.json(); } catch (_) { /* ignore parse error */ }
+
+    if (res.status === 201 && payload && payload.id) {
+      input.value = '';
+      // Optimistic prepend — no full re-fetch needed.
+      allPeople.unshift(payload);
+      renderPeople();
+      _highlightPersonCard(payload.id);
+      _setAddPersonHint('');
+      input.focus();
+      return;
+    }
+
+    if (res.status === 400) {
+      _setAddPersonHint((payload && payload.error) || 'Name is required.', true);
+      return;
+    }
+
+    if (res.status === 409 && payload && payload.id) {
+      showToast(`${name} already exists.`);
+      // If we don't already have them in our local list, refresh.
+      const have = allPeople.some(p => p.id === payload.id);
+      if (!have) {
+        await loadPeople();
+      }
+      _highlightPersonCard(payload.id);
+      input.value = '';
+      _setAddPersonHint('');
+      return;
+    }
+
+    // 500 or anything else.
+    showToast("Couldn't add. Try again.");
+  } catch (_) {
+    showToast('Network error.');
+  } finally {
+    _addPersonSubmitting = false;
+    // Re-evaluate disabled state from current input contents.
+    const v = ($('#addPersonInput')?.value || '').trim();
+    if ($('#addPersonBtn')) $('#addPersonBtn').disabled = !v;
+  }
+}
+
+function initAddPersonForm() {
+  const form = $('#addPersonForm');
+  const input = $('#addPersonInput');
+  const btn = $('#addPersonBtn');
+  if (!form || !input || !btn) return;
+
+  // Disable button until there's non-whitespace content.
+  input.addEventListener('input', () => {
+    btn.disabled = !input.value.trim();
+    if (input.value.trim()) _setAddPersonHint('');
+  });
+
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    submitAddPerson();
+  });
 }
 
 // ══════════════════════════════════════════════════════════
@@ -2206,4 +2319,5 @@ document.addEventListener('keydown', (e) => {
 // INIT
 // ══════════════════════════════════════════════════════════
 
+initAddPersonForm();
 loadHome();
