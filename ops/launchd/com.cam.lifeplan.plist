@@ -3,12 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.cam.lifeplan-worker</string>
+    <string>com.cam.lifeplan</string>
     <key>ProgramArguments</key>
     <array>
         <string>/opt/homebrew/opt/python@3.12/bin/python3.12</string>
-        <string>-m</string>
-        <string>app.worker</string>
+        <string>/Users/cam/dev/personal/lifeplan/app/server.py</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>
@@ -16,14 +15,14 @@
         <string>1</string>
     </dict>
     <key>WorkingDirectory</key>
-    <string>/Users/cam/dev/personal/lifeplan</string>
+    <string>/Users/cam/dev/personal/lifeplan/app</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/Users/cam/dev/personal/lifeplan/data/worker.log</string>
+    <string>/Users/cam/dev/personal/lifeplan/data/server.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/cam/dev/personal/lifeplan/data/worker.log</string>
+    <string>/Users/cam/dev/personal/lifeplan/data/server.log</string>
 </dict>
 </plist>

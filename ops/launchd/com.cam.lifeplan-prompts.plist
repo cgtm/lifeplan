@@ -6,7 +6,7 @@
     <string>com.cam.lifeplan-prompts</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
+        <string>/opt/homebrew/opt/python@3.12/bin/python3.12</string>
         <string>-m</string>
         <string>app.generate_prompts</string>
     </array>

@@ -1,0 +1,25 @@
+[Unit]
+Description=lifeplan personal knowledge app
+After=network.target
+
+[Service]
+Type=simple
+User=your-user
+Group=your-user
+WorkingDirectory=/opt/lifeplan
+ExecStart=/usr/bin/python3 -m app.server
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lifeplan
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/lifeplan/data
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
