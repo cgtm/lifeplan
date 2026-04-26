@@ -357,6 +357,58 @@ def handle_get_goal(goal_id):
         conn.close()
 
 
+def handle_create_goal(body):
+    """
+    Create a new goals row.
+
+    Contract: app/contracts/create-goal.md.
+
+    - 400 {"error": "title is required"} if title missing/empty after strip.
+    - 201 {full enriched row} on success; matches the row shape from
+      GET /api/goals (enrich_goal output).
+    - Duplicate titles are accepted (deliberate divergence from POST
+      /api/people, which 409s). Pattern: People dedupe; everything
+      else doesn't.
+    - Default status is 'active' (matches the goals.status column
+      default and CHECK enum). completed_at is always NULL on create
+      even if status='completed' is sent — lifecycle changes go
+      through PUT.
+    - tags optional; when provided, applied via set_tags_for on the
+      goal_tags junction. Omitting means no tags applied.
+
+    Privacy: never logs title, description, or tag names.
+    """
+    title = (body.get("title") or "").strip()
+    if not title:
+        return 400, {"error": "title is required"}
+
+    description = body.get("description", "")
+    status = body.get("status", "active")
+    target_date = body.get("target_date")
+    tag_names = body.get("tags")
+
+    conn = get_db()
+    try:
+        ts = now_utc()
+        cur = conn.execute(
+            "INSERT INTO goals (title, description, status, target_date, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (title, description, status, target_date, ts, ts),
+        )
+        goal_id = cur.lastrowid
+
+        if tag_names is not None:
+            set_tags_for(conn, "goal_tags", "goal_id", goal_id, tag_names)
+
+        conn.commit()
+        goal = dict(
+            conn.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone()
+        )
+        return 201, enrich_goal(conn, goal)
+    finally:
+        conn.close()
+
+
 def handle_update_goal(goal_id, body):
     conn = get_db()
     try:
@@ -455,6 +507,68 @@ def handle_get_tasks(params):
         rows = conn.execute(q, args).fetchall()
         tasks = [enrich_task(conn, dict(r)) for r in rows]
         return 200, tasks
+    finally:
+        conn.close()
+
+
+def handle_create_task(body):
+    """
+    Create a new tasks row.
+
+    Contract: app/contracts/create-task.md.
+
+    - 400 {"error": "title is required"} if title missing/empty after strip.
+    - 400 {"error": "goal_id does not exist"} if goal_id is a non-null
+      integer that doesn't match any goals row. Avoids dangling FK.
+    - 201 {full enriched row} on success; matches the row shape from
+      GET /api/tasks (enrich_task output).
+    - Duplicate titles are accepted (deliberate divergence from POST
+      /api/people, which 409s). Pattern: People dedupe; everything
+      else doesn't.
+    - Default status is 'active' (matches the tasks.status column
+      default and CHECK enum). completed_at is always NULL on create
+      even if status='completed' is sent — lifecycle changes go
+      through PUT.
+    - tags optional; when provided, applied via set_tags_for on the
+      task_tags junction. Omitting means no tags applied.
+
+    Privacy: never logs title, description, or tag names.
+    """
+    title = (body.get("title") or "").strip()
+    if not title:
+        return 400, {"error": "title is required"}
+
+    description = body.get("description", "")
+    status = body.get("status", "active")
+    due_date = body.get("due_date")
+    goal_id = body.get("goal_id")
+    tag_names = body.get("tags")
+
+    conn = get_db()
+    try:
+        if goal_id is not None:
+            row = conn.execute(
+                "SELECT id FROM goals WHERE id = ?", (goal_id,)
+            ).fetchone()
+            if not row:
+                return 400, {"error": "goal_id does not exist"}
+
+        ts = now_utc()
+        cur = conn.execute(
+            "INSERT INTO tasks (title, description, status, due_date, goal_id, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (title, description, status, due_date, goal_id, ts, ts),
+        )
+        task_id = cur.lastrowid
+
+        if tag_names is not None:
+            set_tags_for(conn, "task_tags", "task_id", task_id, tag_names)
+
+        conn.commit()
+        task = dict(
+            conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        )
+        return 201, enrich_task(conn, task)
     finally:
         conn.close()
 

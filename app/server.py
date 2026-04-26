@@ -34,8 +34,9 @@ if __package__ is None or __package__ == "":
         handle_update_entry, handle_delete_entry, handle_get_tags,
         handle_get_brain_dumps, handle_create_brain_dump,
         handle_update_brain_dump, handle_delete_brain_dump,
-        handle_get_goals, handle_get_goal, handle_update_goal, handle_delete_goal,
-        handle_get_tasks, handle_update_task, handle_delete_task,
+        handle_get_goals, handle_get_goal, handle_create_goal,
+        handle_update_goal, handle_delete_goal,
+        handle_get_tasks, handle_create_task, handle_update_task, handle_delete_task,
         handle_get_people, handle_get_person, handle_create_person,
         handle_update_person, handle_delete_person,
         handle_get_knowledge, handle_create_knowledge,
@@ -60,8 +61,9 @@ else:
         handle_update_entry, handle_delete_entry, handle_get_tags,
         handle_get_brain_dumps, handle_create_brain_dump,
         handle_update_brain_dump, handle_delete_brain_dump,
-        handle_get_goals, handle_get_goal, handle_update_goal, handle_delete_goal,
-        handle_get_tasks, handle_update_task, handle_delete_task,
+        handle_get_goals, handle_get_goal, handle_create_goal,
+        handle_update_goal, handle_delete_goal,
+        handle_get_tasks, handle_create_task, handle_update_task, handle_delete_task,
         handle_get_people, handle_get_person, handle_create_person,
         handle_update_person, handle_delete_person,
         handle_get_knowledge, handle_create_knowledge,
@@ -375,6 +377,12 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json(status, data)
             return True
 
+        if method == "POST" and path == "/api/goals":
+            body = self.read_body()
+            status, data = handle_create_goal(body)
+            self.send_json(status, data)
+            return True
+
         if method == "GET" and path.startswith("/api/goals/"):
             gid = self.parse_id(path)
             if gid is None:
@@ -407,6 +415,12 @@ class Handler(SimpleHTTPRequestHandler):
 
         if method == "GET" and path == "/api/tasks":
             status, data = handle_get_tasks(params)
+            self.send_json(status, data)
+            return True
+
+        if method == "POST" and path == "/api/tasks":
+            body = self.read_body()
+            status, data = handle_create_task(body)
             self.send_json(status, data)
             return True
 
