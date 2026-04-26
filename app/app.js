@@ -155,18 +155,190 @@ function typePill(type) {
   return `<span class="knowledge-type type-${esc(type)}">${esc(type)}</span>`;
 }
 
-async function api(path, opts = {}) {
-  const res = await fetch(`${MOUNT}api${path}`, {
-    headers: { 'Content-Type': 'application/json' },
-    ...opts,
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
-  });
-  if (res.status === 401) {
-    window.location.href = `${MOUNT}login`;
-    // Return a never-resolving promise so callers don't error mid-redirect
-    return new Promise(() => {});
+// ── Global progress bar ────────────────────────────────
+// Tracks in-flight api() calls. Bar appears when any single request
+// exceeds 250ms; vanishes when everything in flight resolves.
+const _lpProgress = (() => {
+  let inflight = 0;
+  let visible = false;
+  let showTimer = null;
+
+  function el() { return document.getElementById('lpProgress'); }
+
+  function show() {
+    visible = true;
+    const e = el();
+    if (e) e.classList.add('visible');
   }
-  return res.json();
+
+  function hide() {
+    visible = false;
+    if (showTimer) { clearTimeout(showTimer); showTimer = null; }
+    const e = el();
+    if (e) e.classList.remove('visible');
+  }
+
+  function start() {
+    inflight += 1;
+    if (inflight === 1 && !visible && !showTimer) {
+      showTimer = setTimeout(() => { showTimer = null; show(); }, 250);
+    }
+  }
+
+  function end() {
+    inflight = Math.max(0, inflight - 1);
+    if (inflight === 0) hide();
+  }
+
+  return { start, end };
+})();
+
+// ── apiError() — single failure-surfacing helper ───────────
+// On 5xx → toast + Retry button (caller passes a retry fn).
+// On 404 → toast + refresh hook.
+// On network error → "offline" toast (auto-clears on next success).
+// On 401 → existing redirect (handled by api()).
+let _offlineToastShown = false;
+
+function _clearOfflineToastIfShown() {
+  if (_offlineToastShown) {
+    const t = document.getElementById('lpToast');
+    if (t) t.classList.remove('visible');
+    _offlineToastShown = false;
+  }
+}
+
+function _toastWithAction(message, actionLabel, onAction) {
+  let el = document.getElementById('lpToast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'lpToast';
+    el.className = 'lp-toast';
+    document.body.appendChild(el);
+  }
+  el.classList.add('has-action');
+  el.innerHTML = '';
+  const span = document.createElement('span');
+  span.textContent = message;
+  el.appendChild(span);
+  if (actionLabel && typeof onAction === 'function') {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'lp-toast-retry';
+    btn.textContent = actionLabel;
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      el.classList.remove('visible');
+      onAction();
+    });
+    el.appendChild(btn);
+  }
+  requestAnimationFrame(() => el.classList.add('visible'));
+  if (_toastTimer) clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => el.classList.remove('visible'), 5500);
+}
+
+function apiError(err, opts = {}) {
+  const status = err && err.status;
+  const retry = typeof opts.retry === 'function' ? opts.retry : null;
+  const onRefresh = typeof opts.onRefresh === 'function' ? opts.onRefresh : null;
+
+  if (status === 401) {
+    // api() already redirects; nothing to surface.
+    return;
+  }
+
+  if (status === 404) {
+    showToast('That item is no longer here.');
+    if (onRefresh) onRefresh();
+    return;
+  }
+
+  if (status && status >= 500) {
+    if (retry) {
+      _toastWithAction('Something went wrong. Try again.', 'Retry', retry);
+    } else {
+      showToast('Something went wrong. Try again.');
+    }
+    return;
+  }
+
+  // Network error (fetch rejected) — err.networkError flag set by api().
+  if (err && err.networkError) {
+    _offlineToastShown = true;
+    showToast('You appear to be offline. Reconnecting…');
+    return;
+  }
+
+  // Anything else (e.g. 400 with no caller-side handling): generic toast.
+  showToast('Something went wrong.');
+}
+
+// api() — returns parsed JSON for any non-401 response. Preserves the
+// historical lenient contract: callers pattern-match on payload (e.g. a
+// `.error` field). For new code that wants HTTP-status branching, use
+// apiTry() — it throws an error with `.status` and `.payload` on non-2xx
+// and on network failure, ready to feed straight into apiError().
+async function api(path, opts = {}) {
+  _lpProgress.start();
+  try {
+    let res;
+    try {
+      res = await fetch(`${MOUNT}api${path}`, {
+        headers: { 'Content-Type': 'application/json' },
+        ...opts,
+        body: opts.body ? JSON.stringify(opts.body) : undefined,
+      });
+    } catch (_netErr) {
+      // Network failure — return undefined so legacy callers that
+      // immediately deref .error / .id behave as before (they already
+      // crashed silently). New callers should prefer apiTry().
+      return undefined;
+    }
+    if (res.status === 401) {
+      window.location.href = `${MOUNT}login`;
+      return new Promise(() => {});
+    }
+    _clearOfflineToastIfShown();
+    return res.json();
+  } finally {
+    _lpProgress.end();
+  }
+}
+
+async function apiTry(path, opts = {}) {
+  _lpProgress.start();
+  try {
+    let res;
+    try {
+      res = await fetch(`${MOUNT}api${path}`, {
+        headers: { 'Content-Type': 'application/json' },
+        ...opts,
+        body: opts.body ? JSON.stringify(opts.body) : undefined,
+      });
+    } catch (netErr) {
+      const e = new Error('Network error');
+      e.networkError = true;
+      e.cause = netErr;
+      throw e;
+    }
+    if (res.status === 401) {
+      window.location.href = `${MOUNT}login`;
+      return new Promise(() => {});
+    }
+    _clearOfflineToastIfShown();
+    let payload = null;
+    try { payload = await res.json(); } catch (_) {}
+    if (!res.ok) {
+      const e = new Error(`HTTP ${res.status}`);
+      e.status = res.status;
+      e.payload = payload;
+      throw e;
+    }
+    return payload;
+  } finally {
+    _lpProgress.end();
+  }
 }
 
 // ── Logout ─────────────────────────────────────────────
@@ -179,6 +351,21 @@ async function logout() {
     });
   } catch (_) { /* ignore — we redirect regardless */ }
   window.location.href = `${MOUNT}login`;
+}
+
+// ── Skeleton loaders ────────────────────────────────────
+// Show shimmer placeholders while a list is loading for the first time.
+// Hidden as soon as the real render runs.
+function renderSkeletonCards(selector, count = 3) {
+  const el = typeof selector === 'string' ? $(selector) : selector;
+  if (!el) return;
+  const card = `
+    <div class="lp-skeleton" aria-hidden="true">
+      <div class="lp-skeleton-line w-60"></div>
+      <div class="lp-skeleton-line w-80"></div>
+      <div class="lp-skeleton-line w-40"></div>
+    </div>`;
+  el.innerHTML = card.repeat(count);
 }
 
 // ── Modal helpers ──────────────────────────────────────
@@ -819,6 +1006,7 @@ function showToast(msg) {
     el.className = 'lp-toast';
     document.body.appendChild(el);
   }
+  el.classList.remove('has-action');
   el.textContent = msg;
   requestAnimationFrame(() => el.classList.add('visible'));
   if (_toastTimer) clearTimeout(_toastTimer);
@@ -1302,6 +1490,7 @@ let allGoals = [];
 
 async function loadGoals() {
   const params = goalFilter !== 'all' ? `?status=${goalFilter}` : '';
+  if (!allGoals.length) renderSkeletonCards('#goalList', 3);
   allGoals = await api(`/goals${params}`);
   renderGoals();
 }
@@ -1353,8 +1542,17 @@ function bindGoalCards(container) {
 }
 
 async function openGoalDetail(goalId) {
-  const goal = await api(`/goals/${goalId}`);
-  if (goal.error) return;
+  let goal;
+  try {
+    goal = await apiTry(`/goals/${goalId}`);
+  } catch (err) {
+    apiError(err, {
+      retry: () => openGoalDetail(goalId),
+      onRefresh: () => loadGoals(),
+    });
+    return;
+  }
+  if (!goal || goal.error) return;
 
   $('#goalDetailTitle').textContent = goal.title;
   const tasks = goal.tasks || [];
@@ -1462,6 +1660,116 @@ $('#goalFilters').addEventListener('click', e => {
   loadGoals();
 });
 
+// ── Inline "Add Goal" affordance ───────────────────────
+let _addGoalSubmitting = false;
+
+function _setAddGoalHint(msg, isError) {
+  const hint = $('#addGoalHint');
+  if (!hint) return;
+  hint.textContent = msg || '';
+  hint.classList.toggle('error', !!isError && !!msg);
+}
+
+function _highlightGoalCard(goalId) {
+  requestAnimationFrame(() => {
+    const card = document.querySelector(`.goal-card[data-goal-id="${goalId}"]`);
+    if (!card) return;
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.classList.remove('highlight-flash');
+    void card.offsetWidth;
+    card.classList.add('highlight-flash');
+  });
+}
+
+function openAddGoalForm() {
+  const form = $('#addGoalForm');
+  if (!form) return;
+  form.classList.remove('hidden');
+  setTimeout(() => $('#addGoalTitle')?.focus(), 60);
+}
+
+function closeAddGoalForm() {
+  const form = $('#addGoalForm');
+  if (!form) return;
+  form.classList.add('hidden');
+  // Reset
+  $('#addGoalTitle').value = '';
+  $('#addGoalDescription').value = '';
+  $('#addGoalTargetDate').value = '';
+  $('#addGoalTags').value = '';
+  $('#addGoalSubmit').disabled = true;
+  _setAddGoalHint('');
+}
+
+async function submitAddGoal() {
+  if (_addGoalSubmitting) return;
+  const title = ($('#addGoalTitle')?.value || '').trim();
+  if (!title) { _setAddGoalHint('Title is required.', true); return; }
+
+  const description = ($('#addGoalDescription')?.value || '').trim();
+  const targetDate = ($('#addGoalTargetDate')?.value || '').trim();
+  const tags = _parseTagsInput($('#addGoalTags')?.value || '');
+
+  const body = { title };
+  if (description) body.description = description;
+  if (targetDate) body.target_date = targetDate;
+  if (tags.length) body.tags = tags;
+
+  _addGoalSubmitting = true;
+  $('#addGoalSubmit').disabled = true;
+  _setAddGoalHint('');
+
+  try {
+    const created = await apiTry('/goals', { method: 'POST', body });
+    if (!created || !created.id) {
+      _setAddGoalHint('Could not create. Try again.', true);
+      return;
+    }
+    // Optimistic prepend.
+    allGoals.unshift(created);
+    renderGoals();
+    _highlightGoalCard(created.id);
+    closeAddGoalForm();
+  } catch (err) {
+    if (err && err.status === 400) {
+      _setAddGoalHint((err.payload && err.payload.error) || 'Title is required.', true);
+      return;
+    }
+    apiError(err, { retry: () => submitAddGoal() });
+  } finally {
+    _addGoalSubmitting = false;
+    const v = ($('#addGoalTitle')?.value || '').trim();
+    if ($('#addGoalSubmit')) $('#addGoalSubmit').disabled = !v;
+  }
+}
+
+function initAddGoalForm() {
+  const form = $('#addGoalForm');
+  const btn = $('#newGoalBtn');
+  const titleInput = $('#addGoalTitle');
+  const submitBtn = $('#addGoalSubmit');
+  const cancelBtn = $('#addGoalCancel');
+  if (!form || !btn || !titleInput || !submitBtn) return;
+
+  btn.addEventListener('click', () => {
+    if (form.classList.contains('hidden')) openAddGoalForm();
+    else closeAddGoalForm();
+  });
+  cancelBtn?.addEventListener('click', () => closeAddGoalForm());
+  titleInput.addEventListener('input', () => {
+    submitBtn.disabled = !titleInput.value.trim();
+    if (titleInput.value.trim()) _setAddGoalHint('');
+  });
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    submitAddGoal();
+  });
+  // Esc closes the form.
+  form.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.stopPropagation(); closeAddGoalForm(); }
+  });
+}
+
 // ══════════════════════════════════════════════════════════
 // TASKS VIEW
 // ══════════════════════════════════════════════════════════
@@ -1475,6 +1783,7 @@ async function loadTasks() {
   const params = new URLSearchParams();
   if (taskStatusFilter !== 'all') params.set('status', taskStatusFilter);
   const qs = params.toString();
+  if (!allTasks.length) renderSkeletonCards('#taskList', 3);
   const [tasks, goals] = await Promise.all([
     api(`/tasks${qs ? '?' + qs : ''}`),
     api('/goals'),
@@ -1557,6 +1866,7 @@ function renderTasks() {
       targetDateHtml = `<span class="task-group-target${isOverdue ? ' task-group-target-overdue' : ''}">${isOverdue ? 'overdue \u00b7 ' : ''}${esc(label)}</span>`;
     }
 
+    const groupGoalId = g.goalId === 'unlinked' ? '' : g.goalId;
     return `
       <div class="task-group fade-in ${g.allDone ? 'task-group-done' : ''}" data-group-id="${esc(String(g.goalId))}">
         <button class="task-group-header" aria-expanded="${!collapsed}">
@@ -1568,7 +1878,7 @@ function renderTasks() {
         </button>
         <div class="task-group-body ${collapsed ? 'collapsed' : ''}">
           ${g.tasks.map(t => `
-            <div class="task-row">
+            <div class="task-row" data-task-id="${t.id}">
               <div class="task-check ${t.status === 'completed' ? 'checked' : ''}" data-task-id="${t.id}" data-status="${t.status}"></div>
               <span class="task-title ${t.status === 'completed' ? 'done' : ''}">${esc(t.title)}</span>
               ${t.due_date ? `<span style="font-size:0.625rem;color:var(--text-3)">${fmtDate(t.due_date)}</span>` : ''}
@@ -1577,6 +1887,9 @@ function renderTasks() {
               ${actionsHtml('openEditTask(' + t.id + ')', 'deleteTask(' + t.id + ')')}
             </div>
           `).join('')}
+          <div class="task-group-add">
+            <button type="button" class="task-group-add-btn" data-group-goal-id="${esc(String(groupGoalId))}">+ task</button>
+          </div>
         </div>
       </div>
     `;
@@ -1610,6 +1923,16 @@ function renderTasks() {
       loadTasks();
     });
   });
+
+  // Bind per-group "+ task" chips — pre-fill goal_id for the group.
+  el.querySelectorAll('.task-group-add-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const raw = btn.dataset.groupGoalId;
+      const goalId = raw && !isNaN(parseInt(raw)) ? parseInt(raw) : null;
+      openAddTaskForm({ presetGoalId: goalId });
+    });
+  });
 }
 
 // Task status filter pills
@@ -1621,6 +1944,133 @@ $('#taskFilters').addEventListener('click', e => {
   loadTasks();
 });
 
+// ── Inline "Add Task" affordance ───────────────────────
+let _addTaskSubmitting = false;
+
+function _setAddTaskHint(msg, isError) {
+  const hint = $('#addTaskHint');
+  if (!hint) return;
+  hint.textContent = msg || '';
+  hint.classList.toggle('error', !!isError && !!msg);
+}
+
+function _highlightTaskRow(taskId) {
+  requestAnimationFrame(() => {
+    const row = document.querySelector(`.task-row[data-task-id="${taskId}"]`);
+    if (!row) return;
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    row.classList.remove('highlight-flash');
+    void row.offsetWidth;
+    row.classList.add('highlight-flash');
+  });
+}
+
+function _populateAddTaskGoalSelect() {
+  const sel = $('#addTaskGoalId');
+  if (!sel) return;
+  const current = sel.value;
+  const goals = (_taskGoalsCache && _taskGoalsCache.length) ? _taskGoalsCache : (allGoals || []);
+  sel.innerHTML = '<option value="">No goal</option>' +
+    goals.map(g => `<option value="${g.id}">${esc(g.title)}</option>`).join('');
+  if (current) sel.value = current;
+}
+
+async function openAddTaskForm({ presetGoalId = null } = {}) {
+  const form = $('#addTaskForm');
+  if (!form) return;
+  // Refresh goal list so the dropdown reflects latest goals.
+  if (!_taskGoalsCache.length) {
+    try { _taskGoalsCache = await api('/goals') || []; } catch (_) {}
+  }
+  _populateAddTaskGoalSelect();
+  if (presetGoalId != null) $('#addTaskGoalId').value = String(presetGoalId);
+  form.classList.remove('hidden');
+  setTimeout(() => $('#addTaskTitle')?.focus(), 60);
+  form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function closeAddTaskForm() {
+  const form = $('#addTaskForm');
+  if (!form) return;
+  form.classList.add('hidden');
+  $('#addTaskTitle').value = '';
+  $('#addTaskDescription').value = '';
+  $('#addTaskDueDate').value = '';
+  $('#addTaskGoalId').value = '';
+  $('#addTaskTags').value = '';
+  $('#addTaskSubmit').disabled = true;
+  _setAddTaskHint('');
+}
+
+async function submitAddTask() {
+  if (_addTaskSubmitting) return;
+  const title = ($('#addTaskTitle')?.value || '').trim();
+  if (!title) { _setAddTaskHint('Title is required.', true); return; }
+
+  const description = ($('#addTaskDescription')?.value || '').trim();
+  const dueDate = ($('#addTaskDueDate')?.value || '').trim();
+  const goalIdRaw = ($('#addTaskGoalId')?.value || '').trim();
+  const tags = _parseTagsInput($('#addTaskTags')?.value || '');
+
+  const body = { title };
+  if (description) body.description = description;
+  if (dueDate) body.due_date = dueDate;
+  if (goalIdRaw) body.goal_id = parseInt(goalIdRaw);
+  if (tags.length) body.tags = tags;
+
+  _addTaskSubmitting = true;
+  $('#addTaskSubmit').disabled = true;
+  _setAddTaskHint('');
+
+  try {
+    const created = await apiTry('/tasks', { method: 'POST', body });
+    if (!created || !created.id) {
+      _setAddTaskHint('Could not create. Try again.', true);
+      return;
+    }
+    allTasks.unshift(created);
+    renderTasks();
+    _highlightTaskRow(created.id);
+    closeAddTaskForm();
+  } catch (err) {
+    if (err && err.status === 400) {
+      _setAddTaskHint((err.payload && err.payload.error) || 'Title is required.', true);
+      return;
+    }
+    apiError(err, { retry: () => submitAddTask() });
+  } finally {
+    _addTaskSubmitting = false;
+    const v = ($('#addTaskTitle')?.value || '').trim();
+    if ($('#addTaskSubmit')) $('#addTaskSubmit').disabled = !v;
+  }
+}
+
+function initAddTaskForm() {
+  const form = $('#addTaskForm');
+  const btn = $('#newTaskBtn');
+  const titleInput = $('#addTaskTitle');
+  const submitBtn = $('#addTaskSubmit');
+  const cancelBtn = $('#addTaskCancel');
+  if (!form || !btn || !titleInput || !submitBtn) return;
+
+  btn.addEventListener('click', () => {
+    if (form.classList.contains('hidden')) openAddTaskForm();
+    else closeAddTaskForm();
+  });
+  cancelBtn?.addEventListener('click', () => closeAddTaskForm());
+  titleInput.addEventListener('input', () => {
+    submitBtn.disabled = !titleInput.value.trim();
+    if (titleInput.value.trim()) _setAddTaskHint('');
+  });
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    submitAddTask();
+  });
+  form.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.stopPropagation(); closeAddTaskForm(); }
+  });
+}
+
 // ══════════════════════════════════════════════════════════
 // PEOPLE VIEW
 // ══════════════════════════════════════════════════════════
@@ -1628,6 +2078,7 @@ $('#taskFilters').addEventListener('click', e => {
 let allPeople = [];
 
 async function loadPeople() {
+  if (!allPeople.length) renderSkeletonCards('#peopleList', 3);
   allPeople = await api('/people');
   renderPeople();
 }
@@ -1956,6 +2407,7 @@ async function loadKnowledge() {
   if (q) params.set('q', q);
   if (knowledgeFilter !== 'all') params.set('type', knowledgeFilter);
   const qs = params.toString();
+  if (!allKnowledge.length) renderSkeletonCards('#knowledgeList', 3);
   allKnowledge = await api(`/knowledge${qs ? '?' + qs : ''}`);
   renderKnowledge();
   // Apply any incoming URL params (?addNote=1&tag=...&prefillTitle=...)
@@ -2506,6 +2958,8 @@ document.addEventListener('keydown', (e) => {
 
 initAddPersonForm();
 initAddKnowledgeForm();
+initAddGoalForm();
+initAddTaskForm();
 
 // Deep-link: if the page loaded with ?addNote=1, jump straight to Knowledge.
 {

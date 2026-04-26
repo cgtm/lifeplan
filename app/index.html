@@ -17,6 +17,7 @@
 </head>
 <body>
   <div class="ptr-indicator" id="ptrIndicator">&darr; Pull to refresh</div>
+  <div class="lp-progress" id="lpProgress" aria-hidden="true"><div class="lp-progress-bar"></div></div>
   <div class="shell">
     <!-- ── Navigation ──────────────────────────────────── -->
     <nav>
@@ -108,10 +109,51 @@
 
       <!-- ══ GOALS VIEW ═════════════════════════════════ -->
       <div class="view" id="view-goals">
-        <div class="page-header">
-          <h1>Goals</h1>
-          <p>Life goals and what blocks them</p>
+        <div class="page-header page-header-row">
+          <div>
+            <h1>Goals</h1>
+            <p>Life goals and what blocks them</p>
+          </div>
+          <button class="btn-primary page-header-action" id="newGoalBtn" type="button">+ New goal</button>
         </div>
+
+        <form id="addGoalForm" class="inline-create-form hidden" autocomplete="off">
+          <input
+            type="text"
+            id="addGoalTitle"
+            class="form-input inline-create-title"
+            placeholder="Goal title…"
+            aria-label="New goal title"
+            maxlength="200"
+          />
+          <textarea
+            id="addGoalDescription"
+            class="form-textarea inline-create-desc"
+            placeholder="Why does this matter? (optional)"
+            aria-label="Goal description"
+            rows="2"
+          ></textarea>
+          <div class="inline-create-row">
+            <input
+              type="date"
+              id="addGoalTargetDate"
+              class="form-input inline-create-date"
+              aria-label="Target date"
+            />
+            <input
+              type="text"
+              id="addGoalTags"
+              class="form-input inline-create-tags"
+              placeholder="Tags (comma-separated)"
+              aria-label="Tags"
+            />
+          </div>
+          <div class="inline-create-actions">
+            <span class="inline-create-hint" id="addGoalHint" role="status" aria-live="polite"></span>
+            <button type="button" class="btn" id="addGoalCancel">Cancel</button>
+            <button type="submit" class="btn-primary" id="addGoalSubmit" disabled>Create goal</button>
+          </div>
+        </form>
 
         <div class="filters" id="goalFilters">
           <span class="filter-pill active" data-filter="all">All</span>
@@ -126,10 +168,56 @@
 
       <!-- ══ TASKS VIEW ═════════════════════════════════ -->
       <div class="view" id="view-tasks">
-        <div class="page-header">
-          <h1>Tasks</h1>
-          <p>Concrete steps that move goals forward</p>
+        <div class="page-header page-header-row">
+          <div>
+            <h1>Tasks</h1>
+            <p>Concrete steps that move goals forward</p>
+          </div>
+          <button class="btn-primary page-header-action" id="newTaskBtn" type="button">+ New task</button>
         </div>
+
+        <form id="addTaskForm" class="inline-create-form hidden" autocomplete="off">
+          <input
+            type="text"
+            id="addTaskTitle"
+            class="form-input inline-create-title"
+            placeholder="Task title…"
+            aria-label="New task title"
+            maxlength="200"
+          />
+          <textarea
+            id="addTaskDescription"
+            class="form-textarea inline-create-desc"
+            placeholder="Details (optional)"
+            aria-label="Task description"
+            rows="2"
+          ></textarea>
+          <div class="inline-create-row">
+            <input
+              type="date"
+              id="addTaskDueDate"
+              class="form-input inline-create-date"
+              aria-label="Due date"
+            />
+            <select class="form-select inline-create-goal" id="addTaskGoalId" aria-label="Goal">
+              <option value="">No goal</option>
+            </select>
+          </div>
+          <div class="inline-create-row">
+            <input
+              type="text"
+              id="addTaskTags"
+              class="form-input inline-create-tags"
+              placeholder="Tags (comma-separated)"
+              aria-label="Tags"
+            />
+          </div>
+          <div class="inline-create-actions">
+            <span class="inline-create-hint" id="addTaskHint" role="status" aria-live="polite"></span>
+            <button type="button" class="btn" id="addTaskCancel">Cancel</button>
+            <button type="submit" class="btn-primary" id="addTaskSubmit" disabled>Create task</button>
+          </div>
+        </form>
 
         <div class="filters" id="taskFilters">
           <span class="filter-pill active" data-filter="all">All</span>

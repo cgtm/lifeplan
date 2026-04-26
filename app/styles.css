@@ -2456,3 +2456,235 @@ main {
     padding-top: calc(10px + env(safe-area-inset-top));
   }
 }
+
+/* ── Page header with right-aligned action button ─────────── */
+.page-header.page-header-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.page-header.page-header-row > div {
+  flex: 1;
+  min-width: 0;
+}
+
+.page-header-action {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .page-header.page-header-row {
+    align-items: center;
+  }
+  .page-header-action {
+    font-size: 0.75rem;
+    padding: 6px 12px;
+  }
+}
+
+/* ── Inline create form (goals, tasks) ────────────────────── */
+.inline-create-form {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  margin-bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  animation: inlineCreateSlide 180ms ease-out;
+}
+
+.inline-create-form.hidden {
+  display: none;
+}
+
+@keyframes inlineCreateSlide {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.inline-create-title {
+  font-size: 0.9375rem;
+  font-weight: 500;
+}
+
+.inline-create-desc {
+  min-height: 56px;
+  resize: vertical;
+}
+
+.inline-create-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.inline-create-row > * {
+  flex: 1 1 180px;
+  min-width: 0;
+}
+
+.inline-create-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.inline-create-hint {
+  flex: 1;
+  font-size: 0.75rem;
+  color: var(--text-3);
+  min-height: 1em;
+}
+
+.inline-create-hint.error {
+  color: var(--danger);
+}
+
+@media (max-width: 640px) {
+  .inline-create-row > * {
+    flex: 1 1 100%;
+  }
+}
+
+/* ── Highlight flash for newly-created goals & tasks ──────── */
+.goal-card.highlight-flash {
+  animation: personHighlight 1.6s ease-out;
+}
+
+.task-row.highlight-flash {
+  animation: taskRowHighlight 1.6s ease-out;
+}
+
+@keyframes taskRowHighlight {
+  0%   { background: var(--accent-bg); box-shadow: inset 3px 0 0 var(--accent); }
+  100% { background: transparent;       box-shadow: inset 3px 0 0 transparent; }
+}
+
+/* ── Per-group "+ task" chip in tasks view ───────────────── */
+.task-group-add {
+  display: flex;
+  padding: 8px 12px 12px;
+  border-top: 1px solid var(--border-lt);
+}
+
+.task-group-add-btn {
+  font-family: var(--font);
+  font-size: 0.75rem;
+  color: var(--text-3);
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 12px;
+  cursor: pointer;
+  transition: color var(--transition), border-color var(--transition), background var(--transition);
+}
+
+.task-group-add-btn:hover {
+  color: var(--text);
+  border-color: var(--text-3);
+  background: var(--accent-bg);
+}
+
+/* ── Global progress bar (signals slow API calls) ─────────── */
+.lp-progress {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  z-index: 400;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+  background: transparent;
+}
+
+.lp-progress.visible {
+  opacity: 1;
+}
+
+.lp-progress-bar {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--accent) 40%,
+    var(--accent) 60%,
+    transparent 100%
+  );
+  background-size: 250% 100%;
+  animation: lpProgressSlide 1.1s ease-in-out infinite;
+}
+
+@keyframes lpProgressSlide {
+  0%   { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+
+/* ── Skeleton loaders for first-load empty lists ──────────── */
+.lp-skeleton {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  margin-bottom: 12px;
+  overflow: hidden;
+  position: relative;
+}
+
+.lp-skeleton-line {
+  height: 12px;
+  border-radius: 4px;
+  background: linear-gradient(
+    90deg,
+    var(--accent-bg) 0%,
+    var(--border-lt) 50%,
+    var(--accent-bg) 100%
+  );
+  background-size: 200% 100%;
+  animation: lpSkeletonShimmer 1.4s ease-in-out infinite;
+  margin-bottom: 10px;
+}
+
+.lp-skeleton-line:last-child { margin-bottom: 0; }
+
+.lp-skeleton-line.w-60 { width: 60%; }
+.lp-skeleton-line.w-40 { width: 40%; }
+.lp-skeleton-line.w-80 { width: 80%; }
+.lp-skeleton-line.w-30 { width: 30%; }
+
+@keyframes lpSkeletonShimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ── Toast Retry button (apiError surface) ────────────────── */
+.lp-toast-retry {
+  margin-left: 12px;
+  font-family: var(--font);
+  font-size: 0.75rem;
+  font-weight: 500;
+  background: transparent;
+  border: 1px solid currentColor;
+  color: var(--bg);
+  padding: 3px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  opacity: 0.85;
+  transition: opacity var(--transition);
+}
+
+.lp-toast-retry:hover { opacity: 1; }
+
+.lp-toast.has-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
