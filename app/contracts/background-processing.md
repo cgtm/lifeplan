@@ -4,6 +4,14 @@
 **Status:** accepted
 **Last updated:** 2026-04-23
 
+> **Sibling contract:** the per-item create helper called from inside
+> the worker (and from the user-approval path) has its own one-page
+> contract — see [`auto-create-item.md`](./auto-create-item.md). That
+> contract owns the per-item `status` truthfulness invariants
+> (return-vs-status, exception discipline, per-branch recovery,
+> unknown-itype defence, caller obligations) split out of this document
+> so each stays focused.
+
 Phase 0 of the background-processing rollout. Plan:
 `/Users/cam/.claude/plans/new-plan-as-a-immutable-unicorn.md`. Written
 before any implementation code, per practice 1 ("Contract-before-code") in
