@@ -2,11 +2,13 @@
 
 **Status:** proposed
 **Author:** Reed (Knowledge Architect)
-**Date:** 2026-04-23 (revised 2026-04-23 after Cam's pushback on dump-level fan-out)
+**Date:** 2026-04-23 (revised 2026-04-23 after Cam's pushback on dump-level fan-out; revised again 2026-04-23 after Cam confirmed tag-on-task retrieval is a real workflow)
 **Triggered by:** Atlas's production scan — 5/5 tag items in `processed_items` had `apply_to=[]`.
 **Parallel work:** Vault is doing the immediate code fix on Cairn's separate ticket; this paper covers the design question.
 
-**Revision note:** v1 of this paper recommended option (A) auto-fan-out: tag every item in the dump with every tag the dump produced. Cam pushed back — correctly — that a brain dump is deliberately multi-topic stream-of-consciousness ("call mum about her birthday and also fix the dishwasher leak"), and dump-level fan-out would crosstag the dishwasher task with `family` and the birthday task with `home-repair`. That's noise, not signal, and it violates the *purpose* of the brain-dump intake. The recommendation has changed. The trace through current behaviour (§1, §2) is unchanged.
+**Revision note (v2 → v3, 2026-04-23):** Cam answered the §5 product question — yes, he uses (or wants to use) tag-on-task / tag-on-knowledge / tag-on-goal retrieval. That moves the recommendation from (D) drop-the-field to **(C) LLM-supplied `apply_to`**, with (B) per-segment tagging held in reserve as the fallback if (C) doesn't earn its keep. §4 below now records the live recommendation. §6 (what changes where) has been kept under the (D) path-not-taken header for provenance; the active dispatch list is summarised inline in §4. Status remains `proposed` — it promotes to `accepted` only after Reed's post-deploy assessment confirms (C) clears the success threshold.
+
+**Revision note (v1 → v2, 2026-04-23):** v1 of this paper recommended option (A) auto-fan-out: tag every item in the dump with every tag the dump produced. Cam pushed back — correctly — that a brain dump is deliberately multi-topic stream-of-consciousness ("call mum about her birthday and also fix the dishwasher leak"), and dump-level fan-out would crosstag the dishwasher task with `family` and the birthday task with `home-repair`. That's noise, not signal, and it violates the *purpose* of the brain-dump intake. The recommendation has changed. The trace through current behaviour (§1, §2) is unchanged.
 
 ## 1. What `apply_to` is supposed to do
 
@@ -70,19 +72,23 @@ Frontend shows the dump's detected tags as chips next to each extracted task/kno
 
 ## 4. Recommendation
 
-**Primary: (D) — drop `apply_to` from the contract for now.** Stop pretending the field works; remove it from `_llm_response_to_items`, remove it from the prompt schema, update `PROCESSING_RULES.md` Rule 5, and lean on `brain_dump_tags` (which already works) as the canonical "this dump touched these tags" record. Manual UI tagging for cross-content retrieval.
+**Primary: (C) — LLM-supplied `apply_to`. Kick off.** Cam's answer to §5 (2026-04-23) confirms tag-on-task / tag-on-knowledge / tag-on-goal retrieval is a real workflow he uses (or wants to use), so the cross-content junction tables need to populate from extraction, not only from manual UI tagging. (C) is the cheapest path with the strongest signal: the LLM is the only actor in the pipeline that sees the full text and can reason about which extracted item a tag belongs to. Failure mode is silent-no-tag rather than silent-wrong-tag, which is recoverable via manual UI tagging.
 
-**Why this and not the cleverer options:**
-- Reed rule 5 (minimal viable structure): we have *no evidence* Cam relies on tag-on-task retrieval today. The prod junction counts (`task_tags=19`, `knowledge_tags=10`, `goal_tags=24`, `person_tags=6`) are all from manual UI tagging — that means Cam *does* tag some items manually, but it doesn't tell us whether he then *queries* by those tags, or how often. Building auto-attachment for a query pattern that may be aspirational is structure ahead of demand.
-- Reed rule 6 (capture vs retrieval): the capture cost of (B), (C), (E), (F) is real (prompt complexity, LLM trust, UI build, ongoing maintenance). The retrieval benefit is theoretical until we know Cam uses it.
-- Reed rule 11 (never be precious): a dead schema field is worse than no field. It implies a contract the code doesn't honour, and every future reader has to re-discover that gap. Remove it cleanly.
+**Active dispatches under (C):**
+- **Vault** — extend the LLM extraction prompt in `app/processing.py` (the `_build_llm_prompt` scaffolding around L1051 and the `process_brain_dump_llm` path) to request `apply_to` on each tag item, with prompt instructions and examples that make it clear the field carries item indices into the same `processed_items.items` array. Stop hard-coding `"apply_to": []` in `_llm_response_to_items` — read the field through. Extend the `tag` branch of `_auto_create_item` so when `apply_to` is non-empty, the tag is attached to the named items via the appropriate junction tables (`task_tags`, `knowledge_tags`, `person_tags`, `goal_tags` — Vault confirms exact table names against `data/SCHEMA.md`). When `apply_to` is empty or absent, behaviour stays as today: insert into `tags`, link only to `brain_dump_tags`. Privacy invariant holds — `apply_to` values are item indices, not text, so they're fine to log; no extracted content is logged.
+- **Reed** — owns the success criteria and the post-deploy assessment. Defines the measurable bar for "earns its keep" (e.g. after N production brain dumps with `apply_to` populated, ≥X% of `(tag, item)` pairs are correct on Cam's spot-check, ≤Y% are incorrect; numbers per Reed's judgment for a single-user system). After Vault's patch ships and Cam has captured a handful of real brain dumps, Reed runs a production scan in the shape of Atlas's earlier scan and reports `apply_to` populated/empty/wrong rates back to Cairn. Below threshold → Cairn pulls (B) per-segment tagging forward as a follow-up.
+- **Probe** — regression coverage. At minimum: existing tag flow (empty `apply_to`) does not break. New path is exercised by an e2e test that asserts a tag with non-empty `apply_to` attaches to the named items in the DB via the correct junction tables.
 
-**Pocket alternatives, in order of preference if Cam says "actually, I do use tag-on-task retrieval":**
-1. **(C) LLM-supplied `apply_to`** — try the prompt iteration first. Cheapest path with the strongest signal. If the LLM emits `apply_to` reliably for, say, 70%+ of tags, it's a real feature; if it emits noise or nothing, fall back to (D).
-2. **(B) Per-segment tagging** — second choice. Respects the multi-topic constraint structurally. The LLM-path-doesn't-expose-segments problem is solvable but not free.
-3. **(F) Hybrid C+E** — only if Cam wants both auto-attachment *and* the safety net. Probably not bootstrap-stage work.
+**Watch entry:** Reed's assessment is queued in `docs/processes/team-practices.md` under "Queued audits" with a 10-dumps-or-4-weeks trigger so the check-in doesn't get forgotten.
 
-**Why not (E) standalone:** UI chips are good, but they're a Lumen build, and they don't justify themselves until we know retrieval-by-tag is a real workflow. Same gating question as the others.
+**Status discipline:** this paper stays `proposed` until Reed's assessment confirms (C) clears the threshold. On confirmation, status moves to `accepted`. On miss, this paper is superseded by a follow-up dispatching (B).
+
+**Pocket alternatives, in order of preference if (C) misses the threshold:**
+1. **(B) Per-segment tagging** — first fallback. Respects the multi-topic constraint structurally. The LLM-path-doesn't-expose-segments problem is solvable but not free.
+2. **(F) Hybrid C+E** — only if Cam wants both auto-attachment *and* the safety net. Probably not bootstrap-stage work.
+3. **(D) Drop `apply_to`** — last resort if the auto-extraction approaches don't pan out *and* Cam's manual-tagging discipline is sufficient. Still on the table; no longer the recommendation.
+
+**Why not (E) standalone:** UI chips are good but they're a Lumen build and they relocate friction to a review step rather than removing it. Held in reserve as part of (F).
 
 ## 5. Question for Cam (product input needed)
 
@@ -100,9 +106,11 @@ The whole choice between (D) and any of (B/C/E/F) hinges on one thing I can't an
 
 I'd rather not build any of (B)(C)(E)(F) on a guess about your retrieval habits. Two minutes of your answer here saves a week of building the wrong thing.
 
-## 6. What changes where (under primary recommendation D)
+## 6. What changes where (path not taken — recommendation D, retained for provenance)
 
-If you confirm (D):
+The block below was the v2 implementation plan under recommendation (D). Cam's answer flipped the recommendation to (C); §4 above now carries the active dispatch list. Kept here so future readers can see what the (D) path looked like if (C) is later abandoned.
+
+If (D) had been confirmed:
 
 - **Vault** — remove the hard-coded `"apply_to": []` from `_llm_response_to_items` (L1448–L1467) and from `detect_tags` (L921–L991). Tag items in `processed_items.items` no longer carry that field. The `tag` branch of `_auto_create_item` (L1584–L1609) keeps doing what it does — insert into `tags`, link to `brain_dump_tags`. No new junction-table writes. Cairn's separate audit on `_auto_create_item` truthfulness still applies; this just means the tag branch is honest about its scope (dump-level only) instead of carrying a field it never honours.
 - **Reed (me)** — rewrite `PROCESSING_RULES.md` Rule 5 to document the new contract: tags attach to the brain dump only; cross-content tagging is manual via UI. Remove the `apply_to` field from any schema doc that mentions it. Note the queued audits entry as resolved-by-removal, not resolved-by-implementation.
