@@ -50,9 +50,10 @@
 
 set -euo pipefail
 
-# UPDATE THIS WHEN (C) DEPLOYS. Format: YYYY-MM-DD HH:MM:SS (UTC, matches
-# brain_dumps.processed_at). Until set, the script will refuse to run.
-DEPLOY_DATE="${LIFEPLAN_APPLY_TO_DEPLOY_DATE:-PLACEHOLDER}"
+# Deploy timestamp for option (C) — commit ac58c06, prod restart at 2026-04-26.
+# Format: YYYY-MM-DD HH:MM:SS (UTC, matches brain_dumps.processed_at).
+# Override at run time: LIFEPLAN_APPLY_TO_DEPLOY_DATE=YYYY-MM-DD HH:MM:SS ./assess_apply_to.sh
+DEPLOY_DATE="${LIFEPLAN_APPLY_TO_DEPLOY_DATE:-2026-04-26 01:00:00}"
 
 PROD_HOST="your-user@your-domain.example"
 PROD_DB="/opt/lifeplan/data/lifeplan.db"
