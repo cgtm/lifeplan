@@ -571,3 +571,18 @@ when picked up; Cairn owns the queue.
   "boss"), OR a second case where approval semantics surprise Cam. Source:
   brain dump #32, "i need to pay back mum" produced an approved
   `person_mention` with `person_id: null` and no row in `people`.
+
+- **`_auto_create_item` status-truthfulness audit (Vault + Reed joint).**
+  Today `status=auto_created` is set upstream of `_auto_create_item`, so any
+  branch that silently returns `None` leaves a row claiming `auto_created`
+  with `created_id=null` — a lie by construction. Person_mention (2026-04-23)
+  and tag/goal_link (this session) were patched per-branch; the contract
+  itself is still wrong. Audit shape: every branch in `_auto_create_item`,
+  enforce the invariant "status reflects post-call reality" — either set
+  status after return, or have the function raise on drop and the caller
+  mark `failed` (or a new `dropped` state). Coordinate with Reed on the
+  status enum if a new state is needed. Trigger to pull forward: any third
+  occurrence of an auto_create branch silently dropping, OR Reed surfacing
+  a second status-vs-reality mismatch in any UI. Source: production scan
+  2026-04-23 (3 dropped items across 7 dumps; tag and goal_link branches
+  hold the same fall-through hazard person_mention had).

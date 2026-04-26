@@ -1583,7 +1583,19 @@ def _auto_create_item(conn, item, dump_id):
 
         elif itype == "tag":
             tag_name = data["tag_name"]
-            if data.get("is_new"):
+            # Recovery: when the LLM marked is_new=False but couldn't supply a
+            # matched_existing_id, fall through to the create-new path using
+            # the LLM's tag_name. Same shape as the person_mention recovery --
+            # without this we'd silently return None and the row would show
+            # in the UI as auto_created with no DB record behind it.
+            if not data.get("is_new") and not data.get("matched_existing_id"):
+                # Privacy: do not log tag_name; dump_id + reason only.
+                logger.info(
+                    "processing.auto_create.tag.recover dump_id=%s "
+                    "reason=match_failed_create_instead", dump_id,
+                )
+            create_new = bool(data.get("is_new")) or not data.get("matched_existing_id")
+            if create_new:
                 conn.execute(
                     "INSERT OR IGNORE INTO tags (name) VALUES (?)", (tag_name,)
                 )
@@ -1599,14 +1611,13 @@ def _auto_create_item(conn, item, dump_id):
                     )
                     return tag_row["id"]
             else:
-                tag_id = data.get("matched_existing_id")
-                if tag_id:
-                    conn.execute(
-                        "INSERT OR IGNORE INTO brain_dump_tags (brain_dump_id, tag_id) "
-                        "VALUES (?, ?)",
-                        (dump_id, tag_id),
-                    )
-                    return tag_id
+                tag_id = data["matched_existing_id"]
+                conn.execute(
+                    "INSERT OR IGNORE INTO brain_dump_tags (brain_dump_id, tag_id) "
+                    "VALUES (?, ?)",
+                    (dump_id, tag_id),
+                )
+                return tag_id
 
         elif itype == "goal_new":
             cur = conn.execute(
@@ -1660,10 +1671,28 @@ def _auto_create_item(conn, item, dump_id):
             return cur.lastrowid
 
         elif itype == "goal_link":
-            # Only report a created_id when a goal was actually linked
+            # Only report a created_id when a goal was actually linked.
+            # Unlike `tag` and `person_mention`, there is no "create new" recovery
+            # here -- a goal_link by definition refers to an EXISTING goal; we
+            # have no goal title/description to synthesise one from. If the LLM
+            # failed to produce a goal_id, the link is unrecoverable.
+            #
+            # Why warn-and-return-None rather than raise: the enclosing
+            # try/except in this function swallows exceptions and returns None
+            # anyway (see bottom of function), so raising would be silently
+            # absorbed and indistinguishable from any other failure. Logging
+            # explicitly is the only way to surface the bug class. The caller
+            # (process_brain_dump_for_worker) already tolerates None as
+            # "auto_created with no created_id" -- the residual UX is the same
+            # as the historical bug, but now diagnosable from logs.
             goal_id = data.get("goal_id")
             if goal_id is not None:
                 return goal_id
+            # Privacy: dump_id + reason only; never log free-text goal text.
+            logger.warning(
+                "processing.auto_create.goal_link.drop dump_id=%s "
+                "reason=missing_goal_id", dump_id,
+            )
             return None
 
     except Exception:
