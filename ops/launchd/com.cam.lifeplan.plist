@@ -6,7 +6,7 @@
     <string>com.cam.lifeplan</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/opt/homebrew/opt/python@3.12/bin/python3.12</string>
+        <string>/opt/homebrew/opt/python@3.14/bin/python3.14</string>
         <string>/Users/cam/dev/personal/lifeplan/app/server.py</string>
     </array>
     <key>EnvironmentVariables</key>
