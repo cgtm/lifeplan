@@ -1632,23 +1632,32 @@ def _auto_create_item(conn, item, dump_id):
 
             return goal_id
 
-        elif itype == "person_new":
-            # Insert new person into the people table
+        elif itype == "person_new" or itype == "person_mention":
+            # person_mention with a matched person_id: nothing to insert.
+            if itype == "person_mention" and data.get("person_id") is not None:
+                return data.get("person_id")
+
+            # Otherwise (person_new, or person_mention with no match) insert
+            # a new row in `people`. Map the person_mention data shape into
+            # the same fields person_new uses, so the INSERT lives in one place.
+            if itype == "person_mention":
+                name = (data.get("person_name") or "").strip()
+                if not name:
+                    # Nothing usable to insert; bail without raising.
+                    return None
+                relationship = data.get("inferred_relationship", "unknown")
+                notes = data.get("notes", data.get("context", ""))
+            else:
+                name = data["name"]
+                relationship = data.get("inferred_relationship", "unknown")
+                notes = data.get("notes", data.get("context", ""))
+
             cur = conn.execute(
                 "INSERT INTO people (name, relationship, notes, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?)",
-                (
-                    data["name"],
-                    data.get("inferred_relationship", "unknown"),
-                    data.get("notes", data.get("context", "")),
-                    ts, ts,
-                ),
+                (name, relationship, notes, ts, ts),
             )
             return cur.lastrowid
-
-        elif itype == "person_mention":
-            # No new row to create, just note the mention
-            return data.get("person_id")
 
         elif itype == "goal_link":
             # Only report a created_id when a goal was actually linked

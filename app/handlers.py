@@ -548,6 +548,56 @@ def handle_get_person(person_id):
         conn.close()
 
 
+def handle_create_person(body):
+    """
+    Create a new person row.
+
+    Contract:
+      - 400 {"error": "name is required"} if name missing/empty after strip.
+      - 409 {"error": "person already exists", "id": <id>} on case-insensitive
+        name collision; returns the existing id so callers can navigate to it.
+      - 201 {full row} on success, same shape as GET /api/people/<id>.
+
+    Privacy: never logs the submitted name or notes.
+    """
+    name = (body.get("name") or "").strip()
+    if not name:
+        return 400, {"error": "name is required"}
+
+    relationship = body.get("relationship", "unknown")
+    notes = body.get("notes", "")
+    location = body.get("location")
+    tag_names = body.get("tags")
+
+    conn = get_db()
+    try:
+        existing = conn.execute(
+            "SELECT id FROM people WHERE name = ? COLLATE NOCASE",
+            (name,),
+        ).fetchone()
+        if existing:
+            return 409, {"error": "person already exists", "id": existing["id"]}
+
+        ts = now_utc()
+        cur = conn.execute(
+            "INSERT INTO people (name, relationship, notes, location, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (name, relationship, notes, location, ts, ts),
+        )
+        person_id = cur.lastrowid
+
+        if tag_names is not None:
+            set_tags_for(conn, "person_tags", "person_id", person_id, tag_names)
+
+        conn.commit()
+        person = dict(
+            conn.execute("SELECT * FROM people WHERE id = ?", (person_id,)).fetchone()
+        )
+        return 201, enrich_person(conn, person)
+    finally:
+        conn.close()
+
+
 def handle_update_person(person_id, body):
     conn = get_db()
     try:
