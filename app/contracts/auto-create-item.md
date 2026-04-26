@@ -24,7 +24,7 @@ invariant from [`background-processing.md`](./background-processing.md)
 ### Signature
 
 ```python
-def _auto_create_item(conn, item, dump_id) -> int | None
+def _auto_create_item(conn, item, dump_id, sibling_items=None) -> int | None
 ```
 
 - `conn` — open `sqlite3.Connection` from the worker's transactional
@@ -32,6 +32,11 @@ def _auto_create_item(conn, item, dump_id) -> int | None
 - `item` — one entry from `processed_items["items"]`. Shape:
   `{"type": <itype>, "data": {...}, "confidence": <float>, ...}`.
 - `dump_id` — the parent `brain_dumps.id` for logging and FK linkage.
+- `sibling_items` — optional list of other items in the same
+  `processed_items.items` array. **Used only by the `tag` branch** to
+  resolve `apply_to` references (see "Per-branch behaviour: `tag`"
+  below). When `None` or empty, the tag branch falls back to today's
+  dump-level-only behaviour. Other branches ignore it.
 - **Returns:** the new (or matched) row id on success; `None` when the
   caller should treat the item as not-created. `None` is a contract
   signal, not an error — see "Caller obligations".
@@ -124,9 +129,71 @@ recovery shape. Recovery shapes:
 | `goal_new`        | INSERT into `goals`, then link `goal_people` for each `people_ids[]` | Same as `task` for `data["title"]`. `people_ids[]` link failures: log per-link warning, do NOT fail the goal create itself | `MalformedItemData` (caught internally → None) | `goals.id`         |
 | `person_new`      | INSERT into `people`                                                 | Pre-validate `data["name"]`; missing → raise `MalformedItemData("person_new", "name")` → log + None     | `MalformedItemData` (caught internally → None) | `people.id`        |
 | `person_mention`  | If `person_id` present: return it. Else fall-through: synthesise person from `person_name` and INSERT into `people` | **fall-through to alternative create** (already implemented; documented as the canonical recovery pattern). If neither `person_id` nor `person_name` → log + None | `MalformedItemData` only on truly empty data — covered by the empty-name guard already returning None | `people.id` (matched or new) |
-| `tag`             | If `is_new=True` OR (`is_new=False` AND no `matched_existing_id`): `INSERT OR IGNORE` into `tags`, look up id, link in `brain_dump_tags`. Else: link existing id | **fall-through to alternative create** (recover `is_new=False` + no match by creating a new tag — already implemented). The `if tag_row:` guard becomes `assert tag_row is not None, "tag insert succeeded but row missing"` (invariant: `INSERT OR IGNORE` on `UNIQUE` always leaves a readable row) | `AssertionError` (programming error if it ever fires); `MalformedItemData("tag", "tag_name")` if `tag_name` missing | `tags.id` (matched or new)   |
+| `tag`             | If `is_new=True` OR (`is_new=False` AND no `matched_existing_id`): `INSERT OR IGNORE` into `tags`, look up id, link in `brain_dump_tags`. Else: link existing id. **Then per-item fan-out**: for each `apply_to` ref `{type, source_text}`, find the matching sibling item; if it has `created_id`, `INSERT OR IGNORE` into the appropriate junction table (`task_tags`, `knowledge_tags`, `goal_tags`, `person_tags`). | **fall-through to alternative create** (recover `is_new=False` + no match by creating a new tag — already implemented). The `if tag_row:` guard becomes `assert tag_row is not None, "tag insert succeeded but row missing"` (invariant: `INSERT OR IGNORE` on `UNIQUE` always leaves a readable row). Per-item fan-out failures (FK violation, etc.) log `processing.auto_create.tag.fanout_failed` and continue with remaining refs — they MUST NOT regress the tag's own create or its `brain_dump_tags` link. | `AssertionError` (programming error if it ever fires); `MalformedItemData("tag", "tag_name")` if `tag_name` missing | `tags.id` (matched or new)   |
 | `goal_link`       | If `goal_id` present: return it (no INSERT — this branch only links to an existing goal) | **log + None** — there is no recoverable create. A `goal_link` by definition references an existing goal; we have no goal title/description to synthesise one from. Caller marks `failed` | none beyond programming errors                  | `goals.id`         |
 | *unknown `itype`* | n/a                                                                  | **raise** `UnknownItemType(itype)` — covers invariant 4. Future branch additions can't accidentally drop a whole class of items | `UnknownItemType`                                | n/a                |
+
+### `tag` branch — `apply_to` fan-out (added 2026-04-23)
+
+The `tag` branch attaches each tag to per-item junction tables when the
+LLM populated `apply_to` on the tag item. This is the implementation of
+recommendation (C) from `docs/architecture/tag-apply-to-investigation.md`.
+
+**Format.** `apply_to` is a list of `{"type": str, "source_text": str}`
+references. `type` is one of `task`, `knowledge`, `goal_new`,
+`person_new`, `person_mention` (the item types that produce a real DB
+row this tag can hang off; `goal_link` and `tag` are intentionally
+absent because they don't create a row a tag could attach to).
+`source_text` MUST equal the target sibling item's `source_text`.
+Sanitised on read by `_sanitise_apply_to`; malformed entries are
+silently dropped.
+
+**Why semantic refs, not numeric indices.** The LLM's natural output is
+keyed by item kind (`tasks`, `knowledge_items`, `tags`, …), not a flat
+indexed list. Asking the LLM to count across multiple sub-arrays is
+fragile; `source_text` is already a field every item carries and the
+LLM produces verbatim. Robust pairing without making the model count.
+
+**Pass-ordering invariant — option (a), inside the worker loop.** All
+non-tag items are processed BEFORE tag items so siblings already have
+`created_id` populated by the time the tag branch reads them. The
+worker loop calls `_order_items_tags_last(filtered_items)` to drive
+iteration; the persisted JSON keeps extraction order so the UI is
+unaffected. (Option (b) — caller post-pass — was rejected: it would
+have spread tag-fan-out logic across both callers; (a) keeps it inside
+`_auto_create_item`'s tag branch where the rest of the tag logic lives.)
+
+**Junction tables (confirmed against `data/SCHEMA.md`):**
+
+| `apply_to` type   | Junction table   | FK column      |
+|---|---|---|
+| `task`            | `task_tags`      | `task_id`      |
+| `knowledge`       | `knowledge_tags` | `knowledge_id` |
+| `goal_new`        | `goal_tags`      | `goal_id`      |
+| `person_new`      | `person_tags`    | `person_id`    |
+| `person_mention`  | `person_tags`    | `person_id`    |
+
+**Backwards compat.** When `apply_to` is empty or absent, behaviour is
+unchanged: tag inserted into `tags`, linked into `brain_dump_tags`, no
+per-item attachment. No migration. No regression for old
+`processed_items` blobs (their `apply_to: []` reads through and
+exercises the unchanged path).
+
+**Privacy.** `apply_to` carries `source_text` strings, which match
+sibling items' `source_text` — already part of the items list and never
+logged. Fan-out logs report only counts and the static junction-table
+name (`processing.auto_create.tag.fanout dump_id=… attached=N
+no_match=N no_created_id=N`). No tag names, no source_text, no user
+content.
+
+**Approve-handler reach.** `handle_approve_item` passes
+`processed_items["items"]` as `sibling_items` so a tag approved through
+the UI can also fan out — but only to siblings that already have
+`created_id` populated. Pending `suggested` siblings count as
+`no_created_id` and are skipped. If the user later approves those
+pending siblings, the tag is NOT retroactively attached (the user can
+attach manually via the UI). This is the consciously simple shape; a
+future "approve-and-cascade" is a separate dispatch.
 
 ### Branch-specific notes for Cairn's review
 
@@ -226,6 +293,8 @@ Events emitted by `_auto_create_item` and the two callers, on the
 |---|---|---|---|
 | `processing.auto_create.failed`               | WARNING | `dump_id`, `item_type`, `error_class`, `error_message_truncated`        | Caught `MalformedItemData` or `sqlite3.Error` inside `_auto_create_item` |
 | `processing.auto_create.tag.recover`          | INFO    | `dump_id`, `reason=match_failed_create_instead`                         | Existing — `tag` branch fell through to create-new (kept as-is) |
+| `processing.auto_create.tag.fanout`           | INFO    | `dump_id`, `attached`, `no_match`, `no_created_id`                      | Per-item fan-out summary for one tag's `apply_to`. Counts only — never tag_name or source_text. Suppressed when no work was done. |
+| `processing.auto_create.tag.fanout_failed`    | WARNING | `dump_id`, `junction` (static table name), `error_class`, `error_message_truncated` | One junction-table INSERT raised `sqlite3.Error` (e.g. FK violation). Loop continues with remaining refs. The tag's own create + `brain_dump_tags` link are NOT regressed. |
 | `processing.auto_create.goal_link.drop`       | WARNING | `dump_id`, `reason=missing_goal_id`                                     | Existing — `goal_link` log + None path (kept as-is) |
 | `processing.auto_create.person_mention.drop`  | WARNING | `dump_id`, `reason=empty_person_name`                                   | Existing in spirit — currently silent; promoted to logged drop |
 | `processing.auto_create.dropped` *(caller)*   | WARNING | `dump_id`, `item_index`, `item_type`, `caller=worker\|approve`          | Either caller, when `_auto_create_item` returns `None` and the caller marks the item `failed` |

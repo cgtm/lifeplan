@@ -1138,7 +1138,19 @@ Analyse the following brain dump text and extract structured items from it. Retu
 
 6. **New goals**: Explicit requests to create a new goal. Look for "create a goal", "new goal", "goal:", "my goal is to", "add goal", "set a goal to". Extract the goal title, optional target_date (ISO 8601), and status "active". Only create goal_new items when the user is explicitly asking for a NEW goal to be created -- do NOT confuse this with tasks or goal links.
 
-7. **Tags**: Which existing tags apply? Also suggest new tags (lowercase, hyphenated, max 30 chars) for recurring themes not covered by existing tags.
+7. **Tags**: Which existing tags apply? Also suggest new tags (lowercase, hyphenated, max 30 chars) for recurring themes not covered by existing tags. Each tag carries an `apply_to` list naming the OTHER extracted items it should attach to (see "Tag scoping" below).
+
+## Tag scoping (apply_to)
+
+Brain dumps are deliberately multi-topic stream-of-consciousness. A dump containing "call mum about her birthday and read about machine learning" produces a `family` tag that belongs to the call-mum task and a `machine-learning` tag that belongs to the ML knowledge item -- NOT cross-attached.
+
+Each tag has an `apply_to` list of references to other items in the same response. Each reference is `{{"type": "<item_type>", "source_text": "<the source_text of the target item>"}}`, where `type` matches one of: `task`, `knowledge`, `goal_new`, `person_new`, `person_mention`. The `source_text` MUST be the exact `source_text` value you put on the target item -- this is how the pipeline pairs the tag to the right item.
+
+Rules:
+- If a tag is dump-level (the whole dump is "about" it), leave `apply_to` as an empty list `[]`. Don't fan it out across unrelated items.
+- If a tag belongs to one specific extracted item, list that one item in `apply_to`.
+- A tag may apply to multiple items if (and only if) the dump text genuinely associates it with each one.
+- Never apply a tag to an item from a different topic in a multi-topic dump.
 
 ## Confidence scoring guidelines
 - Explicit markers (todo:, remind me to, decided to, I learned): 0.90-0.95
@@ -1222,7 +1234,10 @@ Return a JSON object with this exact structure:
       "tag_name": "string (lowercase, hyphenated)",
       "is_new": true/false,
       "confidence": 0.0-1.0,
-      "source_text": "string"
+      "source_text": "string",
+      "apply_to": [
+        {{"type": "task|knowledge|goal_new|person_new|person_mention", "source_text": "exact source_text of the target item"}}
+      ]
     }}
   ]
 }}
@@ -1294,11 +1309,40 @@ Return a JSON object with this exact structure:
     }}
   ],
   "tags": [
-    {{"tag_name": "settlement", "is_new": false, "confidence": 0.95, "source_text": "settlement papers"}},
-    {{"tag_name": "visa", "is_new": false, "confidence": 0.95, "source_text": "D-4 visa"}},
-    {{"tag_name": "move-house", "is_new": false, "confidence": 0.95, "source_text": "house move"}}
+    {{"tag_name": "settlement", "is_new": false, "confidence": 0.95, "source_text": "settlement papers", "apply_to": [
+      {{"type": "task", "source_text": "Need to call Priya about the settlement papers."}}
+    ]}},
+    {{"tag_name": "visa", "is_new": false, "confidence": 0.95, "source_text": "D-4 visa", "apply_to": [
+      {{"type": "knowledge", "source_text": "TIL the D-4 visa takes 3-4 weeks."}}
+    ]}},
+    {{"tag_name": "move-house", "is_new": false, "confidence": 0.95, "source_text": "house move", "apply_to": [
+      {{"type": "task", "source_text": "Also should start packing boxes for the house move by Friday."}}
+    ]}}
   ]
 }}
+
+### Example 2 (multi-topic dump -- demonstrates apply_to scoping):
+Input: "Need to call mum about her birthday next week. Also want to read up on machine learning fundamentals."
+
+Output (relevant fragments):
+{{
+  "tasks": [
+    {{"title": "Call mum about birthday", "description": "Need to call mum about her birthday next week.", "due_date": null, "goal_id": null, "goal_title": null, "confidence": 0.85, "source_text": "Need to call mum about her birthday next week."}}
+  ],
+  "knowledge_items": [
+    {{"title": "Read about machine learning fundamentals", "content": "Also want to read up on machine learning fundamentals.", "item_type": "note", "confidence": 0.80, "source_text": "Also want to read up on machine learning fundamentals."}}
+  ],
+  "tags": [
+    {{"tag_name": "family", "is_new": true, "confidence": 0.85, "source_text": "mum", "apply_to": [
+      {{"type": "task", "source_text": "Need to call mum about her birthday next week."}}
+    ]}},
+    {{"tag_name": "machine-learning", "is_new": true, "confidence": 0.85, "source_text": "machine learning", "apply_to": [
+      {{"type": "knowledge", "source_text": "Also want to read up on machine learning fundamentals."}}
+    ]}}
+  ]
+}}
+
+Note how `family` does NOT cross-attach to the ML knowledge item, and `machine-learning` does NOT attach to the call-mum task. The two topics in the dump stay separate. If a tag is dump-level (no specific item it belongs to), use `apply_to: []`.
 
 Now extract items from the brain dump text above. Return ONLY the JSON object, no other text."""
 
@@ -1496,6 +1540,13 @@ def _llm_response_to_items(llm_data, dump_id, known_tags):
             continue
         is_new = tag.get("is_new", tag_name not in tag_id_map)
         status = "auto_created" if conf >= 0.80 else "suggested"
+        # apply_to: list of {type, source_text} references identifying which
+        # OTHER extracted items this tag belongs to. Sanitised here -- only
+        # well-formed dicts with the required keys survive. Empty/absent ->
+        # dump-level tag (existing behaviour preserved). Privacy: these are
+        # references the LLM ALREADY emitted as part of the items it produced;
+        # source_text is a short fragment we already store on every item.
+        apply_to = _sanitise_apply_to(tag.get("apply_to"))
         items.append({
             "type": "tag",
             "confidence": conf,
@@ -1505,12 +1556,46 @@ def _llm_response_to_items(llm_data, dump_id, known_tags):
                 "tag_name": tag_name,
                 "is_new": is_new,
                 "matched_existing_id": tag_id_map.get(tag_name) if not is_new else None,
-                "apply_to": [],
+                "apply_to": apply_to,
             },
             "created_id": None,
         })
 
     return items
+
+
+# Tag-fan-out -> junction table. `goal_link` and `tag` are intentionally
+# absent: goal_link does not create a goal row (so there's nothing to tag),
+# and self-tagging a tag is meaningless.
+_TAG_FANOUT_JUNCTIONS = {
+    "task": ("task_tags", "task_id"),
+    "knowledge": ("knowledge_tags", "knowledge_id"),
+    "goal_new": ("goal_tags", "goal_id"),
+    "person_new": ("person_tags", "person_id"),
+    "person_mention": ("person_tags", "person_id"),
+}
+
+
+def _sanitise_apply_to(raw):
+    """Clamp the LLM-supplied apply_to list to the contract shape.
+
+    Returns a list of {"type": str, "source_text": str} dicts. Drops any
+    entry that isn't a dict, lacks both keys, or names an unknown type.
+    """
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        etype = entry.get("type")
+        esrc = entry.get("source_text")
+        if not isinstance(etype, str) or not isinstance(esrc, str):
+            continue
+        if etype not in _TAG_FANOUT_JUNCTIONS:
+            continue
+        out.append({"type": etype, "source_text": esrc})
+    return out
 
 
 def _clamp_confidence(val):
@@ -1589,10 +1674,103 @@ def process_brain_dump_llm(dump_id, conn, dump, goals_data, known_people, known_
     return items
 
 
-def _auto_create_item(conn, item, dump_id):
+def _order_items_tags_last(items):
+    """Return a re-ordered shallow copy of `items` with `tag` items moved to
+    the end, preserving relative order within each group.
+
+    Required by the tag branch's apply_to fan-out (option (a) per the
+    investigation dispatch): siblings must have their `created_id`
+    populated before the tag branch reads them.
+    """
+    non_tags = [i for i in items if i.get("type") != "tag"]
+    tags = [i for i in items if i.get("type") == "tag"]
+    return non_tags + tags
+
+
+def _attach_tag_to_siblings(conn, dump_id, tag_id, apply_to, sibling_items):
+    """Insert per-item junction rows for a tag's apply_to references.
+
+    `apply_to` entries are {type, source_text} dicts (already sanitised by
+    `_sanitise_apply_to`). For each entry, find the matching sibling item
+    by (type, source_text); if it has a non-null `created_id`, INSERT OR
+    IGNORE into the appropriate junction table.
+
+    Privacy: logs only counts and dump_id; never tag names or source_text.
+    """
+    attached = 0
+    no_match = 0
+    no_created_id = 0
+    for ref in apply_to:
+        ref_type = ref["type"]
+        ref_src = ref["source_text"]
+        junction = _TAG_FANOUT_JUNCTIONS.get(ref_type)
+        if junction is None:
+            # Defence in depth -- _sanitise_apply_to already filtered, but
+            # if a future code path bypasses it, fail closed (skip).
+            no_match += 1
+            continue
+        table_name, fk_col = junction
+        # Find the sibling item by (type, source_text). person_mention and
+        # person_new both map to person_tags, so accept either when the ref
+        # type is in the person family.
+        match = None
+        for sib in sibling_items:
+            if sib.get("type") != ref_type:
+                continue
+            if sib.get("source_text") != ref_src:
+                continue
+            match = sib
+            break
+        if match is None:
+            no_match += 1
+            continue
+        created_id = match.get("created_id")
+        if created_id is None:
+            no_created_id += 1
+            continue
+        try:
+            conn.execute(
+                f"INSERT OR IGNORE INTO {table_name} ({fk_col}, tag_id) "
+                f"VALUES (?, ?)",
+                (created_id, tag_id),
+            )
+            attached += 1
+        except sqlite3.Error as exc:
+            # FK violation or similar -- log and continue with remaining
+            # refs. The tag itself was already created and linked to the
+            # brain dump; a junction-table failure must not regress that.
+            logger.warning(
+                "processing.auto_create.tag.fanout_failed dump_id=%s "
+                "junction=%s error_class=%s error_message=%s",
+                dump_id, table_name, type(exc).__name__,
+                _truncate_error_message(str(exc)),
+            )
+    if attached or no_match or no_created_id:
+        logger.info(
+            "processing.auto_create.tag.fanout dump_id=%s "
+            "attached=%d no_match=%d no_created_id=%d",
+            dump_id, attached, no_match, no_created_id,
+        )
+
+
+def _auto_create_item(conn, item, dump_id, sibling_items=None):
     """Create a database row for an auto-created item.
 
     Contract: app/contracts/auto-create-item.md.
+
+    `sibling_items` (optional) is the list of other items in the same
+    `processed_items.items` array. The `tag` branch uses it to resolve its
+    `apply_to` references (each `{type, source_text}` entry) against
+    sibling items that have a non-null `created_id`, and writes the
+    appropriate junction-table rows (`task_tags`, `knowledge_tags`,
+    `goal_tags`, `person_tags`). When `sibling_items` is None or empty, or
+    `apply_to` is empty/absent, the tag branch keeps today's behaviour:
+    insert into `tags` and link only via `brain_dump_tags`.
+
+    Pass-ordering invariant for the tag branch (option (a) per Cairn's
+    dispatch): callers must process all non-tag items BEFORE tag items so
+    that `created_id` is populated on sibling items by the time the tag
+    branch reads them. See `_order_items_tags_last`.
 
     Returns the new (or matched) row id on success, or `None` when the caller
     should treat the item as not-created. `None` is a deliberate contract
@@ -1688,15 +1866,25 @@ def _auto_create_item(conn, item, dump_id):
                     "VALUES (?, ?)",
                     (dump_id, tag_row["id"]),
                 )
-                return tag_row["id"]
+                resolved_tag_id = tag_row["id"]
             else:
-                tag_id = data["matched_existing_id"]
+                resolved_tag_id = data["matched_existing_id"]
                 conn.execute(
                     "INSERT OR IGNORE INTO brain_dump_tags (brain_dump_id, tag_id) "
                     "VALUES (?, ?)",
-                    (dump_id, tag_id),
+                    (dump_id, resolved_tag_id),
                 )
-                return tag_id
+            # Per-item fan-out: attach this tag to any sibling items the LLM
+            # asked us to via apply_to. Pass-ordering invariant: callers
+            # process all non-tag items first, so siblings already have
+            # `created_id` populated. Privacy: log only counts and the
+            # static junction-table name; never the tag_name or source_text.
+            apply_to = data.get("apply_to") or []
+            if apply_to and sibling_items:
+                _attach_tag_to_siblings(
+                    conn, dump_id, resolved_tag_id, apply_to, sibling_items,
+                )
+            return resolved_tag_id
 
         elif itype == "goal_new":
             # Recovery shape: log + None via MalformedItemData.
@@ -1954,6 +2142,16 @@ def process_brain_dump_for_worker(conn, dump_id):
         item for item in all_items if item["confidence"] >= 0.50
     ]
 
+    # Pass-ordering for tag apply_to fan-out (option (a) per the
+    # tag-apply-to-investigation dispatch): process all non-tag items first
+    # so their `created_id` is populated by the time the tag branch reads
+    # them via `sibling_items`. The reordered list drives the loop, but
+    # `filtered_items` -- still in extraction order -- is what the worker
+    # serialises into `processed_items.items` for the UI / DB. Both views
+    # reference the same item dicts, so status / created_id mutations from
+    # the loop are visible in the persisted JSON.
+    ordered_items = _order_items_tags_last(filtered_items)
+
     # Auto-create high-confidence items.
     # Status set AFTER the call (invariant 1 from the auto-create contract):
     # `_auto_create_item` returns None to signal "couldn't create"; the
@@ -1963,17 +2161,21 @@ def process_brain_dump_for_worker(conn, dump_id):
     auto_count = 0
     suggest_count = 0
     dropped_count = 0
-    for idx, item in enumerate(filtered_items):
+    for item in ordered_items:
         if item["confidence"] >= 0.80:
-            created_id = _auto_create_item(conn, item, dump_id)
+            created_id = _auto_create_item(
+                conn, item, dump_id, sibling_items=filtered_items,
+            )
             if created_id is None:
                 item["status"] = "failed"
                 item["created_id"] = None
                 dropped_count += 1
+                # item_index is the index into the persisted (extraction-
+                # order) list, which is what the UI / audits consult.
                 logger.warning(
                     "processing.auto_create.dropped dump_id=%s item_index=%d "
                     "item_type=%s caller=worker",
-                    dump_id, idx, item["type"],
+                    dump_id, filtered_items.index(item), item["type"],
                 )
             else:
                 item["status"] = "auto_created"
@@ -2247,7 +2449,16 @@ def handle_approve_item(dump_id, body):
             # 500 handler unchanged. We do NOT broaden to `except Exception`
             # -- that would re-introduce the swallow this audit is killing.
             try:
-                created_id = _auto_create_item(conn, item, dump_id)
+                # sibling_items lets the tag branch fan out apply_to
+                # references to any siblings already created on the worker
+                # path (e.g. the high-confidence task this tag belongs to).
+                # Tag approvals through this handler will only attach to
+                # siblings that already have `created_id` set; pending
+                # `suggested` siblings are skipped (no_created_id).
+                created_id = _auto_create_item(
+                    conn, item, dump_id,
+                    sibling_items=processed_items["items"],
+                )
             except UnknownItemType as e:
                 return 500, {"error": f"internal error: {type(e).__name__}"}
             if created_id is None:
