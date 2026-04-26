@@ -9,6 +9,188 @@ flagged for live confirmation with Probe.
 has a clear next action; every state continues the flow; the user can
 recover from any action.
 
+**Update — 2026-04-26 walkthrough:** the six unknowns originally queued
+for live walkthrough have now been resolved jointly with Probe against
+the running local app (Playwright recon + curl + DB read). See
+"Walkthrough resolutions" below; the punch list and top-three have been
+revised where the findings warranted.
+
+---
+
+## Walkthrough resolutions (Probe + Iris, 2026-04-26)
+
+For each unknown: original question · observed behaviour (Probe) ·
+verdict + revised P-rating + concrete next step (Iris).
+
+### W1. Add Goal affordance on `view-goals`
+
+- **Question:** does any "Add goal" affordance exist on the goals view?
+- **Observed (Probe):** none. The view's full markup is `page-header`
+  + filter pills + `#goalList`. A Playwright count of `button:has-text("Add"), button:has-text("New"), input[placeholder*="goal"], form` inside `#view-goals` returns **0**. Goal creation today is brain-dump-only (the user types something, the LLM extracts a `goal_new`, the user approves it in the review modal). The "Add" path is therefore three clicks and an LLM round-trip behind a different surface.
+- **Verdict (Iris):** confirmed P1, and *escalated*. This is not a missing
+  button — it's a missing on-ramp for the most important entity in the
+  system. Promote in the punch list from "pending" to actively blocking.
+- **Affordance proposal (free rein):** *primary* affordance is a
+  prominent **"+ New goal"** button in the page header (right-aligned,
+  same row as `<h1>Goals</h1>`), opening a **right-side drawer** (not a
+  modal) with: title (required), description, target date, status
+  (default Active), tags. Save returns the user to the list with the new
+  goal flashing at the top (same optimistic-insert + highlight pattern
+  People and Knowledge already use). *Secondary* affordance: each empty
+  filter state ("No stalled goals") gets a contextual CTA — *"Nothing
+  stalled — keep it that way. New goal?"* The drawer pattern (vs the
+  inline single-line input the People view uses) is the right shape
+  because goals carry richer required context than a person's name.
+  Keep the brain-dump path — that's how most goals will still be born —
+  but stop forcing it to be the only door.
+
+### W2. Add Task affordance on `view-tasks`
+
+- **Question:** does any "Add task" affordance exist on the tasks view?
+- **Observed (Probe):** none. Identical shape to goals — header +
+  filter pills + `#taskList`. Playwright count = **0**.
+- **Verdict (Iris):** confirmed P1. Same shape, same escalation.
+- **Affordance proposal:** *primary* — a **"+ New task"** button in the
+  page header, opening a slim drawer with: title (required), goal
+  (autocomplete, defaults to last-touched goal or "Unlinked"), due
+  date, people. *Secondary* — each goal-grouped section in the list
+  gets a hover/tap-revealed **"+ task"** chip on the group header so
+  the user can add a task *into the goal context they're already
+  reading*. This is the affordance that actually drives momentum —
+  most tasks are born while looking at the goal they belong to. The
+  bare "Add task" button on its own would be useful but lonely; the
+  per-goal inline-add is the one that earns its keep daily.
+
+### W3. Loading-state behaviour on slow network
+
+- **Question:** what does the user see during a slow fetch — skeletons,
+  spinners, blank?
+- **Observed (Probe):** with `/api/goals` throttled to 5 s, the goals
+  view shows the **previous render's contents** for the entire wait
+  (sampled at 0.5 s, 2.5 s, 6 s — `#goalList` byte-count and visible
+  text identical across all three). On *first* navigation (no prior
+  render) the user gets the page header and empty filter pills, then
+  nothing visible until the data lands. There is no spinner, no
+  skeleton, no "Loading…" text. The brain-dump processing badge
+  (`dump-badge processing` with spinner) is the *only* loading
+  indicator anywhere in the app, and it's per-row, not per-section.
+- **Verdict (Iris):** **P3 → P2.** Audit had this as P3 ("acceptable
+  for fast local DB"). Walkthrough revises upward because (a) the app
+  ships as a PWA — it *will* run on Cam's iPhone on cellular in a
+  basement somewhere, and (b) showing stale data with no signal that
+  a fetch is in flight is worse than showing nothing — the user can't
+  tell whether they're looking at fresh state or a cached frame.
+- **Concrete next step:** **add a thin top-of-viewport progress bar**
+  (the Vercel/YouTube pattern — 2 px, accent colour, indeterminate
+  shimmer) that appears whenever any `api()` call is in flight for
+  > 250 ms. One implementation, every surface covered, no per-section
+  skeletons needed. *Plus* one targeted skeleton: on first-load of
+  goals/tasks/people/knowledge when the list is empty *because the
+  fetch hasn't returned yet*, render three placeholder card outlines.
+  Subsequent re-renders (filter switch, post-action refresh) keep the
+  current contents and rely on the top progress bar — no flicker.
+
+### W4. Which `prompt_type` values exist in production right now?
+
+- **Question:** which of the seven enum values are actually live, so
+  the P1 prompt-CTA work is sized correctly?
+- **Observed (Probe):** queried prod DB read-only:
+  ```
+  prompt_type        | status     | count
+  blocker_awareness  | seen       | 2
+  knowledge_gap      | dismissed  | 1
+  knowledge_gap      | seen       | 3
+  ```
+  *Two* prompt types in flight. Five enum values (`stale_goal`,
+  `activity_gap`, `pattern`, `elicitation`, `milestone`) have **never
+  fired** in this database. The schema permits them; `generate_prompts.py`
+  presumably can emit them; nothing has triggered the rules yet.
+- **Verdict (Iris):** **P1 scope shrinks dramatically.** The audit
+  treated the missing CTAs as a system-wide problem; the walkthrough
+  shows it's a *single live case*: `blocker_awareness` is the only
+  prompt-type-actually-fired-today that lacks a CTA. The full action-
+  path table is still the right design for when those other types
+  start firing — but it's no longer urgent. Triage:
+  - **Ship now (P1, narrow):** add CTAs for `blocker_awareness`.
+  - **Ship next (P2):** add the other five action paths, but don't
+    block the felt-experience work behind them. They can land
+    incrementally, paired with whichever rule starts firing.
+- **Concrete CTA proposals per type** (the full table, for when each
+  type goes live):
+
+  | `prompt_type` | Live? | Primary CTA | Destination / behaviour |
+  |---|---|---|---|
+  | `knowledge_gap` | yes | "Add a note" *(exists)* | `/knowledge?addNote=1&tag=…` *(precedent)* |
+  | `blocker_awareness` | **yes — gap** | "Open the goal" + "Mark a blocker resolved" | First button: `openGoalDetail(source_id)` (already wired via "Take me there" — but rename to "Open the goal" for clarity). Second button: opens the goal detail with the Blockers section scrolled to and each row in a quick-resolve state (each blocker chip becomes a button that flips `resolved: true` with a single tap and a toast undo). |
+  | `activity_gap` | no | "Brain dump" *(exists)* | Focus the dump input *(precedent)* |
+  | `stale_goal` | no | "Open goal" + "Mark someday" | First: `openGoalDetail`. Second: one-tap status flip to `someday` with toast undo (no modal). |
+  | `pattern` | no | "Show the dumps" + "Save as knowledge" | First: dump list filtered to the matching tag/source. Second: `/knowledge?addNote=1&content=<pattern body>&tag=…` — the prompt body becomes the knowledge draft. |
+  | `elicitation` | no | "Answer" (inline) | Expand an inline textarea inside the prompt card; submit creates a brain dump with `tag = elicitation:<topic>`. No navigation away. |
+  | `milestone` | no | "Celebrate" + "What's next?" | First: writes a journal entry pre-filled with the milestone text (`/journal?new=1&content=…&tag=milestone`). Second: focus brain-dump pre-filled with *"Now that <milestone>, what's next for <goal>?"* |
+
+  Common rule: every prompt always carries the existing "Got it"
+  dismiss, *plus* at least one positive next action. "Got it" alone is
+  the dead end the audit flagged.
+
+### W5. Does `openGoalDetail` failure silently no-op in practice?
+
+- **Question:** when a goal-detail fetch fails, what does the user see?
+- **Observed (Probe):** confirmed silent dead end. With `/api/goals/*`
+  forced to 500 and `openGoalDetail(1)` invoked, the modal does not
+  open (modal-visible-count = 0), no toast appears (visible-toast count
+  = 0). The function reads `goal.error` and `return`s with no UI side
+  effect. Server log shows the request was received and the 500
+  returned cleanly — failure is purely client-side silent.
+  Source confirmed:
+  ```js
+  async function openGoalDetail(goalId) {
+    const goal = await api(`/goals/${goalId}`);
+    if (goal.error) return;            // ← silent dead end
+    …
+  }
+  ```
+  Same `if (x.error) return;` pattern likely repeats across other
+  detail-loaders (worth a Probe sweep but out of scope here).
+- **Verdict (Iris):** confirmed **P2 → P1**. Audit had this as P2.
+  Walkthrough escalates because the user's *only* signal that something
+  went wrong is the absence of a modal — they tap, nothing happens,
+  they tap again, still nothing. That's the worst possible failure
+  mode: the system looks broken in a way the user can't distinguish
+  from "I missed the click." Promote.
+- **Concrete next step:** every `api()` error response surfaces a toast
+  via a single shared `apiError(err, fallbackMessage)` helper:
+  - 404: *"That goal no longer exists. Refreshing the list…"* +
+    triggers a `loadGoals()` so the stale card disappears.
+  - 5xx: *"Couldn't load goal — try again."* with a Retry button on
+    the toast that re-invokes `openGoalDetail(goalId)`.
+  - Network/offline: *"You're offline. Changes will sync when you're
+    back."*
+  Apply the same wrapper to `openTaskDetail`, `openPersonDetail` (when
+  it exists), `openJournalDetail`, etc. Single helper, every detail
+  loader inherits the recovery story.
+
+### W6. Mobile gestures / pull-to-refresh
+
+- **Question:** markup hints exist (`#ptrIndicator`); does it work?
+- **Observed (Probe):** pull-to-refresh is **fully implemented** in
+  `app.js:2440-2501`. Activates only on touch devices (`'ontouchstart'
+  in window`), threshold 60 px, refreshes the current view's data
+  source (`loadHome` / `loadDumps` / `loadGoals` / etc.), respects
+  modals/overlays, indicator class transitions are clean. No other
+  gestures (swipe, long-press) are wired anywhere in the codebase.
+- **Verdict (Iris):** confirmed working — drop from the audit's
+  "unverified" list. **No new finding.** The PTR implementation is the
+  pattern; future gestures (swipe-to-dismiss on dump rows, long-press
+  on chips for a context menu) are P3 enhancements, not gaps. Note for
+  the next mobile pass: the PTR refresh has a hard `setTimeout(600 ms)`
+  for the indicator hide — fine, but the underlying `load*()` calls
+  are async and may not have completed by then. Cosmetic only —
+  user sees fresh data when it arrives, just sometimes after the
+  indicator's already hidden. Add to the P3 polish list.
+
+---
+
+
 **Severity:**
 
 - **P1 — broken / missing core action.** Surface fails its primary job. The user feels the dead end.
@@ -242,15 +424,16 @@ Empty/error: prompts are non-critical, so silent failure is acceptable. Confirm 
 
 | # | Finding | Fix owner | Proposed fix |
 |---|---|---|---|
-| 1 | Prompt types other than `knowledge_gap`, `activity_gap`, and source-linked → only "Got it." | Lumen (UI), with Vault if any new endpoints needed | Add a per-prompt-type action-path table; each type renders ≥1 primary CTA. Specifics in the Prompts section above. |
+| 1 | `blocker_awareness` prompts (the only type live today besides `knowledge_gap`) ship with only "Got it." | Lumen | Add the two CTAs from the W4 table: "Open the goal" and "Mark a blocker resolved" (latter requires Vault for `PUT /blockers/:id`). The other five prompt types are P2 and ship as each rule starts firing — see W4. |
 | 2 | Brain-dump rows have no detail view — central triage surface has no expand/open. | Lumen | Make the dump row click open a detail modal: full content, all extracted items (approved + suggested + dismissed), retry, delete, re-process. |
 | 3 | Hero goal on home is not clickable. | Lumen | Make the hero card open the goal detail. Make in-hero blocker rows actionable (mark resolved, navigate). |
 | 4 | Goal detail cannot grow the goal. No add-task / add-blocker / add-person from inside the modal. | Lumen | Inline "+ Task" and "+ Blocker" affordances inside the goal detail body; person attach is a deferred dispatch. |
 | 5 | Blocker rows everywhere are display-only — no resolve, no navigate, no edit. | Lumen (probably needs Vault for a `PUT /blockers/:id`) | Make every blocker chip a launcher: tap → resolve / edit / open the related entity. |
 | 6 | Failed dumps on home don't show Retry. | Lumen | Reuse `retryButton(d)` in the home recent-captures render. |
 | 7 | Tags have no management surface. Decorative chips everywhere; no rename / merge / delete / usage view. | Lumen (UI) + Reed (confirm tag-merge semantics) + Vault (endpoints if missing) | Stand up a Tags view: list, count of usages, click-through to filter, rename, merge, delete. Make every tag chip in the app clickable to filter the relevant list. |
-| 8 | (Pending live confirmation) No "Add goal" affordance on `view-goals`. | Lumen | Add the same inline Add pattern used on People / Knowledge. |
-| 9 | (Pending live confirmation) No "Add task" affordance on `view-tasks`. | Lumen | Add inline add at the top of the list, optionally per-group. |
+| 8 | **Confirmed** — no "Add goal" affordance on `view-goals`. Goal creation is brain-dump-only. | Lumen | "+ New goal" header button → right-side drawer (title required, description, target date, status, tags); optimistic insert + flash. See W1 for full spec. |
+| 9 | **Confirmed** — no "Add task" affordance on `view-tasks`. | Lumen | "+ New task" header button → drawer; *plus* per-goal-group "+ task" inline chip on each group header (the affordance that earns its keep daily). See W2. |
+| 9b | **Promoted from P2** — `openGoalDetail` (and likely sibling detail-loaders) silently no-op on error. | Lumen | Single shared `apiError()` helper — toast on 404/5xx/offline with Retry. See W5. |
 
 ### P2 — passive surface / missing affordance
 
@@ -265,7 +448,8 @@ Empty/error: prompts are non-critical, so silent failure is acceptable. Confirm 
 | 16 | Task group header in `view-tasks` not clickable to open the goal. | Lumen | Add a small "Open goal" affordance on the group header (icon link) that doesn't conflict with the collapse toggle. |
 | 17 | Review modal "All suggestions reviewed" tombstone state. | Lumen | Replace with "Done — N items added. [View dump] [Back to dumps]." Or auto-close + scroll-to-dump. |
 | 18 | `navigateToPromptSource` only handles `goal` and `task`. Other source types fall through silently. | Lumen | Cover all source types, or render the "Take me there" button only when handled. |
-| 19 | Detail-load failures (e.g. `openGoalDetail` on a 500) silently no-op. | Lumen | Toast on `error` payloads from `api()`. |
+| 19 | *(Promoted to P1 row 9b after walkthrough — see W5.)* Other detail-loaders (`openTaskDetail`, `openJournalDetail`, future `openPersonDetail`) likely share the same silent-no-op pattern. | Lumen | Apply the W5 `apiError()` wrapper across all detail-loaders. |
+| 19b | Five prompt types (`stale_goal`, `pattern`, `elicitation`, `milestone`, `activity_gap`-without-handler) have no live data yet but no CTAs designed. | Lumen | Land per the W4 table as each rule starts firing. Don't pre-build all five. |
 | 20 | Knowledge `source` rendered as plain text even when it's a URL. | Lumen | Auto-link http(s) sources. |
 | 21 | Journal tag bar can filter but cannot rename / delete tags. | Lumen | Once a Tags surface exists, long-press / right-click on a journal tag pill opens the tag in the Tags view. |
 | 22 | Empty states on Goals / Tasks / Journal lack a CTA button (text only). | Lumen | Add a primary action button into each empty state ("Add your first goal", "Write your first entry"). |
@@ -279,35 +463,95 @@ Empty/error: prompts are non-critical, so silent failure is acceptable. Confirm 
 | 25 | Type badge in review modal is decorative — could open the relevant list. | Lumen | Tap type badge → close modal + navigate to that list (low priority). |
 | 26 | Bulk approve / dismiss in review modal. | Lumen | Add when daily-volume justifies it. |
 | 27 | "Needs review" badge on dump rows is not the affordance — separate Review button is. | Lumen | Make the badge itself the trigger; remove the separate button or keep both with the same handler. |
-| 28 | Loading states absent on slow network. | Lumen + Probe | Skeleton or shimmer for sections that take > 300 ms. |
+| 28 | *(Promoted to P2 — see W3.)* Slow-network behaviour: stale prior render shown silently, no in-flight signal. | Lumen | Top-of-viewport indeterminate progress bar on any `api()` call > 250 ms; first-load skeleton (3 placeholder cards) for empty list views. See W3. |
+| 28b | PTR indicator's `setTimeout(600)` hide is decoupled from the actual reload completion. | Lumen | Tie the indicator hide to the `load*()` promise resolution rather than a fixed timer. |
 | 29 | Empty state on home (first-time user, no dumps, no goals) is sparse. | Lumen | Welcome card with "Capture your first thought" pulling the eye to the dump input. |
 | 30 | Three-dot action menus are always-visible; could collapse to hover-revealed on desktop and tap-only on mobile. | Lumen | Style refinement only; works as-is. |
 
 ---
 
-## Top three recommendations
+## Top three recommendations *(revised post-walkthrough)*
+
+The walkthrough shifted priorities. Prompts shrank — only two types are
+firing today, and `knowledge_gap` already has its CTA — so prompt-CTA
+work is no longer the *first* thing to ship. What rose: the Add-Goal /
+Add-Task gap (now confirmed, not pending) and silent-error recovery
+(promoted from P2 to P1 after watching the failure mode).
 
 If three things shipped, the felt experience would shift from passive to alive:
 
-1. **Make every prompt type carry an action path.** This is already in the queue (`team-practices.md` queued-audits). Promote it. The prompts panel is the *only* place the system speaks to Cam first; if it can't tell him what to do, the system is mute. Without this, the assistant feels passive even when it's working.
+1. **Open the front doors: ship `+ New goal` and `+ New task` on their
+   list views.** Confirmed in the walkthrough — the most important
+   entity in the system has no creation path on the surface dedicated
+   to it, and the second-most-used surface doesn't either. Until this
+   ships, every new goal costs a brain dump, an LLM round-trip, and a
+   review tap; that is too much friction for the *primary* on-ramp to
+   the *primary* entity. Header buttons + drawers (W1, W2). Per-goal
+   inline `+ task` chip is the underrated half of this — it's where
+   tasks actually want to be born. *(Replaces the previous #3
+   recommendation about goal-detail growability — same principle, but
+   the create-from-scratch case is the one that's currently impossible,
+   not just clunky.)*
 
-2. **Stand up Tags as a first-class surface, and make every tag chip clickable.** Tags are the connective tissue of the entire app — they sit on every entity — but right now they are pure decoration. A Tags view with rename / merge / delete + every chip clicking through to a filtered list would *retroactively* turn every existing decorative tag chip in the app into a launchpad. One feature, dozens of dead ends fixed.
+2. **Stand up Tags as a first-class surface, and make every tag chip
+   clickable.** Unchanged from the original audit. Tags are the
+   connective tissue — they sit on every entity but are pure decoration
+   today. One feature retroactively converts dozens of dead-end chips
+   into launchpads. Highest leverage-per-line-of-code in the punch
+   list.
 
-3. **Add a brain-dump detail view, and make the goal detail growable.** Two surfaces, same principle — the most-used triage screen and the most-important entity in the system both currently bottom out. A dump should open into "here's everything I extracted, edit / re-process / see source"; a goal should let you add tasks and resolve blockers without leaving its modal. These two changes end the "view, then leave" pattern at the two surfaces it costs the most.
+3. **Make the system stop failing silently: shared `apiError()` toast +
+   recovery, plus a global in-flight progress bar.** Two findings from
+   the walkthrough collapse into one shippable change. (a) Today, when
+   `openGoalDetail` hits a 500, the user taps and *nothing happens* —
+   indistinguishable from a missed click (W5). (b) On a slow fetch,
+   the user sees stale data with no signal a refresh is in flight
+   (W3). Both are violations of *"the user can recover from any
+   action"* and *"every state continues the flow."* Single shared
+   helper for errors + a single thin top-of-viewport progress bar gets
+   recovery and responsiveness across the entire app in one pass —
+   no per-surface skeleton work, no per-handler error code.
 
-Common thread: **stop treating data display as the end state.** Every chip, name, badge, and pill in this app is a piece of structured knowledge — and structured knowledge is exactly the thing that should be clickable.
+**Demoted from the previous top three:** the prompts CTA work. Still
+P1 for `blocker_awareness` (the one live gap), but the audit's
+original framing — *"every prompt type is a dead end"* — turns out to
+be theoretical. Five of the seven enum values have never fired. Land
+the `blocker_awareness` CTAs as part of normal P1 work; design the
+other five per the W4 table; ship each as its rule starts firing.
+
+**Also still queued, just below the top three:** the brain-dump detail
+view and goal-detail growability (was #3). Both still P1, both still
+matter, but the walkthrough surfaced that the *create* path matters
+more than the *grow* path right now — you can't grow what doesn't
+exist, and right now creation has no front door.
+
+Common thread: **stop treating data display as the end state.** Every
+chip, name, badge, and pill in this app is a piece of structured
+knowledge — and structured knowledge is exactly the thing that should
+be clickable. The walkthrough adds a second thread: **the system's
+silences are louder than its noises.** A failed fetch that says
+nothing, an Add button that doesn't exist, a prompt with no second
+button — these are the moments the user feels the system isn't really
+*there*. Fix the silences first.
 
 ---
 
 ## Surfaces I could not audit from code alone — queue with Probe
 
-- **Add Goal** on `view-goals` — I cannot find an inline or modal Add form. Need Probe to confirm whether goal creation is genuinely brain-dump-only or whether I missed it.
-- **Add Task** on `view-tasks` — same.
-- **Loading states on slow network** — code shows no skeletons; need Probe to confirm whether sections gracefully degrade or flash empty.
-- **Prompt types in production** — I read code, not data. Need Probe (or a quick Reed query) to enumerate which `prompt_type` values actually appear in production right now, so the action-path work in P1 is sized correctly.
-- **Detail-load error path** — code suggests `openGoalDetail` silently no-ops on `error`. Need Probe to trigger one (force a 500) and confirm the user sees nothing.
-- **Mobile gestures** — long-press, swipe, pull-to-refresh — present in markup (`ptr-indicator`) but I haven't traced the JS. Defer to a mobile-specific pass after Probe confirms behaviour.
+*All six items resolved in the Walkthrough resolutions section above
+(2026-04-26 dispatch).* Two items remain genuinely deferred:
+
+- **Real iPhone PWA pass** — pull-to-refresh works in browser; iOS
+  PWA standalone-mode quirks are out of scope for this dispatch.
+  Probe will sweep on next mobile-touching change.
+- **Sweep for sibling silent-no-op patterns** — `openTaskDetail`,
+  `openJournalDetail`, etc. likely share `openGoalDetail`'s
+  `if (x.error) return;` pattern. Probe to enumerate before the W5
+  fix lands so the `apiError()` helper covers them all in one pass.
 
 ---
 
-*Iris, 2026-04-26. First artefact. Audit is a first-pass; expect to iterate after the live walkthrough with Probe and Cam.*
+*Iris, 2026-04-26. First artefact + walkthrough resolutions.
+Audit revised after live recon with Probe; top three reflect the
+new evidence. Expect a second iteration after the first P1 fixes
+ship and Cam uses them on his phone for a week.*
