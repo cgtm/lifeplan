@@ -261,10 +261,15 @@ README
 chown "$APP_USER:$APP_USER" /opt/lifeplan/SETUP.md
 
 # ── 6. Sudoers rule for passwordless service restart ─────────────
+# Source of truth: scripts/install-sudoers.sh. We inline the same content
+# here (server-setup.sh already runs as root via `sudo bash`) to keep this
+# script self-contained, but the standalone install-sudoers.sh is the
+# operator-applied path for fixing prod without re-running everything.
 echo ""
 echo "--- setting up sudoers for deploy ---"
 cat > /etc/sudoers.d/lifeplan <<'SUDOERS'
-# Allow your-user to restart the lifeplan service + worker without a password
+# Allow your-user to restart the lifeplan service + worker without a password.
+# Keep verbs in sync with scripts/install-sudoers.sh and deploy.sh.
 your-user ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart lifeplan, /usr/bin/systemctl stop lifeplan, /usr/bin/systemctl start lifeplan, /usr/bin/systemctl status lifeplan, /usr/bin/systemctl restart lifeplan-worker, /usr/bin/systemctl stop lifeplan-worker, /usr/bin/systemctl start lifeplan-worker, /usr/bin/systemctl status lifeplan-worker
 SUDOERS
 chmod 0440 /etc/sudoers.d/lifeplan

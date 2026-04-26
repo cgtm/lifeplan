@@ -77,11 +77,13 @@ fi
 # ── Restart the service ──────────────────────────────────────────
 echo ""
 echo "--- restarting lifeplan service ---"
-ssh "$SERVER" "sudo systemctl restart lifeplan"
-# Worker shares the codebase; restart so it picks up new code. Skip silently
-# if the unit isn't installed yet (first deploy after Phase 5 lands but
-# before server-setup.sh has been re-run to install the unit file).
-ssh "$SERVER" "systemctl list-unit-files lifeplan-worker.service >/dev/null 2>&1 && sudo systemctl restart lifeplan-worker || echo '    (lifeplan-worker not installed yet -- skipping)'"
+ssh "$SERVER" "sudo -n systemctl restart lifeplan"
+# Worker shares the codebase; restart so it picks up new code. Use a file-existence
+# check on the unit file -- doesn't depend on systemctl semantics or sudoers, and
+# avoids the previous A && B || C bug where a sudo failure was misreported as
+# "not installed yet". If the file is present, restart and let any sudo error
+# surface loudly (-n makes sudo fail instead of prompting).
+ssh "$SERVER" "if [ -f /etc/systemd/system/lifeplan-worker.service ]; then sudo -n systemctl restart lifeplan-worker; else echo '    (lifeplan-worker not installed yet -- skipping)'; fi"
 sleep 2
 
 # ── Health check ─────────────────────────────────────────────────
