@@ -503,10 +503,12 @@ function renderHome(data) {
   // Primary goal hero
   const pg = data.primary_goal;
   if (pg) {
-    const unresolvedBlockers = pg.blockers.filter(b => !b.resolved);
-    const resolvedBlockers = pg.blockers.filter(b => b.resolved);
+    // Hero shows active blockers only (per Iris's spec). Resolved ones
+    // surface inside the goal-detail modal so they're not lost — just
+    // not in the hero's "what's blocking me right now?" attention area.
+    const unresolvedBlockers = (pg.blockers || []).filter(b => !b.resolved);
     $('#homeHero').innerHTML = `
-      <div class="hero-goal fade-in">
+      <div class="hero-goal hero-goal--clickable fade-in" data-goal-id="${pg.id}" role="button" tabindex="0" aria-label="Open ${esc(pg.title)}">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
           ${statusPill(pg.status)}
           ${pg.target_date ? `<span style="font-size:0.6875rem;color:var(--text-3)">Target: ${fmtDate(pg.target_date)}</span>` : ''}
@@ -515,17 +517,14 @@ function renderHome(data) {
         <div class="hero-goal-desc">${esc(pg.description)}</div>
         ${unresolvedBlockers.length ? `
           <div class="blockers-label">Blockers (${unresolvedBlockers.length} unresolved)</div>
-          ${unresolvedBlockers.map(b => `
-            <div class="blocker-item">
-              <div class="blocker-icon blocking">!</div>
-              <span class="blocker-name">${esc(b.blocker_name)}</span>
-              <span class="blocker-type">${esc(b.blocker_type)}</span>
-              ${b.blocker_status ? statusPill(b.blocker_status) : ''}
-            </div>
-          `).join('')}
+          <div class="hero-blockers" data-stop-card-click="1">
+            ${unresolvedBlockers.map(b => renderBlockerItem(b)).join('')}
+          </div>
         ` : '<div style="font-size:0.8125rem;color:var(--green)">No unresolved blockers</div>'}
       </div>
     `;
+    bindHeroGoalCard(pg.id);
+    bindBlockerItems('#homeHero', { onRefresh: () => loadHome() });
   }
 
   // Active goals
@@ -587,6 +586,7 @@ function renderHome(data) {
           <div class="dump-item-header">
             <span class="dump-time">${fmtRelative(d.captured_at)}</span>
             ${processingStatusLabel(d)}
+            ${retryButton(d)}
           </div>
           <div class="dump-item-content">${esc(d.content)}</div>
           ${processingResultsPills(d)}
@@ -595,6 +595,14 @@ function renderHome(data) {
       `).join('')}
     `;
     bindResultPills('#homeRecentDumps');
+    // Wire failed-dump Retry buttons (same pattern as the Dump view).
+    $('#homeRecentDumps').querySelectorAll('.dump-retry-btn[data-action="retry"]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const id = parseInt(btn.dataset.dumpId);
+        btn.disabled = true;
+        retryBrainDump(id);
+      });
+    });
   } else {
     $('#homeRecentDumps').innerHTML = '';
   }
@@ -604,6 +612,26 @@ function renderHome(data) {
     if (_hasInflightDump()) startBrainDumpPolling();
     else stopBrainDumpPolling();
   }
+}
+
+// Whole-card click on the hero opens the goal detail. Clicks on
+// blocker rows (which have their own toggle/navigate logic) bubble up
+// here and we filter them out via the [data-stop-card-click] guard.
+function bindHeroGoalCard(goalId) {
+  const card = document.querySelector('.hero-goal--clickable');
+  if (!card) return;
+  const open = () => openGoalDetail(goalId);
+  card.addEventListener('click', (e) => {
+    if (e.target.closest('[data-stop-card-click]')) return;
+    if (e.target.closest('.blocker-item')) return;
+    open();
+  });
+  card.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      open();
+    }
+  });
 }
 
 // ── Home brain dump ─────────────────────────────────────
@@ -764,12 +792,18 @@ function renderPrompts() {
     const hasSource = p.source_type && p.source_id;
     const isActivityGap = p.prompt_type === 'activity_gap' && p.trigger_rule && p.trigger_rule.includes('dump');
     const isKnowledgeGap = p.prompt_type === 'knowledge_gap';
+    const isBlockerAwareness = p.prompt_type === 'blocker_awareness';
 
+    // "Got it" stays as the secondary dismiss across all prompt types.
     let actionsHtml = `<button class="prompt-btn" onclick="dismissPrompt(${p.id})">Got it</button>`;
     if (isKnowledgeGap) {
       actionsHtml += `<button class="prompt-btn prompt-btn-primary" onclick="addNoteFromPrompt(${p.id})">Add a note</button>`;
     }
-    if (hasSource) {
+    if (isBlockerAwareness && hasSource && p.source_type === 'goal') {
+      // Iris W4: dedicated CTAs replacing the generic "Take me there".
+      actionsHtml += `<button class="prompt-btn prompt-btn-primary" onclick="openGoalFromPrompt(${p.source_id})">Open the goal</button>`;
+      actionsHtml += `<button class="prompt-btn prompt-btn-primary" onclick="resolveBlockerFromPrompt(${p.id}, ${p.source_id})">Mark resolved</button>`;
+    } else if (hasSource) {
       actionsHtml += `<button class="prompt-btn prompt-btn-primary" onclick="navigateToPromptSource('${esc(p.source_type)}', ${p.source_id})">Take me there</button>`;
     }
     if (isActivityGap) {
@@ -848,6 +882,81 @@ function navigateToPromptSource(sourceType, sourceId) {
   } else if (sourceType === 'task') {
     navigate('tasks');
   }
+}
+
+// blocker_awareness CTA: "Open the goal".
+function openGoalFromPrompt(goalId) {
+  navigate('goals');
+  setTimeout(() => openGoalDetail(goalId), 200);
+}
+
+// blocker_awareness CTA: "Mark resolved". One blocker → resolve directly
+// with toast undo. Multiple → tiny picker. Zero → tell the user.
+async function resolveBlockerFromPrompt(promptId, goalId) {
+  let goal;
+  try {
+    goal = await apiTry(`/goals/${goalId}`);
+  } catch (err) {
+    apiError(err);
+    return;
+  }
+  const active = (goal.blockers || []).filter(b => !b.resolved);
+  if (!active.length) {
+    showToast('No active blockers on this goal.');
+    return;
+  }
+  if (active.length === 1) {
+    await toggleBlockerResolved(active[0].id, true, {
+      onRefresh: () => loadHome(),
+    });
+    return;
+  }
+  openBlockerPicker(active, async (blockerId) => {
+    await toggleBlockerResolved(blockerId, true, {
+      onRefresh: () => loadHome(),
+    });
+  });
+}
+
+// Tiny inline picker — appended to body, dismissible via overlay tap.
+// Lives outside the prompt card so it's not clipped by the card's
+// overflow/padding.
+function openBlockerPicker(blockers, onPick) {
+  // Strip any existing instance.
+  document.querySelectorAll('.blocker-picker-overlay').forEach(el => el.remove());
+  const overlay = document.createElement('div');
+  overlay.className = 'blocker-picker-overlay';
+  overlay.innerHTML = `
+    <div class="blocker-picker" role="dialog" aria-label="Pick a blocker to resolve">
+      <div class="blocker-picker-title">Which blocker?</div>
+      ${blockers.map(b => `
+        <button type="button" class="blocker-picker-item" data-blocker-id="${b.id}">
+          <span class="blocker-icon blocking">!</span>
+          <span class="blocker-name">${esc(b.blocker_name || '(unnamed)')}</span>
+          <span class="blocker-type">${esc(b.blocker_type)}</span>
+        </button>
+      `).join('')}
+      <button type="button" class="blocker-picker-cancel">Cancel</button>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  requestAnimationFrame(() => overlay.classList.add('visible'));
+
+  const close = () => {
+    overlay.classList.remove('visible');
+    setTimeout(() => overlay.remove(), 200);
+  };
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) close();
+  });
+  overlay.querySelector('.blocker-picker-cancel').addEventListener('click', close);
+  overlay.querySelectorAll('.blocker-picker-item').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = parseInt(btn.dataset.blockerId);
+      close();
+      onPick(id);
+    });
+  });
 }
 
 function focusBrainDump() {
@@ -1023,12 +1132,171 @@ function showToast(msg) {
   _toastTimer = setTimeout(() => el.classList.remove('visible'), 2800);
 }
 
+// ── Blocker UI helpers (shared across hero, goal-detail, prompts) ──
+//
+// Contract: app/contracts/blockers.md. PUT ${MOUNT}api/blockers/<id>
+// with {resolved: bool}. The handler dual-writes resolved + resolved_at.
+//
+// Render contract: a blocker row is clickable-to-navigate (if it has a
+// related entity) and tap-to-resolve (the leading icon is the toggle).
+// Resolved rows render dimmed via .blocker--resolved.
+function renderBlockerItem(b, opts = {}) {
+  // opts: { onResolveRefresh, allowNavigate=true }
+  const resolved = !!b.resolved;
+  const navigable =
+    opts.allowNavigate !== false &&
+    (b.blocker_type === 'goal' || b.blocker_type === 'task') &&
+    b.blocker_id != null;
+  const resolvedTag =
+    resolved && b.resolved_at
+      ? `<span class="blocker-resolved-tag">resolved ${esc(fmtRelative(b.resolved_at))}</span>`
+      : '';
+  return `
+    <div class="blocker-item ${resolved ? 'blocker--resolved' : ''} ${
+    navigable ? 'blocker--navigable' : ''
+  }" data-blocker-id="${b.id}" data-blocker-type="${esc(b.blocker_type)}" data-blocker-target-id="${b.blocker_id ?? ''}">
+      <button type="button" class="blocker-toggle" data-action="toggle-resolve"
+              aria-label="${resolved ? 'Mark unresolved' : 'Mark resolved'}"
+              aria-pressed="${resolved}">
+        <span class="blocker-icon ${resolved ? 'resolved' : 'blocking'}">${
+    resolved ? '✓' : '!'
+  }</span>
+      </button>
+      <span class="blocker-name" data-action="${navigable ? 'navigate' : ''}">${esc(b.blocker_name || '(unnamed)')}</span>
+      <span class="blocker-type">${esc(b.blocker_type)}</span>
+      ${b.blocker_status && !resolved ? statusPill(b.blocker_status) : ''}
+      ${resolvedTag}
+    </div>`;
+}
+
+// Wires up tap-to-resolve and click-to-navigate within a container that
+// has rendered .blocker-item rows via renderBlockerItem(). Idempotent —
+// safe to call after each re-render (binds via closure on the elements
+// that exist now).
+function bindBlockerItems(container, opts = {}) {
+  const root = typeof container === 'string' ? document.querySelector(container) : container;
+  if (!root) return;
+  root.querySelectorAll('.blocker-item').forEach(row => {
+    const blockerId = parseInt(row.dataset.blockerId);
+    const blockerType = row.dataset.blockerType;
+    const targetId = row.dataset.blockerTargetId
+      ? parseInt(row.dataset.blockerTargetId)
+      : null;
+
+    // Resolve toggle — leading icon button.
+    const toggle = row.querySelector('[data-action="toggle-resolve"]');
+    if (toggle) {
+      toggle.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const wasResolved = row.classList.contains('blocker--resolved');
+        toggleBlockerResolved(blockerId, !wasResolved, {
+          onRefresh: opts.onRefresh,
+          row,
+        });
+      });
+    }
+
+    // Whole-row click navigates when navigable. Skipped on the toggle.
+    if (row.classList.contains('blocker--navigable')) {
+      row.addEventListener('click', (e) => {
+        if (e.target.closest('[data-action="toggle-resolve"]')) return;
+        e.stopPropagation();
+        navigateToBlockerTarget(blockerType, targetId);
+      });
+    }
+  });
+}
+
+function navigateToBlockerTarget(blockerType, targetId) {
+  if (!targetId) return;
+  if (blockerType === 'goal') {
+    // Close the goal-detail modal first if it's open — opening another
+    // goal detail on top of itself looks broken.
+    const existing = document.querySelector('#goalDetailOverlay.visible');
+    if (existing) closeModal($('#goalDetailOverlay'));
+    setTimeout(() => openGoalDetail(targetId), existing ? 220 : 0);
+  } else if (blockerType === 'task') {
+    // No task-detail modal yet; navigate to the tasks list.
+    navigate('tasks');
+  }
+  // external_system has no detail surface — silent no-op.
+}
+
+// Optimistic resolve / un-resolve with toast undo.
+//
+// `nextResolved` is the desired post-click state (true = mark resolved).
+// On success we update row classes + the toast offers Undo for ~5s.
+// On failure we revert + show a generic error toast.
+async function toggleBlockerResolved(blockerId, nextResolved, opts = {}) {
+  const row = opts.row || document.querySelector(`.blocker-item[data-blocker-id="${blockerId}"]`);
+  // Optimistic flip — class only; the next refresh will re-render with
+  // the resolved_at timestamp tag.
+  if (row) {
+    row.classList.toggle('blocker--resolved', nextResolved);
+    const icon = row.querySelector('.blocker-icon');
+    if (icon) {
+      icon.classList.toggle('resolved', nextResolved);
+      icon.classList.toggle('blocking', !nextResolved);
+      icon.textContent = nextResolved ? '✓' : '!';
+    }
+  }
+  try {
+    await apiTry(`/blockers/${blockerId}`, {
+      method: 'PUT',
+      body: { resolved: nextResolved },
+    });
+    // Success — offer Undo via toast.
+    _toastWithAction(
+      nextResolved ? 'Marked resolved.' : 'Marked unresolved.',
+      'Undo',
+      () => toggleBlockerResolved(blockerId, !nextResolved, opts),
+    );
+    if (typeof opts.onRefresh === 'function') opts.onRefresh();
+  } catch (err) {
+    // Revert.
+    if (row) {
+      row.classList.toggle('blocker--resolved', !nextResolved);
+      const icon = row.querySelector('.blocker-icon');
+      if (icon) {
+        icon.classList.toggle('resolved', !nextResolved);
+        icon.classList.toggle('blocking', nextResolved);
+        icon.textContent = !nextResolved ? '✓' : '!';
+      }
+    }
+    if (err && err.status === 404) {
+      showToast('That blocker is no longer here.');
+      if (typeof opts.onRefresh === 'function') opts.onRefresh();
+    } else {
+      showToast(nextResolved ? "Couldn't mark resolved." : "Couldn't undo.");
+    }
+  }
+}
+
 // ── Retry handler (background-processing contract) ──────────
 async function retryBrainDump(id) {
   const dump = allDumps.find(d => d.id === id);
   // Optimistic flip — mutate local model, re-render, then fire request.
   if (dump) dump.processing_status = 'queued';
   if (currentView === 'dump') renderDumps();
+  // On home, the dump lives in dashboard data not allDumps. Flip the
+  // badge in place so the user sees the state change without waiting
+  // for the next 3s poll.
+  if (currentView === 'home') {
+    const homeBadge = document.querySelector(
+      `#homeRecentDumps .dump-item .dump-badge[data-dump-status="failed"]`,
+    );
+    // Best-effort: if there's exactly one failed badge in the list,
+    // flip its label. Otherwise the polling round will resync.
+    if (homeBadge) {
+      homeBadge.dataset.dumpStatus = 'queued';
+      homeBadge.className = 'dump-badge pending';
+      homeBadge.textContent = 'Pending';
+    }
+    const retryBtn = document.querySelector(
+      `#homeRecentDumps .dump-retry-btn[data-dump-id="${id}"]`,
+    );
+    if (retryBtn) retryBtn.remove();
+  }
   try {
     const res = await fetch(`${MOUNT}api/brain-dumps/${id}/retry`, {
       method: 'POST',
@@ -1568,7 +1836,14 @@ async function openGoalDetail(goalId) {
   const tasks = goal.tasks || [];
   const activeTasks = tasks.filter(t => t.status === 'active' || t.status === 'waiting');
   const completedTasks = tasks.filter(t => t.status === 'completed');
-  const unresolvedBlockers = (goal.blockers || []).filter(b => !b.resolved);
+  // Blockers section in the modal: show all (active first, then
+  // resolved). Resolved render dimmed via .blocker--resolved. This is
+  // where the user can find what they recently resolved if they want
+  // to undo or re-open it.
+  const allBlockers = goal.blockers || [];
+  const activeBlockers = allBlockers.filter(b => !b.resolved);
+  const resolvedBlockers = allBlockers.filter(b => b.resolved);
+  const orderedBlockers = [...activeBlockers, ...resolvedBlockers];
 
   $('#goalDetailBody').innerHTML = `
     <div class="goal-detail-status">${statusPill(goal.status)}</div>
@@ -1586,16 +1861,16 @@ async function openGoalDetail(goalId) {
       </div>
     ` : ''}
 
-    ${unresolvedBlockers.length ? `
+    ${orderedBlockers.length ? `
       <div class="goal-detail-section">
-        <div class="goal-detail-section-title">Blockers</div>
-        ${unresolvedBlockers.map(b => `
-          <div class="blocker-item">
-            <div class="blocker-icon blocking">!</div>
-            <span class="blocker-name">${esc(b.blocker_name)}</span>
-            <span class="blocker-type">${esc(b.blocker_type)}</span>
-          </div>
-        `).join('')}
+        <div class="goal-detail-section-title">Blockers${
+          activeBlockers.length
+            ? ` (${activeBlockers.length} active)`
+            : ' (all resolved)'
+        }</div>
+        <div class="goal-detail-blockers">
+          ${orderedBlockers.map(b => renderBlockerItem(b)).join('')}
+        </div>
       </div>
     ` : ''}
 
@@ -1636,6 +1911,9 @@ async function openGoalDetail(goalId) {
       openGoalDetail(goalId); // refresh
     });
   });
+
+  // Bind blocker rows — toggle resolve + navigate to related entity.
+  bindBlockerItems('#goalDetailBody', { onRefresh: () => openGoalDetail(goalId) });
 
   // Add edit/delete footer to goal detail modal
   const existingFooter = document.querySelector('#goalDetailOverlay .modal-footer');

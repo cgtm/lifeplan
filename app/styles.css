@@ -399,6 +399,21 @@ button.tag:active,
   margin-bottom: 32px;
 }
 
+.hero-goal--clickable {
+  cursor: pointer;
+  transition: border-color 120ms ease, transform 120ms ease, box-shadow 120ms ease;
+}
+.hero-goal--clickable:hover {
+  border-color: var(--text-3);
+}
+.hero-goal--clickable:focus-visible {
+  outline: 2px solid var(--accent, var(--text));
+  outline-offset: 2px;
+}
+.hero-goal--clickable:active {
+  transform: translateY(1px);
+}
+
 .hero-goal-title {
   font-size: 1.125rem;
   font-weight: 600;
@@ -430,9 +445,58 @@ button.tag:active,
   padding: 8px 0;
   border-bottom: 1px solid var(--border-lt);
   font-size: 0.8125rem;
+  transition: opacity 160ms ease;
 }
 
 .blocker-item:last-child { border-bottom: none; }
+
+/* Whole row navigates when the blocker has a related goal/task. */
+.blocker-item.blocker--navigable .blocker-name {
+  cursor: pointer;
+}
+.blocker-item.blocker--navigable:hover .blocker-name {
+  color: var(--text);
+  text-decoration: underline;
+  text-decoration-color: var(--border);
+  text-underline-offset: 2px;
+}
+
+/* Resolved row — dimmed, not struck. Subtle fade per Iris. */
+.blocker-item.blocker--resolved {
+  opacity: 0.5;
+}
+.blocker-item.blocker--resolved .blocker-name {
+  text-decoration: line-through;
+  text-decoration-color: var(--text-3);
+  text-decoration-thickness: 1px;
+}
+
+/* The leading icon is a tap-target button. Bare button reset + a
+   comfortable 32px hit area on desktop, expanded to 44px on mobile via
+   the media query at the bottom of this file. */
+.blocker-toggle {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border-radius: var(--radius-sm, 6px);
+  flex-shrink: 0;
+  transition: background-color 120ms ease;
+}
+.blocker-toggle:hover {
+  background: var(--surface-2, var(--border-lt));
+}
+.blocker-toggle:focus-visible {
+  outline: 2px solid var(--accent, var(--text));
+  outline-offset: -2px;
+}
 
 .blocker-icon {
   width: 18px;
@@ -443,6 +507,8 @@ button.tag:active,
   justify-content: center;
   font-size: 0.625rem;
   flex-shrink: 0;
+  font-weight: 600;
+  line-height: 1;
 }
 
 .blocker-icon.blocking {
@@ -458,6 +524,9 @@ button.tag:active,
 .blocker-name {
   color: var(--text);
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .blocker-type {
@@ -465,7 +534,82 @@ button.tag:active,
   color: var(--text-3);
   text-transform: uppercase;
   letter-spacing: 0.03em;
+  flex-shrink: 0;
 }
+
+.blocker-resolved-tag {
+  font-size: 0.625rem;
+  color: var(--text-3);
+  font-style: italic;
+  flex-shrink: 0;
+}
+
+/* Tiny picker — overlay shown when a blocker_awareness prompt's
+   "Mark resolved" hits a goal with multiple active blockers. */
+.blocker-picker-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.32);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  opacity: 0;
+  transition: opacity 160ms ease;
+  padding: 24px;
+}
+.blocker-picker-overlay.visible { opacity: 1; }
+
+.blocker-picker {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  width: 100%;
+  max-width: 360px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.16);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.blocker-picker-title {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 4px;
+}
+.blocker-picker-item {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 8px;
+  border-radius: var(--radius-md, 8px);
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  width: 100%;
+}
+.blocker-picker-item:hover {
+  background: var(--surface-2, var(--border-lt));
+}
+.blocker-picker-cancel {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 8px);
+  padding: 8px 12px;
+  margin-top: 8px;
+  cursor: pointer;
+  font: inherit;
+  color: var(--text-2);
+}
+.blocker-picker-cancel:hover { color: var(--text); }
 
 /* ── Section headers ──────────────────────────────────────── */
 .section-header {
@@ -1526,6 +1670,13 @@ button.tag:active,
   }
 
   .blocker-item { min-height: 44px; }
+
+  /* Iris's device-pass: the resolve toggle is the primary mobile
+     affordance, so promote it to a full 44pt hit area. */
+  .blocker-toggle {
+    width: 44px;
+    height: 44px;
+  }
 
   .btn, .btn-primary, .btn-danger, .btn-review {
     padding: 10px 16px;
