@@ -507,16 +507,24 @@
     </div>
   </div>
 
-  <!-- ══ REVIEW MODAL ════════════════════════════════════════ -->
-  <div class="overlay hidden" id="reviewOverlay">
-    <div class="modal" style="width:min(640px, calc(100vw - 48px))">
+  <!-- ══ DUMP DETAIL DRAWER ══════════════════════════════════ -->
+  <!-- Right-anchored drawer on desktop, bottom-sheet on mobile.       -->
+  <!-- Mirrors #tagDrawerOverlay shape so lateral navigation feels     -->
+  <!-- consistent. Subsumes the old review modal entirely.             -->
+  <div class="overlay overlay-drawer hidden" id="dumpDetailOverlay">
+    <div class="modal modal-drawer">
       <div class="modal-header">
-        <h2 id="reviewTitle">Review Suggestions</h2>
-        <button class="modal-close" id="reviewClose">&times;</button>
+        <div style="min-width:0;flex:1">
+          <div class="dump-detail-time" id="dumpDetailTime">just now</div>
+          <div class="dump-detail-meta" id="dumpDetailMeta"></div>
+        </div>
+        <div class="dump-detail-header-actions" id="dumpDetailHeaderActions"></div>
+        <button class="modal-close" id="dumpDetailClose">&times;</button>
       </div>
-      <div class="modal-body" id="reviewBody">
-        <!-- Populated dynamically -->
+      <div class="modal-body" id="dumpDetailBody">
+        <div class="empty-state"><p>Loading&hellip;</p></div>
       </div>
+      <div class="modal-footer dump-detail-footer" id="dumpDetailFooter"></div>
     </div>
   </div>
 

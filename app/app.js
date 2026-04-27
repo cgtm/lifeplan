@@ -582,7 +582,7 @@ function renderHome(data) {
     $('#homeRecentDumps').innerHTML = `
       <div class="section-header" style="margin-top:32px">Recent Captures</div>
       ${dumps.map(d => `
-        <div class="dump-item fade-in">
+        <div class="dump-item dump-item-clickable fade-in" data-dump-id="${d.id}" role="button" tabindex="0">
           <div class="dump-item-header">
             <span class="dump-time">${fmtRelative(d.captured_at)}</span>
             ${processingStatusLabel(d)}
@@ -597,10 +597,41 @@ function renderHome(data) {
     bindResultPills('#homeRecentDumps');
     // Wire failed-dump Retry buttons (same pattern as the Dump view).
     $('#homeRecentDumps').querySelectorAll('.dump-retry-btn[data-action="retry"]').forEach(btn => {
-      btn.addEventListener('click', () => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
         const id = parseInt(btn.dataset.dumpId);
         btn.disabled = true;
         retryBrainDump(id);
+      });
+    });
+    // Whole-row click opens the detail drawer. Home doesn't keep the
+    // dump list in allDumps, so we fetch the row by id on demand.
+    $('#homeRecentDumps').querySelectorAll('.dump-item-clickable').forEach(row => {
+      const open = async () => {
+        const id = parseInt(row.dataset.dumpId);
+        // Sync allDumps so the detail drawer can read from local state
+        // (it's the source of truth for poll-driven re-renders).
+        try {
+          allDumps = await api('/brain-dumps');
+        } catch (_) { /* fall through; the detail will still render from
+                         the dashboard row if the network blips */ }
+        const dump = (allDumps || []).find(d => d.id === id) ||
+                     (data.recent_dumps || []).find(d => d.id === id);
+        if (dump) openDumpDetail(dump);
+      };
+      row.addEventListener('click', (e) => {
+        if (e.target.closest('.card-actions')) return;
+        if (e.target.closest('.dump-retry-btn')) return;
+        if (e.target.closest('.result-pill-clickable')) return;
+        if (e.target.closest('.result-detail-item')) return;
+        if (e.target.closest('.tag-chip')) return;
+        open();
+      });
+      row.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          open();
+        }
       });
     });
   } else {
@@ -1439,16 +1470,14 @@ function renderDumps() {
       ? d.processed_items.items.filter(i => i.status === 'suggested').length
       : 0;
     return `
-      <div class="dump-item fade-in">
+      <div class="dump-item dump-item-clickable fade-in" data-dump-id="${d.id}" role="button" tabindex="0">
         <div class="dump-item-header">
           <span class="dump-time">${fmtRelative(d.captured_at)}</span>
           ${processingStatusLabel(d)}
           ${retryButton(d)}
           <span style="flex:1"></span>
           ${needsReview && suggestedCount > 0 ? `
-            <button class="btn-review" data-dump-id="${d.id}">
-              Review ${suggestedCount} suggestion${suggestedCount > 1 ? 's' : ''}
-            </button>
+            <span class="dump-suggest-count">${suggestedCount} pending</span>
           ` : ''}
           ${d.processing_status === 'unprocessed' ? `
             <span class="dump-toggle" data-dump-id="${d.id}" data-action="process">Process</span>
@@ -1462,12 +1491,28 @@ function renderDumps() {
     `;
   }).join('');
 
-  // Bind review buttons
-  el.querySelectorAll('.btn-review').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const dumpId = parseInt(btn.dataset.dumpId);
+  // Whole-row click opens the detail drawer. Skip when click originates
+  // from a control inside the row (action menu, retry button, process
+  // toggle, result pills, tag chips) so those keep their own behaviour.
+  el.querySelectorAll('.dump-item-clickable').forEach(row => {
+    row.addEventListener('click', (e) => {
+      if (e.target.closest('.card-actions')) return;
+      if (e.target.closest('.dump-retry-btn')) return;
+      if (e.target.closest('.dump-toggle')) return;
+      if (e.target.closest('.result-pill-clickable')) return;
+      if (e.target.closest('.result-detail-item')) return;
+      if (e.target.closest('.tag-chip')) return;
+      const dumpId = parseInt(row.dataset.dumpId);
       const dump = allDumps.find(d => d.id === dumpId);
-      if (dump) openReviewModal(dump);
+      if (dump) openDumpDetail(dump);
+    });
+    row.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        const dumpId = parseInt(row.dataset.dumpId);
+        const dump = allDumps.find(d => d.id === dumpId);
+        if (dump) openDumpDetail(dump);
+      }
     });
   });
 
@@ -1553,10 +1598,15 @@ dumpSend.addEventListener('click', async () => {
 });
 
 // ══════════════════════════════════════════════════════════
-// REVIEW MODAL
+// DUMP DETAIL DRAWER
+// ──────────────────────────────────────────────────────────
+// Iris's design (docs/ux-design/2026-04-27-brain-dump-detail.md):
+// the dump stops being a one-way drop box. Tap any captured thought
+// and you land here. Subsumes the old review modal entirely.
 // ══════════════════════════════════════════════════════════
 
-let reviewingDumpId = null;
+let _currentDumpDetailId = null;
+let _dumpDetailEditing = false;
 
 function confidenceLabel(conf) {
   if (conf >= 0.80) return 'likely';
@@ -1566,7 +1616,7 @@ function confidenceLabel(conf) {
 
 function reviewItemTitle(item) {
   const t = item.type;
-  const d = item.data;
+  const d = item.data || {};
   if (t === 'task') return d.title || 'Untitled task';
   if (t === 'knowledge') return d.title || 'Untitled knowledge';
   if (t === 'person_new') return `New person: ${d.name || 'Unknown'}`;
@@ -1581,181 +1631,497 @@ function reviewItemTypeLabel(type) {
   const labels = {
     'task': 'Task',
     'knowledge': 'Knowledge',
-    'person_new': 'New Person',
+    'person_new': 'Person',
     'person_mention': 'Person',
     'tag': 'Tag',
-    'goal_link': 'Goal Link',
-    'goal_new': 'New Goal',
+    'goal_link': 'Goal',
+    'goal_new': 'Goal',
   };
   return labels[type] || type;
 }
 
-function openReviewModal(dump) {
-  reviewingDumpId = dump.id;
-  const items = dump.processed_items && dump.processed_items.items
-    ? dump.processed_items.items
-    : [];
+// Pretty exact-time line under the relative timestamp.
+function _dumpDetailExactTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts.replace(' ', 'T') + 'Z');
+  return d.toLocaleDateString('en-GB', {
+    weekday: 'short', day: 'numeric', month: 'short',
+    hour: '2-digit', minute: '2-digit',
+  });
+}
 
-  const suggested = items
-    .map((item, idx) => ({ ...item, _index: idx }))
-    .filter(i => i.status === 'suggested');
+// Open the detail drawer for a dump. Caller supplies a dump row from
+// allDumps (or a freshly fetched one). The drawer subscribes to
+// _currentDumpDetailId so polling can re-render in place.
+function openDumpDetail(dump) {
+  if (!dump) return;
+  _currentDumpDetailId = dump.id;
+  _dumpDetailEditing = false;
+  renderDumpDetail(dump);
+  openModal($('#dumpDetailOverlay'));
+}
 
-  if (!suggested.length) {
-    // No suggestions left
-    $('#reviewBody').innerHTML = `
-      <div class="empty-state" style="padding:30px 0">
-        <p>All suggestions have been reviewed</p>
-      </div>
-    `;
-    openModal($('#reviewOverlay'));
-    return;
+// Re-render the currently-open dump detail from the latest allDumps.
+// Called after polling, after action mutations, after edits.
+function _refreshDumpDetail() {
+  if (_currentDumpDetailId == null) return;
+  const dump = allDumps.find(d => d.id === _currentDumpDetailId);
+  if (!dump) return;
+  renderDumpDetail(dump);
+}
+
+// Single render path — header, body, items, footer.
+function renderDumpDetail(dump) {
+  const status = dump.processing_status || 'unprocessed';
+  const items = (dump.processed_items && dump.processed_items.items) || [];
+
+  // ── Header (timestamp + status + primary action) ─────────
+  $('#dumpDetailTime').textContent = `Captured ${fmtRelative(dump.captured_at)}`;
+  const errorLine = (status === 'failed' && dump.processing_error)
+    ? ` · <span class="dump-detail-error">${esc(dump.processing_error)}</span>`
+    : '';
+  $('#dumpDetailMeta').innerHTML =
+    `${esc(_dumpDetailExactTime(dump.captured_at))} · ${processingStatusLabel(dump)}${errorLine}`;
+
+  // Top-of-modal primary action: Retry (failed) / Re-process (terminal).
+  // Hidden during in-flight states.
+  const headerActions = $('#dumpDetailHeaderActions');
+  headerActions.innerHTML = '';
+  if (status === 'failed') {
+    const btn = document.createElement('button');
+    btn.className = 'btn-primary dump-detail-primary';
+    btn.textContent = 'Retry';
+    btn.addEventListener('click', () => _dumpDetailRetryDump(dump.id));
+    headerActions.appendChild(btn);
+  } else if (status === 'processed' || status === 'needs_review') {
+    const btn = document.createElement('button');
+    btn.className = 'btn dump-detail-primary';
+    btn.textContent = 'Re-process';
+    btn.addEventListener('click', () => _dumpDetailReprocessDump(dump.id));
+    headerActions.appendChild(btn);
   }
 
-  $('#reviewTitle').textContent = `Review ${suggested.length} suggestion${suggested.length > 1 ? 's' : ''}`;
+  // ── Body: content (read or edit) + items section ─────────
+  const body = $('#dumpDetailBody');
 
-  $('#reviewBody').innerHTML = suggested.map(item => {
-    const goalInfo = item.data.goal_title
-      ? `<div class="review-item-goal">Linked to goal: ${esc(item.data.goal_title)}</div>`
+  const contentBlock = _dumpDetailEditing
+    ? _renderDumpDetailContentEdit(dump)
+    : _renderDumpDetailContentRead(dump);
+
+  const inflight = status === 'queued' || status === 'unprocessed' || status === 'processing';
+
+  let itemsBlock;
+  if (inflight) {
+    const msg = status === 'processing' ? 'Processing now…' : 'Waiting in the queue.';
+    itemsBlock = `
+      <div class="dump-detail-section">
+        <div class="dump-detail-pending-card">
+          <span class="dump-badge-spinner"></span>
+          <span>${esc(msg)}</span>
+        </div>
+      </div>`;
+  } else {
+    itemsBlock = _renderDumpDetailItems(dump, items, status);
+  }
+
+  body.innerHTML = `
+    ${contentBlock}
+    ${itemsBlock}
+  `;
+
+  _bindDumpDetailContent(dump);
+  _bindDumpDetailItems(dump);
+
+  // ── Footer: Delete (right) ───────────────────────────────
+  $('#dumpDetailFooter').innerHTML = `
+    <button class="btn-text btn-text-danger" id="dumpDetailDelete">Delete dump</button>
+  `;
+  $('#dumpDetailDelete').addEventListener('click', () => _dumpDetailDelete(dump.id));
+}
+
+function _renderDumpDetailContentRead(dump) {
+  const status = dump.processing_status || 'unprocessed';
+  const editDisabled = status === 'processing';
+  const editTitle = editDisabled ? 'Wait for the current pass to finish.' : 'Edit content';
+  return `
+    <div class="dump-detail-section">
+      <div class="dump-detail-content" id="dumpDetailContent">${esc(dump.content)}</div>
+      <div class="dump-detail-content-actions">
+        <button class="btn-text dump-detail-edit-btn" id="dumpDetailEditBtn"
+                ${editDisabled ? 'disabled' : ''} title="${esc(editTitle)}">Edit</button>
+      </div>
+    </div>`;
+}
+
+function _renderDumpDetailContentEdit(dump) {
+  return `
+    <div class="dump-detail-section">
+      <textarea class="form-textarea dump-detail-edit-textarea" id="dumpDetailEditTextarea">${esc(dump.content)}</textarea>
+      <div class="dump-detail-edit-actions">
+        <button class="btn" id="dumpDetailEditCancel">Cancel</button>
+        <button class="btn-primary" id="dumpDetailEditSaveReprocess">Save &amp; re-process</button>
+      </div>
+    </div>`;
+}
+
+// Group items by status, render per-status sections in fixed order:
+// Pending review · Created · Failed · Rejected. (`needs_review` floats
+// pending to the top.) Empty groups are omitted.
+function _renderDumpDetailItems(dump, items, dumpStatus) {
+  if (!items.length) {
+    return `
+      <div class="dump-detail-section">
+        <div class="dump-detail-section-title">Items</div>
+        <div class="empty-state" style="padding:16px 0">
+          <p>No items extracted.</p>
+        </div>
+      </div>`;
+  }
+
+  const indexed = items.map((item, idx) => ({ ...item, _index: idx }));
+  const created = indexed.filter(i => i.status === 'auto_created' || i.status === 'approved');
+  const pending = indexed.filter(i => i.status === 'suggested');
+  const failed = indexed.filter(i => i.status === 'failed');
+  const rejected = indexed.filter(i => i.status === 'rejected');
+
+  // Order: needs_review puts Pending first; otherwise Created first.
+  const groups = (dumpStatus === 'needs_review')
+    ? [
+        ['pending', 'Pending review', pending],
+        ['created', 'Created', created],
+        ['failed', 'Failed', failed],
+        ['rejected', 'Rejected', rejected],
+      ]
+    : [
+        ['created', 'Created', created],
+        ['pending', 'Pending review', pending],
+        ['failed', 'Failed', failed],
+        ['rejected', 'Rejected', rejected],
+      ];
+
+  const showConfidence = pending.length >= 6;
+
+  const sections = groups
+    .filter(([_k, _label, list]) => list.length > 0)
+    .map(([key, label, list]) => {
+      const rows = list.map(i => _renderDumpDetailItemRow(i, key, showConfidence)).join('');
+      return `
+        <div class="dump-detail-items-group">
+          <div class="dump-detail-section-title">${esc(label)} <span class="dump-detail-section-count">(${list.length})</span></div>
+          ${rows}
+        </div>`;
+    }).join('');
+
+  return `
+    <div class="dump-detail-section dump-detail-items">
+      ${sections}
+    </div>`;
+}
+
+// Per-item row. The `groupKey` controls which actions are shown.
+function _renderDumpDetailItemRow(item, groupKey, showConfidence) {
+  const t = item.type;
+  const idx = item._index;
+  const typeLabel = reviewItemTypeLabel(t);
+  const title = reviewItemTitle(item);
+
+  const isLaunch = (groupKey === 'created') &&
+    (t === 'task' || t === 'goal_link' || t === 'goal_new' ||
+     t === 'person_new' || t === 'person_mention' ||
+     t === 'knowledge' || t === 'tag');
+
+  const sourceQuote =
+    (groupKey === 'pending' || groupKey === 'failed') && item.source_text
+      ? `<div class="dump-detail-item-quote">"${esc(String(item.source_text).substring(0, 200))}"</div>`
       : '';
 
-    return `
-      <div class="review-item" data-item-index="${item._index}">
-        <div class="review-item-header">
-          <span class="review-type-badge ${esc(item.type)}">${esc(reviewItemTypeLabel(item.type))}</span>
-          <span class="review-confidence">${esc(confidenceLabel(item.confidence))}</span>
-        </div>
-        <div class="review-item-title">${esc(reviewItemTitle(item))}</div>
-        ${item.source_text ? `<div class="review-item-context">"${esc(item.source_text.substring(0, 200))}"</div>` : ''}
-        ${goalInfo}
-        <div class="review-actions">
-          <button class="btn-approve" data-action="approve" data-index="${item._index}">Approve</button>
-          <button class="btn-edit-approve" data-action="edit" data-index="${item._index}">Edit & Approve</button>
-          <button class="btn-dismiss" data-action="reject" data-index="${item._index}">Dismiss</button>
-        </div>
-        <div class="edit-form" id="editForm-${item._index}">
-          ${item.type === 'task' ? `
-            <input type="text" class="form-input" id="editTitle-${item._index}" value="${esc(item.data.title || '')}" placeholder="Task title">
-          ` : item.type === 'knowledge' ? `
-            <input type="text" class="form-input" id="editTitle-${item._index}" value="${esc(item.data.title || '')}" placeholder="Title">
-          ` : item.type === 'person_new' ? `
-            <input type="text" class="form-input" id="editTitle-${item._index}" value="${esc(item.data.name || '')}" placeholder="Person name">
-          ` : item.type === 'goal_new' ? `
-            <input type="text" class="form-input" id="editTitle-${item._index}" value="${esc(item.data.title || '')}" placeholder="Goal title">
-          ` : `
-            <input type="text" class="form-input" id="editTitle-${item._index}" value="${esc(item.data.tag_name || item.data.title || '')}" placeholder="Value">
-          `}
-          <div class="edit-form-actions">
-            <button class="btn" data-action="cancel-edit" data-index="${item._index}" style="font-size:0.6875rem;padding:4px 10px">Cancel</button>
-            <button class="btn-approve" data-action="save-edit" data-index="${item._index}" style="font-size:0.6875rem;padding:4px 10px">Save & Approve</button>
-          </div>
-        </div>
+  const confidence = (groupKey === 'pending' && showConfidence)
+    ? `<span class="dump-detail-item-confidence">${esc(confidenceLabel(item.confidence || 0))}</span>`
+    : '';
+
+  const errorLine = (groupKey === 'failed' && item.error_class)
+    ? `<div class="dump-detail-item-error">${esc(item.error_class)}</div>`
+    : '';
+
+  let actions = '';
+  if (groupKey === 'pending') {
+    actions = `
+      <div class="dump-detail-item-actions">
+        <button class="btn-approve" data-action="approve" data-index="${idx}">Approve</button>
+        <button class="btn-dismiss" data-action="reject" data-index="${idx}">Reject</button>
+      </div>`;
+  } else if (groupKey === 'failed') {
+    actions = `
+      <div class="dump-detail-item-actions">
+        <button class="btn-approve" data-action="retry" data-index="${idx}">Retry</button>
+        <button class="btn-dismiss" data-action="reject-failed" data-index="${idx}">Reject</button>
+      </div>`;
+  } else if (groupKey === 'rejected') {
+    actions = `
+      <div class="dump-detail-item-actions">
+        <button class="btn" data-action="unreject" data-index="${idx}">↶ Un-reject</button>
+      </div>`;
+  }
+
+  const launchAttr = isLaunch ? `data-launch="1"` : '';
+  const chev = isLaunch
+    ? `<span class="dump-detail-item-chev" aria-hidden="true">›</span>`
+    : '';
+
+  return `
+    <div class="dump-detail-item ${esc('item-status-' + groupKey)}" data-item-index="${idx}" data-item-type="${esc(t)}" ${launchAttr}>
+      <div class="dump-detail-item-row">
+        <span class="review-type-badge ${esc(t)}">${esc(typeLabel)}</span>
+        <span class="dump-detail-item-title">${esc(title)}</span>
+        ${confidence}
+        ${chev}
       </div>
-    `;
-  }).join('');
+      ${sourceQuote}
+      ${errorLine}
+      ${actions}
+    </div>`;
+}
 
-  // Bind review actions
-  $('#reviewBody').querySelectorAll('[data-action]').forEach(btn => {
-    btn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      const action = btn.dataset.action;
-      const index = parseInt(btn.dataset.index);
+function _bindDumpDetailContent(dump) {
+  if (_dumpDetailEditing) {
+    const textarea = $('#dumpDetailEditTextarea');
+    if (textarea) {
+      autoResize(textarea);
+      textarea.addEventListener('input', () => autoResize(textarea));
+      // Defer focus so the drawer transition doesn't fight it.
+      setTimeout(() => textarea.focus(), 50);
+    }
+    const cancel = $('#dumpDetailEditCancel');
+    if (cancel) cancel.addEventListener('click', () => {
+      _dumpDetailEditing = false;
+      _refreshDumpDetail();
+    });
+    const saveAndProcess = $('#dumpDetailEditSaveReprocess');
+    if (saveAndProcess) saveAndProcess.addEventListener('click', () => {
+      const newText = textarea ? textarea.value : '';
+      _dumpDetailSaveAndReprocess(dump.id, newText);
+    });
+  } else {
+    const editBtn = $('#dumpDetailEditBtn');
+    if (editBtn && !editBtn.disabled) {
+      editBtn.addEventListener('click', () => {
+        _dumpDetailEditing = true;
+        _refreshDumpDetail();
+      });
+    }
+  }
+}
 
-      if (action === 'approve') {
-        btn.textContent = '...';
-        btn.disabled = true;
-        await api(`/brain-dumps/${reviewingDumpId}/approve-item`, {
-          method: 'POST',
-          body: { item_index: index, action: 'approve' },
-        });
-        refreshReview();
-      } else if (action === 'reject') {
-        btn.textContent = '...';
-        btn.disabled = true;
-        await api(`/brain-dumps/${reviewingDumpId}/approve-item`, {
-          method: 'POST',
-          body: { item_index: index, action: 'reject' },
-        });
-        refreshReview();
-      } else if (action === 'edit') {
-        const form = $(`#editForm-${index}`);
-        form.classList.toggle('visible');
-      } else if (action === 'cancel-edit') {
-        $(`#editForm-${index}`).classList.remove('visible');
-      } else if (action === 'save-edit') {
-        const titleInput = $(`#editTitle-${index}`);
-        const newVal = titleInput ? titleInput.value.trim() : '';
-        if (!newVal) return;
-
-        // Build edit_data based on item type
-        const itemEl = btn.closest('.review-item');
-        const itemIndex = parseInt(itemEl.dataset.itemIndex);
-        const dump = allDumps.find(d => d.id === reviewingDumpId);
-        const item = dump && dump.processed_items && dump.processed_items.items[itemIndex];
-
-        let editData = {};
-        if (item) {
-          if (item.type === 'task') editData = { title: newVal };
-          else if (item.type === 'knowledge') editData = { title: newVal };
-          else if (item.type === 'person_new') editData = { name: newVal };
-          else if (item.type === 'goal_new') editData = { title: newVal };
-          else if (item.type === 'tag') editData = { tag_name: newVal };
-        }
-
-        btn.textContent = '...';
-        btn.disabled = true;
-        await api(`/brain-dumps/${reviewingDumpId}/approve-item`, {
-          method: 'POST',
-          body: { item_index: index, action: 'edit_approve', edit_data: editData },
-        });
-        refreshReview();
-      }
+function _bindDumpDetailItems(dump) {
+  // Whole-row launch for created/approved items.
+  $('#dumpDetailBody').querySelectorAll('.dump-detail-item[data-launch="1"]').forEach(row => {
+    row.addEventListener('click', (e) => {
+      // Don't intercept clicks on inline buttons.
+      if (e.target.closest('button')) return;
+      const idx = parseInt(row.dataset.itemIndex);
+      const item = (dump.processed_items && dump.processed_items.items[idx]) || null;
+      if (item) _dumpDetailLaunchEntity(item);
     });
   });
 
-  openModal($('#reviewOverlay'));
+  // Per-item action buttons.
+  $('#dumpDetailBody').querySelectorAll('.dump-detail-item button[data-action]').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const action = btn.dataset.action;
+      const idx = parseInt(btn.dataset.index);
+      btn.disabled = true;
+      const originalLabel = btn.textContent;
+      btn.textContent = '…';
+      try {
+        if (action === 'approve') {
+          await _dumpDetailItemAction(dump.id, idx, 'approve');
+        } else if (action === 'reject') {
+          await _dumpDetailItemAction(dump.id, idx, 'reject');
+        } else if (action === 'retry') {
+          await _dumpDetailItemAction(dump.id, idx, 'retry');
+        } else if (action === 'reject-failed') {
+          // Failed → Rejected. Backend has no precondition gate on
+          // reject (per contract); accept the failure as a non-issue.
+          await _dumpDetailItemAction(dump.id, idx, 'reject');
+        } else if (action === 'unreject') {
+          await _dumpDetailItemAction(dump.id, idx, 'unreject');
+        }
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = originalLabel;
+        apiError(err);
+      }
+    });
+  });
 }
 
-async function refreshReview() {
-  // Reload dump data and re-render
-  const dumps = await api('/brain-dumps');
-  allDumps = dumps;
-  const dump = allDumps.find(d => d.id === reviewingDumpId);
+// Open the entity surface for a created/approved item. blocker and
+// dependency types have no detail surface today (per spec, render text
+// only). Tag uses the existing drawer; goals open the goal-detail
+// modal *over* this drawer (lateral navigation). Other types navigate
+// to the relevant list view as a fallback until per-item detail
+// surfaces ship.
+function _dumpDetailLaunchEntity(item) {
+  const t = item.type;
+  const data = item.data || {};
+  const id = item.created_id;
+  if (t === 'tag') {
+    if (id) openTagDrawer(id);
+    return;
+  }
+  if (t === 'goal_link' || t === 'goal_new') {
+    if (id) openGoalDetail(id);
+    return;
+  }
+  if (t === 'task') {
+    closeModal($('#dumpDetailOverlay'));
+    setTimeout(() => navigate('tasks'), 50);
+    return;
+  }
+  if (t === 'knowledge') {
+    closeModal($('#dumpDetailOverlay'));
+    setTimeout(() => navigate('knowledge'), 50);
+    return;
+  }
+  if (t === 'person_new' || t === 'person_mention') {
+    closeModal($('#dumpDetailOverlay'));
+    setTimeout(() => navigate('people'), 50);
+    return;
+  }
+  // Unknown — silent.
+}
 
-  if (dump) {
-    const items = dump.processed_items && dump.processed_items.items
-      ? dump.processed_items.items : [];
-    const suggested = items.filter(i => i.status === 'suggested');
+// ── Mutation helpers ────────────────────────────────────
+// All five flow through apiTry() so we can revert + apiError() on
+// failure. Optimistic where possible: items flip immediately, then
+// the server's response replaces local state on success.
 
-    if (suggested.length === 0) {
-      $('#reviewBody').innerHTML = `
-        <div class="empty-state" style="padding:30px 0">
-          <p>All suggestions reviewed</p>
-          <p class="hint">Processing complete</p>
-        </div>
-      `;
-      // Refresh the dump list in the background
-      setTimeout(() => {
-        renderDumps();
-        const reviewCount = allDumps.filter(d => d.processing_status === 'needs_review').length;
-        updateDumpBadge(reviewCount);
-      }, 300);
+async function _dumpDetailItemAction(dumpId, itemIndex, action) {
+  // Optimistic flip — mutate local model + re-render.
+  const dump = allDumps.find(d => d.id === dumpId);
+  if (!dump || !dump.processed_items || !dump.processed_items.items) return;
+  const item = dump.processed_items.items[itemIndex];
+  if (!item) return;
+  const prevStatus = item.status;
+  const optimisticStatus = (
+    action === 'approve' ? 'approved' :
+    action === 'reject' ? 'rejected' :
+    action === 'retry' ? 'approved' :
+    action === 'unreject' ? 'suggested' :
+    null
+  );
+  if (optimisticStatus) item.status = optimisticStatus;
+  _refreshDumpDetail();
+  try {
+    const updated = await apiTry(`/brain-dumps/${dumpId}/approve-item`, {
+      method: 'POST',
+      body: { item_index: itemIndex, action },
+    });
+    // Server returns the updated dump row. Sync local state.
+    if (updated && updated.id === dumpId) {
+      const i = allDumps.findIndex(d => d.id === dumpId);
+      if (i !== -1) allDumps[i] = updated;
+      _refreshDumpDetail();
+      // Update background list/badge if applicable.
+      if (currentView === 'dump') renderDumps();
+      const reviewCount = allDumps.filter(d => d.processing_status === 'needs_review').length;
+      updateDumpBadge(reviewCount);
+    } else {
+      // Defensive: re-fetch.
+      await loadDumps();
+      _refreshDumpDetail();
+    }
+  } catch (err) {
+    // Revert.
+    item.status = prevStatus;
+    _refreshDumpDetail();
+    if (err && err.status === 409) {
+      showToast('That item has already changed.');
+      await loadDumps();
+      _refreshDumpDetail();
       return;
     }
-    openReviewModal(dump);
+    apiError(err);
+    throw err;
   }
 }
 
-$('#reviewClose').addEventListener('click', () => {
-  closeModal($('#reviewOverlay'));
-  reviewingDumpId = null;
-  loadDumps();
-});
+async function _dumpDetailReprocessDump(dumpId) {
+  try {
+    await apiTry(`/brain-dumps/${dumpId}/process`, { method: 'POST', body: {} });
+    showToast('Re-processing.');
+    await loadDumps();
+    _refreshDumpDetail();
+    startBrainDumpPolling();
+  } catch (err) {
+    apiError(err);
+  }
+}
 
-$('#reviewOverlay').addEventListener('click', e => {
-  if (e.target === $('#reviewOverlay')) {
-    closeModal($('#reviewOverlay'));
-    reviewingDumpId = null;
-    loadDumps();
+async function _dumpDetailRetryDump(dumpId) {
+  try {
+    await apiTry(`/brain-dumps/${dumpId}/retry`, { method: 'POST', body: {} });
+    showToast('Retrying.');
+    await loadDumps();
+    _refreshDumpDetail();
+    startBrainDumpPolling();
+  } catch (err) {
+    if (err && err.status === 409) {
+      showToast('Could not retry: not in failed state.');
+      await loadDumps();
+      _refreshDumpDetail();
+      return;
+    }
+    apiError(err);
+  }
+}
+
+async function _dumpDetailSaveAndReprocess(dumpId, newContent) {
+  if (!newContent || !newContent.trim()) {
+    showToast('Content cannot be empty.');
+    return;
+  }
+  try {
+    await apiTry(`/brain-dumps/${dumpId}`, {
+      method: 'PUT',
+      body: { content: newContent },
+    });
+    await apiTry(`/brain-dumps/${dumpId}/process`, { method: 'POST', body: {} });
+    _dumpDetailEditing = false;
+    showToast('Saved. Re-processing.');
+    await loadDumps();
+    _refreshDumpDetail();
+    startBrainDumpPolling();
+  } catch (err) {
+    apiError(err);
+  }
+}
+
+async function _dumpDetailDelete(dumpId) {
+  if (!confirm('Delete this brain dump? This cannot be undone.')) return;
+  try {
+    await apiTry(`/brain-dumps/${dumpId}`, { method: 'DELETE' });
+    closeModal($('#dumpDetailOverlay'));
+    _currentDumpDetailId = null;
+    if (currentView === 'dump') loadDumps();
+    else if (currentView === 'home') loadHome();
+  } catch (err) {
+    apiError(err);
+  }
+}
+
+// Close handlers. Closing returns focus to the dumps list (no navigation).
+$('#dumpDetailClose').addEventListener('click', () => {
+  closeModal($('#dumpDetailOverlay'));
+  _currentDumpDetailId = null;
+  _dumpDetailEditing = false;
+});
+$('#dumpDetailOverlay').addEventListener('click', (e) => {
+  if (e.target === $('#dumpDetailOverlay')) {
+    closeModal($('#dumpDetailOverlay'));
+    _currentDumpDetailId = null;
+    _dumpDetailEditing = false;
   }
 });
 
@@ -3802,10 +4168,10 @@ document.addEventListener('keydown', (e) => {
     closeModal($('#tagRenameOverlay'));
     closeModal($('#tagMergeOverlay'));
     closeModal($('#tagDeleteOverlay'));
-    if (!$('#reviewOverlay').classList.contains('hidden')) {
-      closeModal($('#reviewOverlay'));
-      reviewingDumpId = null;
-      if (currentView === 'dump') loadDumps();
+    if (!$('#dumpDetailOverlay').classList.contains('hidden')) {
+      closeModal($('#dumpDetailOverlay'));
+      _currentDumpDetailId = null;
+      _dumpDetailEditing = false;
     }
     document.activeElement.blur();
     return;

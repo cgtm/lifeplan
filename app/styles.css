@@ -1678,7 +1678,7 @@ button.tag:active,
     height: 44px;
   }
 
-  .btn, .btn-primary, .btn-danger, .btn-review {
+  .btn, .btn-primary, .btn-danger {
     padding: 10px 16px;
     font-size: 0.8125rem;
   }
@@ -2168,23 +2168,7 @@ button.tag:active,
   white-space: nowrap;
 }
 
-/* ── Review button ─────────────────────────────────────── */
-.btn-review {
-  font-family: var(--font);
-  font-size: 0.6875rem;
-  font-weight: 500;
-  padding: 4px 12px;
-  border: 1px solid var(--amber);
-  border-radius: var(--radius-sm);
-  background: var(--amber-bg);
-  color: var(--amber);
-  cursor: pointer;
-  transition: background var(--transition), color var(--transition);
-}
-
-.btn-review:hover { background: var(--amber); color: white; }
-
-/* ── Review modal items ────────────────────────────────── */
+/* ── Review-style item rows (used by dump-detail drawer) ─ */
 .review-item {
   padding: 16px 0;
   border-bottom: 1px solid var(--border-lt);
@@ -3183,4 +3167,251 @@ button.tag:active,
   display: inline-flex;
   align-items: center;
   gap: 4px;
+}
+
+/* ── Dump detail drawer ──────────────────────────────────
+   Iris's design: docs/ux-design/2026-04-27-brain-dump-detail.md.
+   Reuses the .modal-drawer / .overlay-drawer scaffold (right-anchored
+   on desktop, bottom-sheet on mobile) so it feels like the tag drawer.
+*/
+#dumpDetailOverlay .modal-drawer { width: min(560px, 100vw); }
+
+@media (max-width: 640px) {
+  #dumpDetailOverlay .modal-drawer { width: 100vw; }
+}
+
+.dump-detail-time {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.3;
+}
+
+.dump-detail-meta {
+  font-size: 0.6875rem;
+  color: var(--text-3);
+  margin-top: 4px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.dump-detail-meta .dump-badge {
+  margin-left: 0;
+}
+
+.dump-detail-error {
+  color: var(--danger);
+  font-size: 0.6875rem;
+}
+
+.dump-detail-header-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-left: 8px;
+}
+
+.dump-detail-primary {
+  font-size: 0.75rem;
+  padding: 6px 14px;
+  white-space: nowrap;
+}
+
+.dump-detail-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 20px;
+  border-top: 1px solid var(--border-lt);
+  background: var(--bg);
+}
+
+.dump-detail-section + .dump-detail-section {
+  margin-top: 24px;
+}
+
+.dump-detail-section-title {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0 0 8px;
+  border-bottom: 1px solid var(--border-lt);
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dump-detail-section-count {
+  color: var(--text-3);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.dump-detail-content {
+  font-size: 0.875rem;
+  line-height: 1.6;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border-lt);
+  border-radius: var(--radius);
+  user-select: text;
+}
+
+.dump-detail-content-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+
+.dump-detail-edit-btn {
+  font-size: 0.75rem;
+}
+
+.dump-detail-edit-textarea {
+  width: 100%;
+  min-height: 120px;
+  font-size: 0.875rem;
+  line-height: 1.6;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  resize: none;
+  font-family: var(--font);
+}
+
+.dump-detail-edit-textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.dump-detail-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.dump-detail-pending-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 18px;
+  background: var(--accent-bg);
+  border-radius: var(--radius);
+  font-size: 0.8125rem;
+  color: var(--text-2);
+}
+
+.dump-detail-items-group + .dump-detail-items-group {
+  margin-top: 20px;
+}
+
+.dump-detail-item {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border-lt);
+}
+
+.dump-detail-item:last-child { border-bottom: none; }
+
+.dump-detail-item[data-launch="1"] {
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: background var(--transition);
+  padding-left: 8px;
+  padding-right: 8px;
+  margin-left: -8px;
+  margin-right: -8px;
+}
+
+.dump-detail-item[data-launch="1"]:hover {
+  background: var(--accent-bg);
+}
+
+.dump-detail-item-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.dump-detail-item-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.875rem;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.dump-detail-item-confidence {
+  font-size: 0.5625rem;
+  font-weight: 500;
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.dump-detail-item-chev {
+  color: var(--text-3);
+  font-size: 1rem;
+  flex-shrink: 0;
+}
+
+.dump-detail-item-quote {
+  font-size: 0.75rem;
+  color: var(--text-3);
+  line-height: 1.5;
+  margin-top: 6px;
+  padding-left: 8px;
+  border-left: 2px solid var(--border-lt);
+  font-style: italic;
+}
+
+.dump-detail-item-error {
+  font-size: 0.75rem;
+  color: var(--danger);
+  margin-top: 6px;
+  font-family: var(--font-mono, var(--font));
+}
+
+.dump-detail-item-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.dump-detail-item-actions .btn,
+.dump-detail-item-actions .btn-approve,
+.dump-detail-item-actions .btn-dismiss {
+  font-size: 0.6875rem;
+  padding: 4px 12px;
+}
+
+/* Suggestion-count chip on dump rows (needs_review state). */
+.dump-suggest-count {
+  font-size: 0.6875rem;
+  font-weight: 500;
+  color: var(--amber);
+  background: var(--amber-bg);
+  padding: 2px 10px;
+  border-radius: 100px;
+}
+
+/* Whole-row clickable dump cards. Add a subtle hover affordance so
+   it's clear the row opens detail; honours the "content is the
+   interface" principle by not adding chrome. */
+.dump-item-clickable { cursor: pointer; }
+.dump-item-clickable:hover { background: var(--accent-bg); }
+.dump-item-clickable:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
