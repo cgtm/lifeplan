@@ -2,8 +2,12 @@
 
 **Authors:** Vault (server), supervised by Cairn
 **Status:** accepted
-**Last updated:** 2026-04-23
+**Last updated:** 2026-04-27
 **Cairn approved:** 2026-04-23 — ready for Vault to patch (separate dispatch).
+**Extended 2026-04-27:** added `retry` and `unreject` actions to
+`handle_approve_item` per Iris's brain-dump detail modal design
+(`docs/ux-design/2026-04-27-brain-dump-detail.md`). Reed sanity-checked
+the schema: status lives in a JSON blob, no schema change.
 
 Internal helper contract carved out of
 [`background-processing.md`](./background-processing.md). Spec for the
@@ -390,6 +394,90 @@ else:
   `has_pending = any(i["status"] == "suggested" …)` check stays
   correct: `failed` is terminal, not pending, so a `failed` item does
   not keep the dump in `needs_review`.
+
+### `handle_approve_item` action matrix
+
+`POST /api/brain-dumps/<id>/approve-item` body:
+`{item_index: int, action: str, edit_data?: object}`. The handler
+dispatches on `action` with a strict allow-list (added 2026-04-27 — an
+unknown `action` now returns 400; previously unknown actions silently
+no-op'd at 200).
+
+| `action`        | Required current item status | Calls `_auto_create_item`? | Success status         | Failure status       | 409 body when precondition fails               |
+|---|---|---|---|---|---|
+| `approve`       | `suggested`                  | yes                        | `approved`             | `failed` (200, see Invariant 1) | `{error: "only suggested items can be approved"}` |
+| `edit_approve`  | `suggested`                  | yes (after `data.update(edit_data)`) | `approved` | `failed` (200) | `{error: "only suggested items can be approved"}` |
+| `reject`        | `suggested` *(no precondition gate today; reject from any status is harmless and the per-item state machine treats it as terminal)* | no | `rejected`             | n/a                  | n/a                                            |
+| **`retry`** *(new 2026-04-27)* | `failed`             | yes                        | `approved` (matches approve path) | `failed` (200) | `{error: "only failed items can be retried"}`  |
+| **`unreject`** *(new 2026-04-27)* | `rejected`         | no                         | `suggested`            | n/a                  | `{error: "only rejected items can be un-rejected"}` |
+| *(unknown)*     | n/a                          | no                         | n/a                    | n/a                  | 400 `{error: "unknown action: <repr>"}`        |
+
+**`retry` semantics.** Re-runs the create against the item's existing
+`data` payload (no `edit_data` merge — retry is "the data was fine, the
+create flaked," not "edit and re-attempt"; for the latter the user
+would un-reject and edit-approve, or just edit-approve from the failed
+row in a future iteration). On success, status becomes `approved` (the
+user's recovery action is morally identical to an approve, even though
+the row was originally a high-confidence auto-attempt). On failure,
+stays `failed`; `_auto_create_item` emits its usual
+`processing.auto_create.failed` line and the handler emits
+`processing.auto_create.dropped … caller=retry`.
+
+**`unreject` semantics.** Pure JSON status flip: `rejected → suggested`.
+No DB row touched (rejected items never created one). Clears any prior
+`error` field on the item. The dump's `processing_status` rollup is
+recomputed: if the dump was `processed` and `unreject` re-introduces a
+`suggested` item, the dump rolls back to `needs_review` and the
+`processed` flag clears to `0`. This is the only path through
+`handle_approve_item` today that can flip `processed → needs_review`.
+
+### Per-item state machine (extended 2026-04-27)
+
+Transitions driven by `handle_approve_item`. Worker-side transitions
+(creation of `auto_created` / initial `suggested`) are documented in
+`background-processing.md`.
+
+```
+                                 approve / edit_approve (success)
+                                 ────────────────────────────────▶ approved
+                                /
+            (worker creates) ──▶ suggested
+                                \
+                                 reject ──────────────────────────▶ rejected
+                                                                    │
+                                                                    │ unreject
+                                                                    ▼
+                                                                 suggested
+                                                                    │
+                                                                    │ approve / retry success
+                                                                    ▼
+                                                                 approved
+
+            (worker creates) ──▶ auto_created                    (terminal — no transitions today)
+
+            approve/edit_approve/retry hit `_auto_create_item`
+            returning None
+                          ────────────────────────────────────────▶ failed
+                                                                    │
+                                                                    │ retry (success)
+                                                                    ├──▶ approved
+                                                                    │
+                                                                    │ retry (still fails)
+                                                                    └──▶ failed (loop)
+```
+
+Compact transition table:
+
+| From          | Action           | Success      | Failure (`_auto_create_item` returns None) |
+|---|---|---|---|
+| `suggested`   | `approve`        | `approved`   | `failed`                                   |
+| `suggested`   | `edit_approve`   | `approved`   | `failed`                                   |
+| `suggested`   | `reject`         | `rejected`   | n/a                                        |
+| `failed`      | `retry`          | `approved`   | `failed` (no transition)                   |
+| `rejected`    | `unreject`       | `suggested`  | n/a                                        |
+
+Out-of-precondition transitions return 409 and do NOT mutate state.
+Unknown `action` returns 400 and does NOT mutate state.
 
 ## Error matrix
 

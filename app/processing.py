@@ -2430,17 +2430,83 @@ def handle_approve_item(dump_id, body):
             return 400, {"error": "No processed items"}
 
         item_index = body.get("item_index")
-        action = body.get("action", "approve")  # approve, reject, edit_approve
+        action = body.get("action", "approve")  # approve, reject, edit_approve, retry, unreject
         edit_data = body.get("edit_data")  # optional edited data
 
         if item_index is None or item_index < 0 or item_index >= len(processed_items["items"]):
             return 400, {"error": "Invalid item index"}
 
+        # Action allow-list. Reject unknown actions with 400 BEFORE any state
+        # change so a typo'd payload is a loud no-op, not a silent one. Today's
+        # if/elif chain would have silently 200'd on unknown action; that's the
+        # status-truthfulness shape we're killing across this handler.
+        if action not in ("approve", "edit_approve", "reject", "retry", "unreject"):
+            return 400, {"error": f"unknown action: {action!r}"}
+
         item = processed_items["items"][item_index]
 
         if action == "reject":
             item["status"] = "rejected"
+        elif action == "unreject":
+            # Precondition: item MUST currently be `rejected`. 409 otherwise --
+            # un-reject is a state transition, not a clobber. Returns the item
+            # to the suggestion queue (status=suggested) so the user can re-
+            # decide. No `_auto_create_item` call -- creation is the user's
+            # next step via approve/edit_approve.
+            if item.get("status") != "rejected":
+                return 409, {"error": "only rejected items can be un-rejected"}
+            item["status"] = "suggested"
+            # Clear any prior error text so the row reads cleanly when it
+            # returns to the suggestion queue. `created_id` was already None
+            # for a rejected item (rejected items never created a row).
+            if "error" in item:
+                item["error"] = None
+        elif action == "retry":
+            # Precondition: item MUST currently be `failed`. 409 otherwise --
+            # retry is the recovery affordance for system-side drops, not a
+            # general re-run button.
+            if item.get("status") != "failed":
+                return 409, {"error": "only failed items can be retried"}
+            # Re-run the create against the item's existing `data` payload.
+            # Same exception discipline as the approve path: UnknownItemType
+            # is a programming bug -> 500 with class-name only; nothing else
+            # is broadened. _auto_create_item still owns its own typed-catch
+            # of MalformedItemData / sqlite3.Error -> log + None.
+            try:
+                created_id = _auto_create_item(
+                    conn, item, dump_id,
+                    sibling_items=processed_items["items"],
+                )
+            except UnknownItemType as e:
+                return 500, {"error": f"internal error: {type(e).__name__}"}
+            if created_id is None:
+                # Stays `failed`. Invariant 1 still holds: no created_id, no
+                # success status. The structured-logging line was already
+                # emitted by _auto_create_item; we add a caller-side line
+                # tagged `caller=retry` to match the worker/approve pattern.
+                item["status"] = "failed"
+                item["created_id"] = None
+                logger.warning(
+                    "processing.auto_create.dropped dump_id=%s item_index=%d "
+                    "item_type=%s caller=retry",
+                    dump_id, item_index, item["type"],
+                )
+            else:
+                # Match the approve path's success status (`approved`) -- a
+                # user-initiated retry is a user-initiated create, same as
+                # approve. The worker-side `auto_created` status is reserved
+                # for the high-confidence path that ran without user action.
+                item["created_id"] = created_id
+                item["status"] = "approved"
+                if "error" in item:
+                    item["error"] = None
         elif action in ("approve", "edit_approve"):
+            # Precondition: approve / edit_approve require `suggested`. The
+            # contract is implicit on this today; making it explicit prevents
+            # double-approve of an already-created item from clobbering the
+            # `created_id` of a real DB row.
+            if item.get("status") != "suggested":
+                return 409, {"error": "only suggested items can be approved"}
             if edit_data:
                 item["data"].update(edit_data)
             # Per auto-create contract: UnknownItemType propagates here as
@@ -2481,7 +2547,9 @@ def handle_approve_item(dump_id, body):
         ts = now_utc()
         processed_items["processed_at"] = ts
 
-        # Check if all suggestions are now resolved
+        # Check if all suggestions are now resolved. `unreject` flips a row
+        # back to `suggested`, so a previously-`processed` dump may need to
+        # roll back to `needs_review` -- the rollup below catches this.
         has_pending = any(
             i["status"] == "suggested"
             for i in processed_items["items"]
@@ -2489,6 +2557,11 @@ def handle_approve_item(dump_id, body):
         new_status = dump["processing_status"]
         if not has_pending and dump["processing_status"] == "needs_review":
             new_status = "processed"
+        elif has_pending and dump["processing_status"] == "processed":
+            # Un-reject can resurrect a pending suggestion in a previously-
+            # done dump. Roll back to needs_review and clear the `processed`
+            # flag below so the dumps list re-surfaces it for triage.
+            new_status = "needs_review"
 
         conn.execute(
             "UPDATE brain_dumps SET processed_items = ?, processing_status = ?, "
@@ -2496,7 +2569,12 @@ def handle_approve_item(dump_id, body):
             (
                 json.dumps(processed_items, ensure_ascii=False),
                 new_status,
-                1 if new_status == "processed" else dump["processed"],
+                # `processed` flag mirrors processing_status: 1 only when
+                # terminal-done. needs_review (including the unreject roll-
+                # back path above) is not terminal -> 0.
+                1 if new_status == "processed" else (
+                    0 if new_status == "needs_review" else dump["processed"]
+                ),
                 ts,
                 dump_id,
             ),
