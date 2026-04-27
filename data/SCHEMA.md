@@ -1,6 +1,6 @@
 # lifeplan.db -- Schema Documentation
 
-**Version:** 0.5 (brain_dump_tags FK repair)
+**Version:** 0.6 (blocker resolution timestamp)
 **Created:** 2026-04-20
 **Last updated:** 2026-04-23
 **Author:** Reed (Knowledge Architect)
@@ -222,11 +222,14 @@ Models "what blocks what" across the system. Polymorphic: both the blocker and t
 | blocked_id   | INTEGER | NOT NULL                                                 | ID in the blocked table                  |
 | notes        | TEXT    | nullable                                                 | Context about the dependency             |
 | resolved     | INTEGER | NOT NULL, default 0                                      | 0 = still blocking, 1 = resolved        |
+| resolved_at  | TEXT    | nullable                                                 | When the blocker was marked resolved (UTC); NULL while still blocking |
 | created_at   | TEXT    | NOT NULL, default now                                    | Row insertion timestamp (UTC)            |
 
 **Indexes:** `idx_deps_blocked` on `(blocked_type, blocked_id)`, `idx_deps_blocker` on `(blocker_type, blocker_id)`
 
-**Retrieval scenarios:** "What's blocking Move to Seoul?" / "Is anything waiting on the Finance App?" / "What dependencies have been resolved?"
+**Resolution pair.** `(resolved, resolved_at)` mirrors the `(processed, processed_at)` pattern on `brain_dumps` and the `(status='completed', completed_at)` pattern on goals/tasks. The boolean answers "is this still blocking?"; the timestamp answers "when did it clear?". App code marking a dependency resolved should set both in the same UPDATE: `SET resolved = 1, resolved_at = datetime('now')`. A NULL `resolved_at` on a `resolved=1` row indicates a historical resolve where the exact time wasn't recorded (backfilled by migration 0004 with `datetime('now')` at migration time, but consumers should still tolerate NULL defensively).
+
+**Retrieval scenarios:** "What's blocking Move to Seoul?" / "Is anything waiting on the Finance App?" / "What dependencies cleared in the last 30 days?" / "How long was this blocker live?"
 
 ---
 
@@ -382,6 +385,13 @@ WHERE d.blocked_type = 'goal'
   AND d.blocked_id = (SELECT id FROM goals WHERE title = 'Move to Seoul')
   AND d.resolved = 0;
 
+-- Dependencies cleared in the last 30 days (retrospection)
+SELECT d.id, d.blocker_type, d.blocked_type, d.notes, d.resolved_at
+FROM dependencies d
+WHERE d.resolved = 1
+  AND d.resolved_at >= datetime('now', '-30 days')
+ORDER BY d.resolved_at DESC;
+
 -- All unresolved dependencies
 SELECT d.*,
        CASE d.blocker_type
@@ -514,7 +524,8 @@ knowledge_items ----tags----> tags
 11. **`processing_status` replaces boolean `processed` for brain dumps.** The old column is kept for backward compatibility, but new code should use `processing_status` which supports richer states: `unprocessed`, `queued`, `processing`, `processed`, `needs_review`, `failed`.
 12. **`processed_items` stores extraction results as JSON.** This keeps the full extraction history (including rejected suggestions) in the brain dump row, enabling audit trails and reprocessing. Schema defined in `PROCESSING_RULES.md`.
 13. **`work_queue` is the source of truth; `brain_dumps.processing_status` is a cache.** The worker writes both inside the same transaction. The denormalisation is deliberate: list views render badges from a single `brain_dumps` row read without joining to `work_queue`, and a row-by-row join in a hot list path was the alternative. Watchdog math (`claimed_at < now − 5m`) lives only on the queue, so there's exactly one place that arbitrates state. `work_queue.target_id` deliberately has no FK to `brain_dumps.id` so deletions don't cascade into audit history -- the queue is operational, not relational ground truth.
-14. **`work_queue` partial unique indexes encode the coalescing contract.** `idx_work_queue_one_active_per_dump` and `idx_work_queue_one_active_prompt` ensure that re-queueing a brain dump or trigging prompt regeneration is naturally idempotent at the DB layer -- the handler can attempt the insert and treat a UNIQUE-constraint failure as "already queued, no-op." Terminal `done`/`failed` rows are excluded from the index so they don't block legitimate re-queues.
+14. **`dependencies.resolved_at` mirrors the schema's lifecycle-pair pattern.** A bare boolean `resolved` was the v0.1 shape; migration 0004 added a nullable `resolved_at` so the system can answer "when did this clear?" alongside "is it still blocking?". This matches `(processed, processed_at)` on `brain_dumps` and `(status='completed', completed_at)` on goals/tasks. We deliberately did *not* expand `dependencies` into a full status enum (`active|resolved|on_hold|cancelled`) -- nuance like "paused" or "abandoned" lives on the blocked goal or task, not on the dependency edge, and the enum would overspecify a relational glue table.
+15. **`work_queue` partial unique indexes encode the coalescing contract.** `idx_work_queue_one_active_per_dump` and `idx_work_queue_one_active_prompt` ensure that re-queueing a brain dump or trigging prompt regeneration is naturally idempotent at the DB layer -- the handler can attempt the insert and treat a UNIQUE-constraint failure as "already queued, no-op." Terminal `done`/`failed` rows are excluded from the index so they don't block legitimate re-queues.
 
 ## Extension Points
 
