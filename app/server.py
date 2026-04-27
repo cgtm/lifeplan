@@ -32,6 +32,8 @@ if __package__ is None or __package__ == "":
     from app.handlers import (
         handle_get_entries, handle_get_entry, handle_create_entry,
         handle_update_entry, handle_delete_entry, handle_get_tags,
+        handle_create_tag, handle_rename_tag, handle_merge_tag,
+        handle_delete_tag, handle_get_tag_usages,
         handle_get_brain_dumps, handle_create_brain_dump,
         handle_update_brain_dump, handle_delete_brain_dump,
         handle_get_goals, handle_get_goal, handle_create_goal,
@@ -59,6 +61,8 @@ else:
     from .handlers import (
         handle_get_entries, handle_get_entry, handle_create_entry,
         handle_update_entry, handle_delete_entry, handle_get_tags,
+        handle_create_tag, handle_rename_tag, handle_merge_tag,
+        handle_delete_tag, handle_get_tag_usages,
         handle_get_brain_dumps, handle_create_brain_dump,
         handle_update_brain_dump, handle_delete_brain_dump,
         handle_get_goals, handle_get_goal, handle_create_goal,
@@ -133,6 +137,14 @@ class Handler(SimpleHTTPRequestHandler):
         # Same status, same headers (including Content-Length), no body.
         if self.command != "HEAD":
             self.wfile.write(body)
+
+    def send_no_content(self):
+        """Send a 204 No Content response with no body. RFC 7231 §6.3.5:
+        a 204 MUST NOT include a message body; Content-Length must be 0
+        (or absent). Used by DELETE endpoints that have nothing to return."""
+        self.send_response(204)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def read_body(self):
         length = int(self.headers.get("Content-Length", 0) or 0)
@@ -310,6 +322,50 @@ class Handler(SimpleHTTPRequestHandler):
         if method == "GET" and path == "/api/tags":
             status, data = handle_get_tags()
             self.send_json(status, data)
+            return True
+
+        if method == "POST" and path == "/api/tags":
+            body = self.read_body()
+            status, data = handle_create_tag(body)
+            self.send_json(status, data)
+            return True
+
+        # /api/tags/<id>/merge — must precede the bare /api/tags/<id>
+        # branches (PUT/DELETE/GET-usages) below so the regex match wins.
+        if method == "POST" and re.match(r'/api/tags/\d+/merge$', path):
+            tid = int(re.search(r'/api/tags/(\d+)/merge', path).group(1))
+            body = self.read_body()
+            status, data = handle_merge_tag(tid, body)
+            self.send_json(status, data)
+            return True
+
+        if method == "GET" and re.match(r'/api/tags/\d+/usages$', path):
+            tid = int(re.search(r'/api/tags/(\d+)/usages', path).group(1))
+            status, data = handle_get_tag_usages(tid)
+            self.send_json(status, data)
+            return True
+
+        if method == "PUT" and path.startswith("/api/tags/"):
+            tid = self.parse_id(path)
+            if tid is None:
+                self.send_json(400, {"error": "Invalid tag ID"})
+                return True
+            body = self.read_body()
+            status, data = handle_rename_tag(tid, body)
+            self.send_json(status, data)
+            return True
+
+        if method == "DELETE" and path.startswith("/api/tags/"):
+            tid = self.parse_id(path)
+            if tid is None:
+                self.send_json(400, {"error": "Invalid tag ID"})
+                return True
+            status, data = handle_delete_tag(tid)
+            if status == 204:
+                # 204 has no body — RFC 7231 §6.3.5.
+                self.send_no_content()
+            else:
+                self.send_json(status, data)
             return True
 
         # ── Dashboard ──

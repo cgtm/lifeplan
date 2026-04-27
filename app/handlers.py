@@ -142,19 +142,386 @@ def handle_delete_entry(entry_id):
 
 
 def handle_get_tags():
+    """
+    List all tags with per-junction breakdown and total usage count.
+
+    Contract: app/contracts/tags.md.
+
+    Response shape (one element per tag):
+      {
+        id, name,
+        total_count,                      # legacy alias, preserved for the
+                                          # journal filter (app.js:2291) and
+                                          # any other existing consumer
+        usage_count,                      # same value, new canonical name
+        breakdown: {
+          goals, tasks, people, knowledge,
+          journal_entries, brain_dumps    # all six junctions
+        }
+      }
+
+    Live counts via per-junction COUNT(*) (Reed's call — fine on this dataset
+    size; revisit if tags exceed ~5k). Single query, LEFT JOIN over GROUP BY
+    sub-selects, so no N+1.
+    """
     conn = get_db()
     try:
         rows = conn.execute(
-            "SELECT t.id, t.name, "
-            "(SELECT COUNT(*) FROM entry_tags WHERE tag_id = t.id) + "
-            "(SELECT COUNT(*) FROM goal_tags WHERE tag_id = t.id) + "
-            "(SELECT COUNT(*) FROM task_tags WHERE tag_id = t.id) + "
-            "(SELECT COUNT(*) FROM person_tags WHERE tag_id = t.id) + "
-            "(SELECT COUNT(*) FROM knowledge_tags WHERE tag_id = t.id) + "
-            "(SELECT COUNT(*) FROM brain_dump_tags WHERE tag_id = t.id) AS total_count "
-            "FROM tags t ORDER BY total_count DESC, t.name ASC"
+            "SELECT "
+            "  t.id, t.name, "
+            "  COALESCE(g.n,0)  AS goals, "
+            "  COALESCE(tk.n,0) AS tasks, "
+            "  COALESCE(p.n,0)  AS people, "
+            "  COALESCE(k.n,0)  AS knowledge, "
+            "  COALESCE(e.n,0)  AS journal_entries, "
+            "  COALESCE(b.n,0)  AS brain_dumps, "
+            "  COALESCE(g.n,0)+COALESCE(tk.n,0)+COALESCE(p.n,0)"
+            "   +COALESCE(k.n,0)+COALESCE(e.n,0)+COALESCE(b.n,0) AS usage_count "
+            "FROM tags t "
+            "LEFT JOIN (SELECT tag_id, COUNT(*) n FROM goal_tags       GROUP BY tag_id) g  ON g.tag_id  = t.id "
+            "LEFT JOIN (SELECT tag_id, COUNT(*) n FROM task_tags       GROUP BY tag_id) tk ON tk.tag_id = t.id "
+            "LEFT JOIN (SELECT tag_id, COUNT(*) n FROM person_tags     GROUP BY tag_id) p  ON p.tag_id  = t.id "
+            "LEFT JOIN (SELECT tag_id, COUNT(*) n FROM knowledge_tags  GROUP BY tag_id) k  ON k.tag_id  = t.id "
+            "LEFT JOIN (SELECT tag_id, COUNT(*) n FROM entry_tags      GROUP BY tag_id) e  ON e.tag_id  = t.id "
+            "LEFT JOIN (SELECT tag_id, COUNT(*) n FROM brain_dump_tags GROUP BY tag_id) b  ON b.tag_id  = t.id "
+            "ORDER BY usage_count DESC, t.name ASC"
         ).fetchall()
-        return 200, rows_to_dicts(rows)
+        out = []
+        for r in rows:
+            d = dict(r)
+            usage = d.pop("usage_count")
+            breakdown = {
+                "goals": d.pop("goals"),
+                "tasks": d.pop("tasks"),
+                "people": d.pop("people"),
+                "knowledge": d.pop("knowledge"),
+                "journal_entries": d.pop("journal_entries"),
+                "brain_dumps": d.pop("brain_dumps"),
+            }
+            d["total_count"] = usage   # legacy alias preserved
+            d["usage_count"] = usage
+            d["breakdown"] = breakdown
+            out.append(d)
+        return 200, out
+    finally:
+        conn.close()
+
+
+def handle_create_tag(body):
+    """
+    Create or focus a tag.
+
+    Contract: app/contracts/tags.md.
+
+    - 400 {"error": "name is required"} if name missing/empty after strip.
+    - 200 with the existing row on case-insensitive duplicate (Iris's
+      "focus the existing row, no error" — Reed signed off on this shape
+      over the dispatch brief's 409).
+    - 201 with the new row on a fresh name.
+
+    Storage: name is lowercased + stripped before insert (mirrors the
+    set_tags_for helper used everywhere else; the dedup index is on
+    the stored lowercase name).
+
+    Privacy: never logs the tag name.
+    """
+    name_raw = body.get("name")
+    if not isinstance(name_raw, str):
+        return 400, {"error": "name is required"}
+    name = name_raw.strip().lower()
+    if not name:
+        return 400, {"error": "name is required"}
+
+    conn = get_db()
+    try:
+        existing = conn.execute(
+            "SELECT id, name FROM tags WHERE name = ?", (name,)
+        ).fetchone()
+        if existing:
+            return 200, dict(existing)
+        cur = conn.execute("INSERT INTO tags (name) VALUES (?)", (name,))
+        conn.commit()
+        row = conn.execute(
+            "SELECT id, name FROM tags WHERE id = ?", (cur.lastrowid,)
+        ).fetchone()
+        return 201, dict(row)
+    finally:
+        conn.close()
+
+
+def handle_rename_tag(tag_id, body):
+    """
+    Rename a tag.
+
+    Contract: app/contracts/tags.md.
+
+    - 400 if name missing/empty after strip.
+    - 404 if tag doesn't exist.
+    - 409 {"error": "name already in use", "id": <int>} if a different
+      tag already has the new (case-insensitive) name. Body shape is
+      Reed-flagged "pick your shape" — we pick this one so the UI can
+      offer "merge instead?" without a second round-trip.
+    - 200 with {id, name} on success.
+
+    Privacy: never logs the tag name.
+    """
+    name_raw = body.get("name")
+    if not isinstance(name_raw, str):
+        return 400, {"error": "name is required"}
+    name = name_raw.strip().lower()
+    if not name:
+        return 400, {"error": "name is required"}
+
+    conn = get_db()
+    try:
+        existing = conn.execute(
+            "SELECT id, name FROM tags WHERE id = ?", (tag_id,)
+        ).fetchone()
+        if not existing:
+            return 404, {"error": "tag not found"}
+
+        # Collision check: a different tag with the same case-insensitive
+        # name. Stored names are already lowercase so a direct equality
+        # comparison is the case-insensitive check.
+        clash = conn.execute(
+            "SELECT id FROM tags WHERE name = ? AND id != ?", (name, tag_id)
+        ).fetchone()
+        if clash:
+            return 409, {"error": "name already in use", "id": clash["id"]}
+
+        # If the name is identical to the current row, this is a no-op
+        # rename; return 200 with the row unchanged (no UPDATE needed).
+        if existing["name"] == name:
+            return 200, dict(existing)
+
+        conn.execute("UPDATE tags SET name = ? WHERE id = ?", (name, tag_id))
+        conn.commit()
+        row = conn.execute(
+            "SELECT id, name FROM tags WHERE id = ?", (tag_id,)
+        ).fetchone()
+        return 200, dict(row)
+    finally:
+        conn.close()
+
+
+def handle_merge_tag(source_id, body):
+    """
+    Merge source tag into target: re-point all six junctions, drop source.
+
+    Contract: app/contracts/tags.md. SQL: docs/architecture/tag-merge-review.md §3.
+
+    - 400 if target_id missing, malformed, or equals source_id.
+    - 404 if either tag doesn't exist.
+    - 200 {"ok": true, "target": {id, name}} on success.
+    - 503 if SQLite reports "database is locked" — the worker holds the
+      writer lock; the UI should retry. BEGIN IMMEDIATE acquires the
+      reserved lock up front so the failure is fast and clean rather
+      than mid-merge (Reed's call).
+
+    Uses BEGIN IMMEDIATE on a fresh connection so we don't fight any
+    long-lived connection for the writer lock. INSERT OR IGNORE handles
+    the composite-PK collision case (entity already tagged with target);
+    the DELETE that follows wipes the source-tag-id rows whether they
+    collided or not. Six junctions: goal, task, person, knowledge,
+    entry (journal), brain_dump. entry_tags was missing from the
+    dispatch brief — Reed flagged it; six is correct.
+
+    Privacy: never logs tag names.
+    """
+    target_id_raw = body.get("target_id")
+    if not isinstance(target_id_raw, int) or isinstance(target_id_raw, bool):
+        return 400, {"error": "target_id is required"}
+    target_id = target_id_raw
+    if target_id == source_id:
+        return 400, {"error": "source and target must differ"}
+
+    import sqlite3
+
+    conn = get_db()
+    try:
+        src = conn.execute(
+            "SELECT id, name FROM tags WHERE id = ?", (source_id,)
+        ).fetchone()
+        if not src:
+            return 404, {"error": "source tag not found"}
+        tgt = conn.execute(
+            "SELECT id, name FROM tags WHERE id = ?", (target_id,)
+        ).fetchone()
+        if not tgt:
+            return 404, {"error": "target tag not found"}
+
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            # Six junctions, canonical INSERT OR IGNORE … SELECT + DELETE
+            # pair per Reed's review §3. Don't collapse — INSERT OR IGNORE
+            # is what handles the composite-PK collision case.
+            for jt, fk in (
+                ("goal_tags",       "goal_id"),
+                ("task_tags",       "task_id"),
+                ("person_tags",     "person_id"),
+                ("knowledge_tags",  "knowledge_id"),
+                ("entry_tags",      "entry_id"),
+                ("brain_dump_tags", "brain_dump_id"),
+            ):
+                conn.execute(
+                    f"INSERT OR IGNORE INTO {jt} ({fk}, tag_id) "
+                    f"SELECT {fk}, ? FROM {jt} WHERE tag_id = ?",
+                    (target_id, source_id),
+                )
+                conn.execute(
+                    f"DELETE FROM {jt} WHERE tag_id = ?", (source_id,)
+                )
+            conn.execute("DELETE FROM tags WHERE id = ?", (source_id,))
+            conn.commit()
+        except sqlite3.OperationalError as e:
+            conn.rollback()
+            if "locked" in str(e).lower() or "busy" in str(e).lower():
+                return 503, {"error": "database busy, retry"}
+            raise
+
+        row = conn.execute(
+            "SELECT id, name FROM tags WHERE id = ?", (target_id,)
+        ).fetchone()
+        return 200, {"ok": True, "target": dict(row)}
+    finally:
+        conn.close()
+
+
+def handle_delete_tag(tag_id):
+    """
+    Delete a tag. Junction rows cleaned via ON DELETE CASCADE
+    (every junction declares it on both sides — verified in
+    docs/architecture/tag-merge-review.md §1).
+
+    Contract: app/contracts/tags.md.
+
+    - 404 if tag doesn't exist.
+    - 204 (no body) on success — caller maps this to (204, None).
+    """
+    conn = get_db()
+    try:
+        existing = conn.execute(
+            "SELECT id FROM tags WHERE id = ?", (tag_id,)
+        ).fetchone()
+        if not existing:
+            return 404, {"error": "tag not found"}
+        conn.execute("DELETE FROM tags WHERE id = ?", (tag_id,))
+        conn.commit()
+        return 204, None
+    finally:
+        conn.close()
+
+
+def handle_get_tag_usages(tag_id):
+    """
+    Cross-content view for the tag drawer.
+
+    Contract: app/contracts/tags.md.
+
+    Response 200:
+      {
+        "tag":    {"id": <int>, "name": "<str>"},
+        "usages": {
+          "goals":           [{id, title, status, ...enriched}, ...],
+          "tasks":           [{id, title, status, goal_title, ...enriched}, ...],
+          "people":          [{id, name, relationship, ...enriched}, ...],
+          "knowledge":       [{id, title, item_type, ...}, ...],
+          "journal_entries": [{id, entry_date, content}, ...],
+          "brain_dumps":     [{id, captured_at, content_prefix}, ...]
+        }
+      }
+
+    Each list re-uses the existing per-type list shape (enrich_goal /
+    enrich_task / enrich_person + tag enrichment for knowledge) so
+    Lumen can render with the same row components. brain_dumps return
+    a `content_prefix` (first 200 chars) rather than full content —
+    keeps the drawer payload tight and matches Iris's drawer mock
+    (`2026-04-12 — "ai team should..."`).
+
+    - 404 if tag doesn't exist.
+
+    Privacy: tag name appears in the response (the UI needs it for the
+    drawer header) but is never written to logs.
+    """
+    conn = get_db()
+    try:
+        tag = conn.execute(
+            "SELECT id, name FROM tags WHERE id = ?", (tag_id,)
+        ).fetchone()
+        if not tag:
+            return 404, {"error": "tag not found"}
+
+        # Goals
+        goal_rows = conn.execute(
+            "SELECT g.* FROM goals g "
+            "JOIN goal_tags gt ON gt.goal_id = g.id "
+            "WHERE gt.tag_id = ? ORDER BY g.id",
+            (tag_id,),
+        ).fetchall()
+        goals = [enrich_goal(conn, dict(r)) for r in goal_rows]
+
+        # Tasks
+        task_rows = conn.execute(
+            "SELECT t.* FROM tasks t "
+            "JOIN task_tags tt ON tt.task_id = t.id "
+            "WHERE tt.tag_id = ? ORDER BY t.id",
+            (tag_id,),
+        ).fetchall()
+        tasks = [enrich_task(conn, dict(r)) for r in task_rows]
+
+        # People
+        person_rows = conn.execute(
+            "SELECT p.* FROM people p "
+            "JOIN person_tags pt ON pt.person_id = p.id "
+            "WHERE pt.tag_id = ? ORDER BY p.id",
+            (tag_id,),
+        ).fetchall()
+        people = [enrich_person(conn, dict(r)) for r in person_rows]
+
+        # Knowledge
+        knowledge_rows = conn.execute(
+            "SELECT ki.* FROM knowledge_items ki "
+            "JOIN knowledge_tags kt ON kt.knowledge_id = ki.id "
+            "WHERE kt.tag_id = ? ORDER BY ki.id",
+            (tag_id,),
+        ).fetchall()
+        knowledge = rows_to_dicts(knowledge_rows)
+        for k in knowledge:
+            k["tags"] = get_tags_for(conn, "knowledge_tags", "knowledge_id", k["id"])
+
+        # Journal entries
+        entry_rows = conn.execute(
+            "SELECT je.* FROM journal_entries je "
+            "JOIN entry_tags et ON et.entry_id = je.id "
+            "WHERE et.tag_id = ? ORDER BY je.entry_date DESC, je.id DESC",
+            (tag_id,),
+        ).fetchall()
+        entries = enrich_entries(conn, rows_to_dicts(entry_rows))
+
+        # Brain dumps — title-equivalent is a content prefix.
+        dump_rows = conn.execute(
+            "SELECT bd.id, bd.captured_at, bd.processing_status, "
+            "       substr(bd.content, 1, 200) AS content_prefix "
+            "FROM brain_dumps bd "
+            "JOIN brain_dump_tags bt ON bt.brain_dump_id = bd.id "
+            "WHERE bt.tag_id = ? ORDER BY bd.captured_at DESC",
+            (tag_id,),
+        ).fetchall()
+        dumps = rows_to_dicts(dump_rows)
+        for d in dumps:
+            d["tags"] = get_tags_for(conn, "brain_dump_tags", "brain_dump_id", d["id"])
+
+        return 200, {
+            "tag": dict(tag),
+            "usages": {
+                "goals":           goals,
+                "tasks":           tasks,
+                "people":          people,
+                "knowledge":       knowledge,
+                "journal_entries": entries,
+                "brain_dumps":     dumps,
+            },
+        }
     finally:
         conn.close()
 
