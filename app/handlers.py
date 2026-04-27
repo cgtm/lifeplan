@@ -667,9 +667,12 @@ def enrich_goal(conn, goal):
     ).fetchone()
     goal["task_total"] = row["total"]
     goal["task_completed"] = row["completed"]
-    # blockers (what blocks this goal)
+    # blockers (what blocks this goal). resolved_at is included so the
+    # goal-detail modal can dim resolved rows without a follow-up fetch.
+    # See app/contracts/blockers.md.
     blocker_rows = conn.execute(
         "SELECT d.id, d.blocker_type, d.blocker_id, d.notes, d.resolved, "
+        "d.resolved_at, "
         "CASE d.blocker_type "
         "  WHEN 'goal' THEN (SELECT title FROM goals WHERE id = d.blocker_id) "
         "  WHEN 'task' THEN (SELECT title FROM tasks WHERE id = d.blocker_id) "
@@ -1258,6 +1261,114 @@ def handle_get_dependencies(params):
             "FROM dependencies d ORDER BY d.id"
         ).fetchall()
         return 200, rows_to_dicts(rows)
+    finally:
+        conn.close()
+
+
+# ── enriched-blocker SELECT ────────────────────────────────────────
+# Same projection as handle_get_dependencies, but for a single row by id.
+# Used by handle_update_blocker to return the enriched row in the response
+# so the UI does not need a follow-up GET.
+_BLOCKER_SELECT = (
+    "SELECT d.*, "
+    "CASE d.blocker_type "
+    "  WHEN 'goal' THEN (SELECT title FROM goals WHERE id = d.blocker_id) "
+    "  WHEN 'task' THEN (SELECT title FROM tasks WHERE id = d.blocker_id) "
+    "  WHEN 'external_system' THEN (SELECT name FROM external_systems WHERE id = d.blocker_id) "
+    "END AS blocker_name, "
+    "CASE d.blocked_type "
+    "  WHEN 'goal' THEN (SELECT title FROM goals WHERE id = d.blocked_id) "
+    "  WHEN 'task' THEN (SELECT title FROM tasks WHERE id = d.blocked_id) "
+    "END AS blocked_name "
+    "FROM dependencies d WHERE d.id = ?"
+)
+
+
+def handle_update_blocker(blocker_id, body):
+    """
+    Partial update of a single dependencies row (UI-facing word: "blocker").
+
+    Contract: app/contracts/blockers.md.
+
+    Mutable body fields (any subset; empty body is a 400):
+      - resolved: bool / 0 / 1 — triggers the dual-write enforced here
+        rather than at the client. SET resolved=1, resolved_at=datetime('now')
+        on truthy; SET resolved=0, resolved_at=NULL on falsy.
+      - notes: str or None — freeform; pass null to clear.
+
+    Not mutable: id, created_at, blocker_type/blocker_id/blocked_type/blocked_id
+    (edge identity), resolved_at (derived from `resolved`).
+
+    Returns 200 with the full enriched row (matches one row of GET
+    /api/dependencies plus blocker_name/blocked_name). 404 if the id
+    doesn't exist. 400 on malformed input.
+
+    Privacy: never logs notes content, blocker/blocked names, or the
+    request body.
+    """
+    if not isinstance(body, dict):
+        return 400, {"error": "body must be a JSON object"}
+
+    allowed = {"resolved", "notes"}
+    unknown = [k for k in body.keys() if k not in allowed]
+    if unknown:
+        # Echo only the field name, never the value (privacy).
+        return 400, {"error": f"unknown field: {unknown[0]}"}
+
+    if not body:
+        return 400, {"error": "no fields to update"}
+
+    # Validate types up front — fail closed before opening a connection.
+    sets = []
+    args = []
+
+    if "resolved" in body:
+        v = body["resolved"]
+        # Accept Python bool and the ints 0/1. Reject everything else
+        # (including strings like "yes" / "true") — the UI sends real
+        # JSON booleans.
+        if isinstance(v, bool):
+            resolved_int = 1 if v else 0
+        elif isinstance(v, int) and v in (0, 1):
+            resolved_int = v
+        else:
+            return 400, {"error": "resolved must be a boolean"}
+        # Dual-write: resolved and resolved_at always move together.
+        # See SCHEMA.md Design Decision #14.
+        if resolved_int == 1:
+            sets.append("resolved = 1")
+            sets.append("resolved_at = datetime('now')")
+        else:
+            sets.append("resolved = 0")
+            sets.append("resolved_at = NULL")
+
+    if "notes" in body:
+        v = body["notes"]
+        if v is not None and not isinstance(v, str):
+            return 400, {"error": "notes must be a string or null"}
+        sets.append("notes = ?")
+        args.append(v)
+
+    # If we got here with no sets, every recognised key was effectively a
+    # no-op — but the only way that happens is an empty dict, which we
+    # already rejected. Defensive guard:
+    if not sets:
+        return 400, {"error": "no fields to update"}
+
+    conn = get_db()
+    try:
+        existing = conn.execute(
+            "SELECT id FROM dependencies WHERE id = ?", (blocker_id,)
+        ).fetchone()
+        if not existing:
+            return 404, {"error": "Blocker not found"}
+
+        sql = "UPDATE dependencies SET " + ", ".join(sets) + " WHERE id = ?"
+        conn.execute(sql, (*args, blocker_id))
+        conn.commit()
+
+        row = conn.execute(_BLOCKER_SELECT, (blocker_id,)).fetchone()
+        return 200, dict(row)
     finally:
         conn.close()
 

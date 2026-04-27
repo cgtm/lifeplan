@@ -43,7 +43,7 @@ if __package__ is None or __package__ == "":
         handle_update_person, handle_delete_person,
         handle_get_knowledge, handle_create_knowledge,
         handle_update_knowledge, handle_delete_knowledge,
-        handle_get_dependencies, handle_get_dashboard,
+        handle_get_dependencies, handle_update_blocker, handle_get_dashboard,
         handle_get_prompts, handle_update_prompt, handle_get_prompt_count,
         handle_generate_prompts,
         enrich_goal, enrich_task, enrich_person,
@@ -72,7 +72,7 @@ else:
         handle_update_person, handle_delete_person,
         handle_get_knowledge, handle_create_knowledge,
         handle_update_knowledge, handle_delete_knowledge,
-        handle_get_dependencies, handle_get_dashboard,
+        handle_get_dependencies, handle_update_blocker, handle_get_dashboard,
         handle_get_prompts, handle_update_prompt, handle_get_prompt_count,
         handle_generate_prompts,
         enrich_goal, enrich_task, enrich_person,
@@ -576,6 +576,19 @@ class Handler(SimpleHTTPRequestHandler):
 
         if method == "GET" and path == "/api/dependencies":
             status, data = handle_get_dependencies(params)
+            self.send_json(status, data)
+            return True
+
+        # ── Blockers (UI-facing alias for dependencies rows) ──
+        # See app/contracts/blockers.md for the URL→table mapping rationale.
+
+        if method == "PUT" and path.startswith("/api/blockers/"):
+            bid = self.parse_id(path)
+            if bid is None:
+                self.send_json(400, {"error": "Invalid blocker ID"})
+                return True
+            body = self.read_body()
+            status, data = handle_update_blocker(bid, body)
             self.send_json(status, data)
             return True
 
