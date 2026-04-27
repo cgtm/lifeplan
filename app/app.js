@@ -146,9 +146,18 @@ function statusPill(status) {
   return `<span class="status status-${esc(status)}">${esc(status)}</span>`;
 }
 
+function tagChipHtml(t) {
+  // Standard clickable chip. The id is required to drive the drawer; we
+  // tolerate legacy tag rows that only have a name (rare) by falling back
+  // to a non-button span.
+  if (!t || (t.id == null && !t.name)) return '';
+  if (t.id == null) return `<span class="tag">${esc(t.name)}</span>`;
+  return `<button type="button" class="tag tag-chip" data-tag-id="${t.id}" data-tag-name="${esc(t.name)}">${esc(t.name)}</button>`;
+}
+
 function tagsHtml(tags) {
   if (!tags || !tags.length) return '';
-  return `<div class="tags-row">${tags.map(t => `<span class="tag">${esc(t.name)}</span>`).join('')}</div>`;
+  return `<div class="tags-row">${tags.map(tagChipHtml).join('')}</div>`;
 }
 
 function typePill(type) {
@@ -421,7 +430,7 @@ function navigate(view) {
   $$('.nav-link').forEach(l => l.classList.toggle('active', l.dataset.view === view));
   $$('.nav-more-item').forEach(l => l.classList.toggle('active', l.dataset.view === view));
   // Highlight "More" tab when a sub-view is active
-  const moreViews = ['people', 'journal', 'knowledge'];
+  const moreViews = ['people', 'journal', 'knowledge', 'tags'];
   const moreBtn = $('#navMoreBtn');
   if (moreBtn) moreBtn.classList.toggle('active', moreViews.includes(view));
   // Close more menu on navigate
@@ -437,6 +446,7 @@ function navigate(view) {
   else if (view === 'people') loadPeople();
   else if (view === 'journal') loadJournal();
   else if (view === 'knowledge') loadKnowledge();
+  else if (view === 'tags') loadTagsView();
 }
 
 $$('.nav-link, .nav-brand').forEach(el => {
@@ -2276,7 +2286,7 @@ function renderJournalEntries() {
     <div class="entry-card" data-id="${e.id}">
       <div class="entry-date">${fmtDateLong(e.entry_date)}</div>
       <div class="entry-preview">${esc(e.content)}</div>
-      ${e.tags.length ? `<div class="entry-tags-row">${e.tags.map(t => `<span class="tag">${esc(t.name)}</span>`).join('')}</div>` : ''}
+      ${e.tags.length ? `<div class="entry-tags-row">${e.tags.map(tagChipHtml).join('')}</div>` : ''}
     </div>
   `).join('');
 
@@ -2370,7 +2380,7 @@ function openJournalDetail(id) {
 
   $('#journalDetailDate').textContent = fmtDateLong(entry.entry_date);
   $('#journalDetailContent').textContent = entry.content;
-  $('#journalDetailTags').innerHTML = entry.tags.map(t => `<span class="tag">${esc(t.name)}</span>`).join('');
+  $('#journalDetailTags').innerHTML = entry.tags.map(tagChipHtml).join('');
   $('#journalDetailMeta').textContent = `Created ${fmtTimestamp(entry.created_at)}` +
     (entry.updated_at !== entry.created_at ? ` \u00b7 Updated ${fmtTimestamp(entry.updated_at)}` : '');
 
@@ -2598,6 +2608,713 @@ $('#knowledgeSearch').addEventListener('input', () => {
 });
 
 // ══════════════════════════════════════════════════════════
+// TAGS VIEW
+// ══════════════════════════════════════════════════════════
+
+let allTags = [];
+let tagsSort = 'most-used';   // most-used | alpha | unused
+let tagsSearchQ = '';
+let tagsSearchDebounce = null;
+let _addTagSubmitting = false;
+
+async function loadTagsView() {
+  if (!allTags.length) renderSkeletonCards('#tagsList', 4);
+  const data = await api('/tags');
+  allTags = Array.isArray(data) ? data : [];
+  renderTagsView();
+}
+
+function _filteredSortedTags() {
+  const q = tagsSearchQ.trim().toLowerCase();
+  let list = allTags.slice();
+  if (q) list = list.filter(t => t.name.toLowerCase().includes(q));
+  if (tagsSort === 'unused') {
+    list = list.filter(t => (t.usage_count || 0) === 0);
+    list.sort((a, b) => a.name.localeCompare(b.name));
+  } else if (tagsSort === 'alpha') {
+    list.sort((a, b) => a.name.localeCompare(b.name));
+  } else {
+    // most-used: backend already sorts by usage_count DESC, name ASC. Keep order.
+  }
+  return list;
+}
+
+function _tagBreakdownHtml(t) {
+  const b = t.breakdown || {};
+  const parts = [];
+  if (b.goals)           parts.push(`${b.goals} goal${b.goals === 1 ? '' : 's'}`);
+  if (b.tasks)           parts.push(`${b.tasks} task${b.tasks === 1 ? '' : 's'}`);
+  if (b.knowledge)       parts.push(`${b.knowledge} knowledge`);
+  if (b.people)          parts.push(`${b.people} ${b.people === 1 ? 'person' : 'people'}`);
+  if (b.journal_entries) parts.push(`${b.journal_entries} entr${b.journal_entries === 1 ? 'y' : 'ies'}`);
+  if (b.brain_dumps)     parts.push(`${b.brain_dumps} dump${b.brain_dumps === 1 ? '' : 's'}`);
+  if (!parts.length) return `<div class="tag-row-breakdown empty">Not yet used.</div>`;
+  return `<div class="tag-row-breakdown">${parts.join(' · ')}</div>`;
+}
+
+function renderTagsView() {
+  const subtitle = $('#tagsSubtitle');
+  const list = $('#tagsList');
+  if (!list) return;
+
+  const total = allTags.length;
+  const totalUsages = allTags.reduce((sum, t) => sum + (t.usage_count || 0), 0);
+  if (subtitle) {
+    subtitle.textContent = total === 0
+      ? 'No tags yet'
+      : `${total} tag${total === 1 ? '' : 's'} · ${totalUsages} usage${totalUsages === 1 ? '' : 's'}`;
+  }
+
+  // Empty (no tags at all)
+  if (!total) {
+    list.innerHTML = `<div class="empty-state">
+      <p>No tags yet</p>
+      <p class="hint">Tags appear automatically as you brain-dump, or add one above to start a vocabulary.</p>
+    </div>`;
+    return;
+  }
+
+  const rows = _filteredSortedTags();
+
+  // No-search-results launchpad
+  if (!rows.length && tagsSearchQ.trim()) {
+    const q = tagsSearchQ.trim();
+    list.innerHTML = `<div class="empty-state">
+      <p>No tags match "${esc(q)}"</p>
+      <p class="hint"><button type="button" class="btn-text" id="tagsCreateFromSearch">Create "${esc(q)}" as a new tag</button></p>
+    </div>`;
+    const btn = $('#tagsCreateFromSearch');
+    if (btn) btn.addEventListener('click', () => {
+      const input = $('#addTagInput');
+      if (input) { input.value = q; input.dispatchEvent(new Event('input')); }
+      submitAddTag();
+    });
+    return;
+  }
+
+  if (!rows.length) {
+    list.innerHTML = `<div class="empty-state"><p>No tags match the current filter.</p></div>`;
+    return;
+  }
+
+  list.innerHTML = rows.map(t => {
+    const dim = (t.usage_count || 0) === 0 ? ' dim' : '';
+    return `
+    <div class="tag-row" data-tag-id="${t.id}" data-tag-name="${esc(t.name)}">
+      <div class="tag-row-main">
+        <div class="tag-row-top">
+          <span class="tag-row-name${dim}">${esc(t.name)}</span>
+          <span class="tag-row-count">${t.usage_count || 0}</span>
+        </div>
+        ${_tagBreakdownHtml(t)}
+      </div>
+      <div class="card-actions" onclick="event.stopPropagation()">
+        <button class="card-actions-btn" onclick="event.stopPropagation();toggleActionMenu(this)" aria-label="Tag actions">&ctdot;</button>
+        <div class="card-actions-menu">
+          <button onclick="event.stopPropagation();openTagRename(${t.id})">Rename</button>
+          <button onclick="event.stopPropagation();openTagMerge(${t.id})">Merge into&hellip;</button>
+          <button class="action-delete" onclick="event.stopPropagation();openTagDelete(${t.id})">Delete</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+
+  // Whole-row click → drawer
+  list.querySelectorAll('.tag-row').forEach(row => {
+    row.addEventListener('click', (e) => {
+      // Don't trigger if click came from inside the kebab menu
+      if (e.target.closest('.card-actions')) return;
+      const id = parseInt(row.dataset.tagId, 10);
+      if (id) openTagDrawer(id);
+    });
+  });
+}
+
+// ── Tags toolbar listeners ─────────────────────────────────
+function _initTagsView() {
+  const search = $('#tagsSearch');
+  if (search) {
+    search.addEventListener('input', () => {
+      clearTimeout(tagsSearchDebounce);
+      tagsSearchDebounce = setTimeout(() => {
+        tagsSearchQ = search.value;
+        renderTagsView();
+      }, 120);
+    });
+  }
+  const filters = $('#tagsFilters');
+  if (filters) {
+    filters.addEventListener('click', (e) => {
+      const pill = e.target.closest('.filter-pill');
+      if (!pill) return;
+      tagsSort = pill.dataset.filter;
+      filters.querySelectorAll('.filter-pill').forEach(p =>
+        p.classList.toggle('active', p.dataset.filter === tagsSort));
+      renderTagsView();
+    });
+  }
+  // Add tag form
+  const form = $('#addTagForm');
+  const input = $('#addTagInput');
+  const btn = $('#addTagBtn');
+  if (form && input && btn) {
+    input.addEventListener('input', () => {
+      btn.disabled = !input.value.trim();
+      if (input.value.trim()) _setAddTagHint('');
+    });
+    form.addEventListener('submit', (e) => { e.preventDefault(); submitAddTag(); });
+  }
+}
+
+function _setAddTagHint(msg, isError) {
+  const hint = $('#addTagHint');
+  if (!hint) return;
+  hint.textContent = msg || '';
+  hint.classList.toggle('error', !!isError && !!msg);
+}
+
+function _highlightTagRow(tagId) {
+  requestAnimationFrame(() => {
+    const row = document.querySelector(`.tag-row[data-tag-id="${tagId}"]`);
+    if (!row) return;
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    row.classList.remove('highlight-flash');
+    void row.offsetWidth;
+    row.classList.add('highlight-flash');
+  });
+}
+
+async function submitAddTag() {
+  if (_addTagSubmitting) return;
+  const input = $('#addTagInput');
+  const btn = $('#addTagBtn');
+  if (!input || !btn) return;
+
+  const raw = (input.value || '').trim();
+  if (!raw) { _setAddTagHint('Enter a tag name.', true); return; }
+  // Normalise client-side for the optimistic case (server normalises too).
+  const name = raw.toLowerCase().replace(/\s+/g, '-');
+
+  _addTagSubmitting = true;
+  btn.disabled = true;
+  _setAddTagHint('');
+
+  try {
+    const res = await fetch(`${MOUNT}api/tags`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    if (res.status === 401) { window.location.href = `${MOUNT}login`; return; }
+
+    let payload = null;
+    try { payload = await res.json(); } catch (_) {}
+
+    if (res.status === 201 && payload && payload.id) {
+      // Created — refresh the list so we get the proper breakdown shape.
+      input.value = '';
+      _setAddTagHint('');
+      await loadTagsView();
+      _highlightTagRow(payload.id);
+      input.focus();
+      return;
+    }
+    if (res.status === 200 && payload && payload.id) {
+      // Duplicate — focus the existing row.
+      input.value = '';
+      _setAddTagHint('');
+      // Make sure the existing tag is in our list.
+      if (!allTags.some(t => t.id === payload.id)) await loadTagsView();
+      _highlightTagRow(payload.id);
+      input.focus();
+      return;
+    }
+    if (res.status === 400) {
+      _setAddTagHint((payload && payload.error) || 'Name is required.', true);
+      return;
+    }
+    showToast("Couldn't add. Try again.");
+  } catch (_) {
+    showToast('Network error.');
+  } finally {
+    _addTagSubmitting = false;
+    const v = ($('#addTagInput')?.value || '').trim();
+    if ($('#addTagBtn')) $('#addTagBtn').disabled = !v;
+  }
+}
+
+// ══════════════════════════════════════════════════════════
+// TAG DRAWER
+// ══════════════════════════════════════════════════════════
+
+let _currentDrawerTagId = null;
+let _currentDrawerTag = null;       // { id, name }
+let _currentDrawerUsages = null;    // usages payload
+
+const TAG_DRAWER_SECTIONS = [
+  { key: 'goals',           label: 'Goals',         titleField: 'title' },
+  { key: 'tasks',           label: 'Tasks',         titleField: 'title' },
+  { key: 'people',          label: 'People',        titleField: 'name'  },
+  { key: 'knowledge',       label: 'Knowledge',     titleField: 'title' },
+  { key: 'journal_entries', label: 'Journal',       titleField: null    }, // custom
+  { key: 'brain_dumps',     label: 'Brain dumps',   titleField: null    }, // custom
+];
+
+async function openTagDrawer(tagId) {
+  _currentDrawerTagId = tagId;
+
+  // Try to find the tag in our cached list first for instant header.
+  const cached = allTags.find(t => t.id === tagId);
+  $('#tagDrawerName').textContent = cached ? cached.name : '...';
+  $('#tagDrawerCount').textContent = cached
+    ? `${cached.usage_count || 0} usage${(cached.usage_count || 0) === 1 ? '' : 's'}`
+    : 'Loading...';
+  $('#tagDrawerBody').innerHTML = `<div class="empty-state"><p>Loading&hellip;</p></div>`;
+
+  openModal($('#tagDrawerOverlay'));
+
+  let data;
+  try {
+    data = await apiTry(`/tags/${tagId}/usages`);
+  } catch (err) {
+    apiError(err, {
+      retry: () => openTagDrawer(tagId),
+      onRefresh: () => closeModal($('#tagDrawerOverlay')),
+    });
+    return;
+  }
+  if (!data || !data.tag) return;
+
+  _currentDrawerTag = data.tag;
+  _currentDrawerUsages = data.usages || {};
+  _renderTagDrawer();
+}
+
+function _renderTagDrawer() {
+  if (!_currentDrawerTag) return;
+  const usages = _currentDrawerUsages || {};
+  $('#tagDrawerName').textContent = _currentDrawerTag.name;
+  const totalUsages = TAG_DRAWER_SECTIONS.reduce((sum, s) => sum + (usages[s.key]?.length || 0), 0);
+  $('#tagDrawerCount').textContent = `${totalUsages} usage${totalUsages === 1 ? '' : 's'}`;
+
+  if (!totalUsages) {
+    $('#tagDrawerBody').innerHTML = `<div class="empty-state" style="margin-top:24px"><p>No items use this tag yet.</p></div>`;
+    return;
+  }
+
+  const html = TAG_DRAWER_SECTIONS.map(s => {
+    const items = usages[s.key] || [];
+    if (!items.length) return '';
+    const collapsed = items.length > 50 ? ' collapsed' : '';
+    const itemsHtml = items.map(it => _renderDrawerItem(s, it)).join('');
+    return `
+      <div class="tag-drawer-section${collapsed}" data-section="${s.key}">
+        <div class="tag-drawer-section-header">
+          <span>${esc(s.label)} (${items.length})</span>
+          <span class="tag-drawer-section-toggle">${collapsed ? 'show' : 'hide'}</span>
+        </div>
+        <div class="tag-drawer-section-body">${itemsHtml}</div>
+      </div>`;
+  }).join('');
+
+  $('#tagDrawerBody').innerHTML = html;
+
+  // Section collapse toggle
+  $('#tagDrawerBody').querySelectorAll('.tag-drawer-section-header').forEach(h => {
+    h.addEventListener('click', () => {
+      const sec = h.parentElement;
+      sec.classList.toggle('collapsed');
+      const tog = h.querySelector('.tag-drawer-section-toggle');
+      if (tog) tog.textContent = sec.classList.contains('collapsed') ? 'show' : 'hide';
+    });
+  });
+
+  // Drawer item click → open entity surface
+  $('#tagDrawerBody').querySelectorAll('.tag-drawer-item').forEach(it => {
+    it.addEventListener('click', () => {
+      const kind = it.dataset.kind;
+      const id = parseInt(it.dataset.id, 10);
+      _openDrawerItem(kind, id);
+    });
+  });
+}
+
+function _renderDrawerItem(section, item) {
+  let title = '';
+  let meta = '';
+  if (section.key === 'journal_entries') {
+    title = item.entry_date ? fmtDateLong(item.entry_date) : '(entry)';
+    meta = (item.content || '').slice(0, 80);
+  } else if (section.key === 'brain_dumps') {
+    title = (item.content_prefix || '').replace(/\s+/g, ' ').trim().slice(0, 80) || '(brain dump)';
+    meta = item.captured_at ? fmtRelative(item.captured_at) : '';
+  } else {
+    title = item[section.titleField] || `(${section.label.toLowerCase()})`;
+    if (item.status) meta = item.status;
+  }
+  return `
+    <div class="tag-drawer-item" data-kind="${section.key}" data-id="${item.id}">
+      <span class="tag-drawer-item-title">${esc(title)}</span>
+      ${meta ? `<span class="tag-drawer-item-meta">${esc(meta)}</span>` : ''}
+      <span class="tag-drawer-item-chev">&rsaquo;</span>
+    </div>`;
+}
+
+function _openDrawerItem(kind, id) {
+  // Drawer stays open under the entity modal so closing the entity
+  // brings Cam back to the drawer (lateral navigation).
+  if (kind === 'goals') {
+    openGoalDetail(id);
+  } else if (kind === 'tasks') {
+    // Tasks open the edit modal. Make sure the task is in allTasks first.
+    apiTry(`/tasks/${id}`).then(t => {
+      if (!t) return;
+      if (!allTasks.some(x => x.id === t.id)) allTasks.push(t);
+      openEditTask(id);
+    }).catch(() => apiError({ status: 404 }));
+  } else if (kind === 'people') {
+    apiTry(`/people/${id}`).then(p => {
+      if (!p) return;
+      if (!allPeople.some(x => x.id === p.id)) allPeople.push(p);
+      openEditPerson(id);
+    }).catch(() => apiError({ status: 404 }));
+  } else if (kind === 'knowledge') {
+    apiTry(`/knowledge/${id}`).then(k => {
+      if (!k) return;
+      if (!allKnowledge.some(x => x.id === k.id)) allKnowledge.push(k);
+      openEditKnowledge(id);
+    }).catch(() => apiError({ status: 404 }));
+  } else if (kind === 'journal_entries') {
+    apiTry(`/entries/${id}`).then(entry => {
+      if (!entry) return;
+      if (!journalEntries.some(x => x.id === entry.id)) journalEntries.push(entry);
+      openJournalDetail(entry.id);
+    }).catch(() => apiError({ status: 404 }));
+  } else if (kind === 'brain_dumps') {
+    // Navigate to dump view (no per-dump modal exists today).
+    closeModal($('#tagDrawerOverlay'));
+    navigate('dump');
+  }
+}
+
+// ── Drawer event listeners ────────────────────────────────
+$('#tagDrawerClose')?.addEventListener('click', () => closeModal($('#tagDrawerOverlay')));
+$('#tagDrawerOverlay')?.addEventListener('click', (e) => {
+  if (e.target === $('#tagDrawerOverlay')) closeModal($('#tagDrawerOverlay'));
+});
+
+// Drawer footer actions
+$('#tagDrawerRename')?.addEventListener('click', () => {
+  if (_currentDrawerTagId) openTagRename(_currentDrawerTagId);
+});
+$('#tagDrawerMerge')?.addEventListener('click', () => {
+  if (_currentDrawerTagId) openTagMerge(_currentDrawerTagId);
+});
+$('#tagDrawerDelete')?.addEventListener('click', () => {
+  if (_currentDrawerTagId) openTagDelete(_currentDrawerTagId);
+});
+
+// ── Document-level chip click delegate ────────────────────
+// Any element with data-tag-id opens the drawer. Excludes elements that
+// are themselves part of the tags-list rows or the merge picker (they
+// have their own bindings).
+document.addEventListener('click', (e) => {
+  const chip = e.target.closest('[data-tag-id]');
+  if (!chip) return;
+  // Skip rows in the tags list (already wired) and items inside the drawer body itself.
+  if (chip.classList.contains('tag-row')) return;
+  if (chip.classList.contains('tag-merge-list-item')) return;
+  if (chip.closest('#tagDrawerBody')) return;
+  // Only respond to actual chip-y elements (button.tag-chip, span.tag with id, or data-driven elements)
+  if (!chip.classList.contains('tag') && !chip.classList.contains('tag-chip') && !chip.dataset.tagChip) {
+    return;
+  }
+  e.preventDefault();
+  e.stopPropagation();
+  const id = parseInt(chip.dataset.tagId, 10);
+  if (id) openTagDrawer(id);
+});
+
+// ══════════════════════════════════════════════════════════
+// TAG RENAME / MERGE / DELETE
+// ══════════════════════════════════════════════════════════
+
+function _findTag(id) {
+  return allTags.find(t => t.id === id) || (_currentDrawerTag && _currentDrawerTag.id === id ? _currentDrawerTag : null);
+}
+
+// ── Rename ────────────────────────────────────────────────
+function openTagRename(tagId) {
+  const t = _findTag(tagId);
+  if (!t) return;
+  $('#tagRenameId').value = tagId;
+  $('#tagRenameInput').value = t.name;
+  $('#tagRenameHint').textContent = '';
+  $('#tagRenameHint').classList.remove('error');
+  openModal($('#tagRenameOverlay'));
+  setTimeout(() => $('#tagRenameInput').focus(), 250);
+}
+
+async function submitTagRename() {
+  const id = parseInt($('#tagRenameId').value, 10);
+  const raw = ($('#tagRenameInput').value || '').trim();
+  if (!raw) {
+    $('#tagRenameHint').textContent = 'Name is required.';
+    $('#tagRenameHint').classList.add('error');
+    return;
+  }
+  const name = raw.toLowerCase().replace(/\s+/g, '-');
+
+  $('#tagRenameSave').disabled = true;
+  try {
+    const res = await fetch(`${MOUNT}api/tags/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    if (res.status === 401) { window.location.href = `${MOUNT}login`; return; }
+    let payload = null;
+    try { payload = await res.json(); } catch (_) {}
+
+    if (res.status === 200 && payload && payload.id) {
+      closeModal($('#tagRenameOverlay'));
+      // Update local cache
+      const t = allTags.find(x => x.id === id);
+      if (t) t.name = payload.name;
+      if (_currentDrawerTag && _currentDrawerTag.id === id) _currentDrawerTag.name = payload.name;
+      // Refresh views
+      await loadTagsView();
+      if (!$('#tagDrawerOverlay').classList.contains('hidden')) {
+        $('#tagDrawerName').textContent = payload.name;
+      }
+      showToast(`Renamed to "${payload.name}".`);
+      return;
+    }
+    if (res.status === 409 && payload && payload.id) {
+      $('#tagRenameHint').innerHTML = `"${esc(name)}" already exists. <button type="button" class="btn-text" id="tagRenameOfferMerge" style="padding:0;font-size:0.75rem;color:var(--text)">Merge instead?</button>`;
+      $('#tagRenameHint').classList.add('error');
+      const mergeBtn = $('#tagRenameOfferMerge');
+      const targetId = payload.id;
+      if (mergeBtn) mergeBtn.addEventListener('click', () => {
+        closeModal($('#tagRenameOverlay'));
+        openTagMerge(id, targetId);
+      });
+      return;
+    }
+    if (res.status === 400) {
+      $('#tagRenameHint').textContent = (payload && payload.error) || 'Invalid name.';
+      $('#tagRenameHint').classList.add('error');
+      return;
+    }
+    if (res.status === 404) {
+      showToast('That tag no longer exists.');
+      closeModal($('#tagRenameOverlay'));
+      await loadTagsView();
+      return;
+    }
+    showToast("Couldn't rename. Try again.");
+  } catch (_) {
+    showToast('Network error.');
+  } finally {
+    $('#tagRenameSave').disabled = false;
+  }
+}
+
+$('#tagRenameClose')?.addEventListener('click', () => closeModal($('#tagRenameOverlay')));
+$('#tagRenameCancel')?.addEventListener('click', () => closeModal($('#tagRenameOverlay')));
+$('#tagRenameSave')?.addEventListener('click', submitTagRename);
+$('#tagRenameInput')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); submitTagRename(); }
+});
+$('#tagRenameOverlay')?.addEventListener('click', (e) => {
+  if (e.target === $('#tagRenameOverlay')) closeModal($('#tagRenameOverlay'));
+});
+
+// ── Merge ─────────────────────────────────────────────────
+let _tagMergeSelectedTargetId = null;
+let _tagMergeSearchDebounce = null;
+
+async function openTagMerge(sourceId, preselectTargetId) {
+  // Make sure we have the latest list so the picker is fresh.
+  if (!allTags.length) await loadTagsView();
+  const source = _findTag(sourceId);
+  if (!source) return;
+  $('#tagMergeSourceId').value = sourceId;
+  $('#tagMergeSourceLabel').textContent = `${source.name} (${source.usage_count || 0} usage${(source.usage_count || 0) === 1 ? '' : 's'})`;
+  $('#tagMergeTargetSearch').value = '';
+  $('#tagMergePreview').classList.remove('visible');
+  $('#tagMergePreview').textContent = '';
+  $('#tagMergeConfirm').disabled = true;
+  _tagMergeSelectedTargetId = preselectTargetId || null;
+  _renderTagMergeList(sourceId, '');
+  openModal($('#tagMergeOverlay'));
+  setTimeout(() => $('#tagMergeTargetSearch').focus(), 250);
+  if (preselectTargetId) {
+    _selectTagMergeTarget(preselectTargetId, sourceId);
+  }
+}
+
+function _renderTagMergeList(sourceId, q) {
+  const filter = (q || '').trim().toLowerCase();
+  const list = allTags.filter(t => t.id !== sourceId && (!filter || t.name.toLowerCase().includes(filter)));
+  list.sort((a, b) => (b.usage_count || 0) - (a.usage_count || 0) || a.name.localeCompare(b.name));
+  const el = $('#tagMergeTargetList');
+  if (!list.length) {
+    el.innerHTML = `<div class="empty-state" style="padding:16px"><p>No other tags.</p></div>`;
+    return;
+  }
+  el.innerHTML = list.slice(0, 100).map(t => `
+    <div class="tag-merge-list-item${_tagMergeSelectedTargetId === t.id ? ' selected' : ''}" data-target-id="${t.id}">
+      <span>${esc(t.name)}</span>
+      <span class="tag-merge-list-item-count">${t.usage_count || 0}</span>
+    </div>`).join('');
+  el.querySelectorAll('.tag-merge-list-item').forEach(item => {
+    item.addEventListener('click', () => {
+      const targetId = parseInt(item.dataset.targetId, 10);
+      _selectTagMergeTarget(targetId, sourceId);
+    });
+  });
+}
+
+function _selectTagMergeTarget(targetId, sourceId) {
+  _tagMergeSelectedTargetId = targetId;
+  $('#tagMergeTargetList').querySelectorAll('.tag-merge-list-item').forEach(it => {
+    it.classList.toggle('selected', parseInt(it.dataset.targetId, 10) === targetId);
+  });
+  const source = _findTag(sourceId);
+  const target = _findTag(targetId);
+  if (!source || !target) return;
+  const sCount = source.usage_count || 0;
+  const tCount = target.usage_count || 0;
+  const preview = `Merging "${source.name}" (${sCount} usage${sCount === 1 ? '' : 's'}) into "${target.name}" (${tCount} usage${tCount === 1 ? '' : 's'}). After merge, "${target.name}" will have up to ${sCount + tCount} usages, and "${source.name}" will be deleted.`;
+  $('#tagMergePreview').textContent = preview;
+  $('#tagMergePreview').classList.add('visible');
+  $('#tagMergeConfirm').disabled = false;
+}
+
+async function submitTagMerge() {
+  const sourceId = parseInt($('#tagMergeSourceId').value, 10);
+  const targetId = _tagMergeSelectedTargetId;
+  if (!sourceId || !targetId) return;
+  $('#tagMergeConfirm').disabled = true;
+  try {
+    const res = await fetch(`${MOUNT}api/tags/${sourceId}/merge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target_id: targetId }),
+    });
+    if (res.status === 401) { window.location.href = `${MOUNT}login`; return; }
+    let payload = null;
+    try { payload = await res.json(); } catch (_) {}
+
+    if (res.status === 200 && payload && payload.target) {
+      closeModal($('#tagMergeOverlay'));
+      showToast(`Merged into "${payload.target.name}".`);
+      await loadTagsView();
+      // Navigate the drawer to the surviving target.
+      openTagDrawer(payload.target.id);
+      return;
+    }
+    if (res.status === 503) {
+      // Auto-retry once after a short delay.
+      setTimeout(submitTagMerge, 750);
+      return;
+    }
+    if (res.status === 400) {
+      showToast((payload && payload.error) || 'Invalid merge.');
+      return;
+    }
+    if (res.status === 404) {
+      showToast('Tag no longer exists.');
+      closeModal($('#tagMergeOverlay'));
+      await loadTagsView();
+      return;
+    }
+    showToast("Couldn't merge. Try again.");
+  } catch (_) {
+    showToast('Network error.');
+  } finally {
+    $('#tagMergeConfirm').disabled = false;
+  }
+}
+
+$('#tagMergeClose')?.addEventListener('click', () => closeModal($('#tagMergeOverlay')));
+$('#tagMergeCancel')?.addEventListener('click', () => closeModal($('#tagMergeOverlay')));
+$('#tagMergeConfirm')?.addEventListener('click', submitTagMerge);
+$('#tagMergeOverlay')?.addEventListener('click', (e) => {
+  if (e.target === $('#tagMergeOverlay')) closeModal($('#tagMergeOverlay'));
+});
+$('#tagMergeTargetSearch')?.addEventListener('input', () => {
+  clearTimeout(_tagMergeSearchDebounce);
+  _tagMergeSearchDebounce = setTimeout(() => {
+    const sourceId = parseInt($('#tagMergeSourceId').value, 10);
+    _renderTagMergeList(sourceId, $('#tagMergeTargetSearch').value);
+  }, 100);
+});
+
+// ── Delete ────────────────────────────────────────────────
+function openTagDelete(tagId) {
+  const t = _findTag(tagId);
+  if (!t) return;
+  $('#tagDeleteId').value = tagId;
+  const b = t.breakdown || {};
+  const parts = [];
+  if (b.goals)           parts.push(`${b.goals} goal${b.goals === 1 ? '' : 's'}`);
+  if (b.tasks)           parts.push(`${b.tasks} task${b.tasks === 1 ? '' : 's'}`);
+  if (b.knowledge)       parts.push(`${b.knowledge} knowledge`);
+  if (b.people)          parts.push(`${b.people} ${b.people === 1 ? 'person' : 'people'}`);
+  if (b.journal_entries) parts.push(`${b.journal_entries} entr${b.journal_entries === 1 ? 'y' : 'ies'}`);
+  if (b.brain_dumps)     parts.push(`${b.brain_dumps} dump${b.brain_dumps === 1 ? '' : 's'}`);
+  const total = t.usage_count || 0;
+  const breakdown = parts.length ? ` (${parts.join(', ')})` : '';
+  const msg = total
+    ? `Delete "${t.name}"? It will be removed from ${total} item${total === 1 ? '' : 's'}${breakdown}.`
+    : `Delete "${t.name}"? It is currently unused.`;
+  $('#tagDeleteMessage').textContent = msg;
+  openModal($('#tagDeleteOverlay'));
+}
+
+async function submitTagDelete() {
+  const id = parseInt($('#tagDeleteId').value, 10);
+  if (!id) return;
+  $('#tagDeleteConfirm').disabled = true;
+  try {
+    const res = await fetch(`${MOUNT}api/tags/${id}`, { method: 'DELETE' });
+    if (res.status === 401) { window.location.href = `${MOUNT}login`; return; }
+    if (res.status === 204) {
+      closeModal($('#tagDeleteOverlay'));
+      // Close drawer if open on the deleted tag
+      if (_currentDrawerTagId === id) {
+        closeModal($('#tagDrawerOverlay'));
+        _currentDrawerTagId = null;
+        _currentDrawerTag = null;
+      }
+      showToast('Tag deleted.');
+      await loadTagsView();
+      return;
+    }
+    if (res.status === 404) {
+      showToast('That tag no longer exists.');
+      closeModal($('#tagDeleteOverlay'));
+      await loadTagsView();
+      return;
+    }
+    showToast("Couldn't delete. Try again.");
+  } catch (_) {
+    showToast('Network error.');
+  } finally {
+    $('#tagDeleteConfirm').disabled = false;
+  }
+}
+
+$('#tagDeleteClose')?.addEventListener('click', () => closeModal($('#tagDeleteOverlay')));
+$('#tagDeleteCancel')?.addEventListener('click', () => closeModal($('#tagDeleteOverlay')));
+$('#tagDeleteConfirm')?.addEventListener('click', submitTagDelete);
+$('#tagDeleteOverlay')?.addEventListener('click', (e) => {
+  if (e.target === $('#tagDeleteOverlay')) closeModal($('#tagDeleteOverlay'));
+});
+
+// ══════════════════════════════════════════════════════════
 // EDIT & DELETE — PEOPLE
 // ══════════════════════════════════════════════════════════
 
@@ -2803,6 +3520,10 @@ document.addEventListener('keydown', (e) => {
     closeModal($('#editTaskOverlay'));
     closeModal($('#editGoalOverlay'));
     closeModal($('#editKnowledgeOverlay'));
+    closeModal($('#tagDrawerOverlay'));
+    closeModal($('#tagRenameOverlay'));
+    closeModal($('#tagMergeOverlay'));
+    closeModal($('#tagDeleteOverlay'));
     if (!$('#reviewOverlay').classList.contains('hidden')) {
       closeModal($('#reviewOverlay'));
       reviewingDumpId = null;
@@ -2818,6 +3539,8 @@ document.addEventListener('keydown', (e) => {
     if (!$('#editTaskOverlay').classList.contains('hidden')) { e.preventDefault(); $('#saveTaskBtn').click(); return; }
     if (!$('#editGoalOverlay').classList.contains('hidden')) { e.preventDefault(); $('#saveGoalBtn').click(); return; }
     if (!$('#editKnowledgeOverlay').classList.contains('hidden')) { e.preventDefault(); $('#saveKnowledgeBtn').click(); return; }
+    if (!$('#tagRenameOverlay').classList.contains('hidden')) { e.preventDefault(); $('#tagRenameSave').click(); return; }
+    if (!$('#tagMergeOverlay').classList.contains('hidden') && !$('#tagMergeConfirm').disabled) { e.preventDefault(); $('#tagMergeConfirm').click(); return; }
     if (!$('#journalOverlay').classList.contains('hidden')) {
       e.preventDefault();
       saveJournalEntry();
@@ -2911,6 +3634,7 @@ document.addEventListener('keydown', (e) => {
     else if (currentView === 'people') loadPeople();
     else if (currentView === 'journal') loadJournal();
     else if (currentView === 'knowledge') loadKnowledge();
+    else if (currentView === 'tags') loadTagsView();
   }
 
   document.addEventListener('touchstart', (e) => {
@@ -2960,6 +3684,7 @@ initAddPersonForm();
 initAddKnowledgeForm();
 initAddGoalForm();
 initAddTaskForm();
+_initTagsView();
 
 // Deep-link: if the page loaded with ?addNote=1, jump straight to Knowledge.
 {

@@ -30,6 +30,7 @@
         <a class="nav-link nav-desktop" data-view="people">People</a>
         <a class="nav-link nav-desktop" data-view="journal">Journal</a>
         <a class="nav-link nav-desktop" data-view="knowledge">Knowledge</a>
+        <a class="nav-link nav-desktop" data-view="tags">Tags</a>
         <a class="nav-link nav-more" id="navMoreBtn">More</a>
         <button class="theme-toggle nav-desktop" id="themeToggle" title="Toggle theme">auto</button>
         <button class="nav-logout nav-desktop" id="navLogoutDesktopBtn" title="Log out" aria-label="Log out">Log out</button>
@@ -39,6 +40,7 @@
         <a class="nav-more-item" data-view="people">People</a>
         <a class="nav-more-item" data-view="journal">Journal</a>
         <a class="nav-more-item" data-view="knowledge">Knowledge</a>
+        <a class="nav-more-item" data-view="tags">Tags</a>
         <div class="nav-more-theme" id="mobileThemeToggle">
           <span>Theme</span>
           <span class="nav-more-theme-label" id="mobileThemeLabel">auto</span>
@@ -321,7 +323,129 @@
 
         <div id="knowledgeList"></div>
       </div>
+
+      <!-- ══ TAGS VIEW ════════════════════════════════════ -->
+      <div class="view" id="view-tags">
+        <div class="page-header">
+          <h1>Tags</h1>
+          <p id="tagsSubtitle">Loading...</p>
+        </div>
+
+        <div class="tags-toolbar">
+          <input type="search" class="search-box" id="tagsSearch" placeholder="Search tags..." autocomplete="off">
+          <form id="addTagForm" class="add-tag-form" autocomplete="off">
+            <input
+              type="text"
+              id="addTagInput"
+              class="form-input add-tag-input"
+              placeholder="+ new tag"
+              aria-label="New tag name"
+              maxlength="80"
+            />
+            <button type="submit" id="addTagBtn" class="btn-primary" disabled>Add</button>
+          </form>
+          <div id="addTagHint" class="add-tag-hint" role="status" aria-live="polite"></div>
+        </div>
+
+        <div class="filters" id="tagsFilters">
+          <span class="filter-pill active" data-filter="most-used">Most used</span>
+          <span class="filter-pill" data-filter="alpha">A&ndash;Z</span>
+          <span class="filter-pill" data-filter="unused">Unused</span>
+        </div>
+
+        <div id="tagsList"></div>
+      </div>
     </main>
+  </div>
+
+  <!-- ══ TAG DRAWER ══════════════════════════════════════ -->
+  <div class="overlay overlay-drawer hidden" id="tagDrawerOverlay">
+    <div class="modal modal-drawer">
+      <div class="modal-header">
+        <div>
+          <h2 id="tagDrawerName">tag</h2>
+          <div class="modal-sub" id="tagDrawerCount">0 usages</div>
+        </div>
+        <button class="modal-close" id="tagDrawerClose">&times;</button>
+      </div>
+      <div class="tag-drawer-actions">
+        <button class="btn-text" id="tagDrawerRename">Rename</button>
+        <button class="btn-text" id="tagDrawerMerge">Merge into&hellip;</button>
+        <button class="btn-text btn-text-danger" id="tagDrawerDelete">Delete</button>
+      </div>
+      <div class="modal-body" id="tagDrawerBody">
+        <div class="empty-state"><p>Loading&hellip;</p></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ TAG RENAME MODAL ═══════════════════════════════ -->
+  <div class="overlay hidden" id="tagRenameOverlay">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>Rename tag</h2>
+        <button class="modal-close" id="tagRenameClose">&times;</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="tagRenameId">
+        <div class="form-group">
+          <label class="form-label" for="tagRenameInput">New name</label>
+          <input type="text" class="form-input" id="tagRenameInput" maxlength="80">
+          <p class="form-hint">Lowercase, hyphenated.</p>
+        </div>
+        <div class="add-tag-hint" id="tagRenameHint" role="status" aria-live="polite"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" id="tagRenameCancel">Cancel</button>
+        <button class="btn-primary" id="tagRenameSave">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ TAG MERGE MODAL ════════════════════════════════ -->
+  <div class="overlay hidden" id="tagMergeOverlay">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>Merge tag</h2>
+        <button class="modal-close" id="tagMergeClose">&times;</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="tagMergeSourceId">
+        <div class="form-group">
+          <label class="form-label">From</label>
+          <div id="tagMergeSourceLabel" class="tag-merge-source"></div>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="tagMergeTarget">Merge into</label>
+          <input type="text" class="form-input" id="tagMergeTargetSearch" placeholder="Search tags...">
+          <div class="tag-merge-list" id="tagMergeTargetList"></div>
+        </div>
+        <div class="tag-merge-preview" id="tagMergePreview"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" id="tagMergeCancel">Cancel</button>
+        <button class="btn-primary" id="tagMergeConfirm" disabled>Merge</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ TAG DELETE CONFIRM ═════════════════════════════ -->
+  <div class="overlay hidden" id="tagDeleteOverlay">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>Delete tag</h2>
+        <button class="modal-close" id="tagDeleteClose">&times;</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="tagDeleteId">
+        <p id="tagDeleteMessage" style="font-size:0.875rem;line-height:1.5"></p>
+        <p class="form-hint" style="margin-top:8px">The items themselves will not be deleted.</p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" id="tagDeleteCancel">Cancel</button>
+        <button class="btn-primary btn-danger-primary" id="tagDeleteConfirm">Delete</button>
+      </div>
+    </div>
   </div>
 
   <!-- ══ JOURNAL COMPOSE MODAL ═══════════════════════════ -->

@@ -205,6 +205,72 @@ main {
   margin-top: 8px;
 }
 
+/* ── Tag chips (clickable) ───────────────────────────────── */
+/* Make every tag chip a button: click → drawer for that tag id. */
+button.tag,
+.tag-chip {
+  font-family: var(--font);
+  border: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  outline: none;
+  transition: background var(--transition);
+}
+
+button.tag:hover,
+.tag-chip:hover {
+  background: var(--tag-hover);
+  color: var(--tag-text);
+}
+
+button.tag:focus-visible,
+.tag-chip:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+button.tag:active,
+.tag-chip:active {
+  background: var(--accent-bg);
+  color: var(--text);
+}
+
+/* In-context "x" remove affordance — wraps a chip + remove button. */
+.tag-chip-wrap {
+  display: inline-flex;
+  align-items: stretch;
+  border-radius: 100px;
+  background: var(--tag-bg);
+  overflow: hidden;
+  transition: background var(--transition);
+}
+
+.tag-chip-wrap:hover { background: var(--tag-hover); }
+.tag-chip-wrap .tag-chip { background: transparent; padding-right: 4px; }
+.tag-chip-wrap .tag-chip:hover { background: transparent; }
+
+.tag-chip-remove {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--text-3);
+  font-size: 0.75rem;
+  cursor: pointer;
+  padding: 0 8px 0 2px;
+  line-height: 1;
+}
+
+.tag-chip-wrap:hover .tag-chip-remove,
+.tag-chip-wrap:focus-within .tag-chip-remove {
+  display: inline-flex;
+}
+
+.tag-chip-remove:hover { color: var(--danger); }
+
 /* ── Progress bar ─────────────────────────────────────────── */
 .progress-bar {
   height: 4px;
@@ -2180,6 +2246,285 @@ main {
   border-color: var(--focus);
   box-shadow: 0 0 0 3px rgba(168, 162, 158, 0.15);
 }
+
+/* ── Tags view ───────────────────────────────────────────── */
+.tags-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.tags-toolbar .search-box { width: 100%; }
+
+.add-tag-form {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.add-tag-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.add-tag-form .btn-primary { flex-shrink: 0; }
+
+.add-tag-hint {
+  font-size: 0.75rem;
+  color: var(--text-3);
+  min-height: 1em;
+}
+
+.add-tag-hint.error { color: var(--danger); }
+
+.tag-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-lt);
+  cursor: pointer;
+  transition: background var(--transition);
+  position: relative;
+}
+
+.tag-row:last-child { border-bottom: none; }
+.tag-row:hover { background: var(--accent-bg); }
+
+.tag-row-main { flex: 1; min-width: 0; }
+
+.tag-row-top {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.tag-row-name {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.tag-row-name.dim { color: var(--text-3); }
+
+.tag-row-count {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+  margin-left: auto;
+}
+
+.tag-row-breakdown {
+  font-size: 0.6875rem;
+  color: var(--text-3);
+  margin-top: 2px;
+  line-height: 1.5;
+}
+
+.tag-row-breakdown.empty { font-style: italic; }
+
+.tag-row.highlight-flash {
+  animation: tagHighlight 1.6s ease-out;
+}
+
+@keyframes tagHighlight {
+  0%   { box-shadow: inset 3px 0 0 0 var(--accent); background: var(--accent-bg); }
+  100% { box-shadow: inset 3px 0 0 0 transparent; }
+}
+
+/* Kebab inside tag row — keep it always visible on touch via the existing rule */
+.tag-row .card-actions { margin-left: 0; }
+.tag-row .card-actions-btn { opacity: 0.6; }
+.tag-row:hover .card-actions-btn { opacity: 1; }
+
+/* ── Tag drawer ──────────────────────────────────────────── */
+.overlay-drawer {
+  align-items: stretch;
+  justify-content: flex-end;
+  padding-top: 0;
+}
+
+.modal-drawer {
+  width: min(420px, 100vw);
+  max-height: 100vh;
+  height: 100vh;
+  border-radius: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  transform: translateX(20px);
+  transition: transform 200ms ease;
+}
+
+.overlay-drawer.visible .modal-drawer { transform: translateX(0); }
+
+.modal-drawer .modal-header {
+  border-bottom: 1px solid var(--border-lt);
+  padding: 16px 20px;
+}
+
+.modal-drawer .modal-body { flex: 1; overflow-y: auto; padding: 0 20px 24px; }
+
+.modal-sub {
+  font-size: 0.6875rem;
+  color: var(--text-3);
+  margin-top: 2px;
+}
+
+.tag-drawer-actions {
+  display: flex;
+  gap: 4px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border-lt);
+}
+
+.tag-drawer-actions .btn-text {
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.btn-text-danger { color: var(--danger); }
+.btn-text-danger:hover { color: var(--danger); opacity: 0.8; }
+
+.tag-drawer-section {
+  padding-top: 16px;
+}
+
+.tag-drawer-section + .tag-drawer-section {
+  border-top: 1px solid var(--border-lt);
+  margin-top: 8px;
+}
+
+.tag-drawer-section-header {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0 4px 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.tag-drawer-section-toggle {
+  margin-left: auto;
+  color: var(--text-3);
+  font-size: 0.6875rem;
+}
+
+.tag-drawer-section.collapsed .tag-drawer-section-body { display: none; }
+
+.tag-drawer-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 4px;
+  font-size: 0.8125rem;
+  color: var(--text);
+  cursor: pointer;
+  border-bottom: 1px solid var(--border-lt);
+  transition: background var(--transition);
+}
+
+.tag-drawer-item:last-child { border-bottom: none; }
+.tag-drawer-item:hover { background: var(--accent-bg); }
+
+.tag-drawer-item-title {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tag-drawer-item-meta {
+  font-size: 0.625rem;
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+
+.tag-drawer-item-chev {
+  color: var(--text-3);
+  font-size: 0.75rem;
+  flex-shrink: 0;
+}
+
+@media (max-width: 640px) {
+  .overlay-drawer {
+    align-items: flex-end;
+    justify-content: center;
+  }
+  .modal-drawer {
+    width: 100vw;
+    max-height: 90vh;
+    height: 90vh;
+    border-radius: 16px 16px 0 0;
+    transform: translateY(20px);
+  }
+  .overlay-drawer.visible .modal-drawer { transform: translateY(0); }
+}
+
+/* ── Tag merge picker ───────────────────────────────────── */
+.tag-merge-source {
+  font-size: 0.875rem;
+  color: var(--text);
+  padding: 8px 12px;
+  background: var(--accent-bg);
+  border-radius: var(--radius-sm);
+}
+
+.tag-merge-list {
+  margin-top: 8px;
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--border-lt);
+  border-radius: var(--radius-sm);
+}
+
+.tag-merge-list-item {
+  padding: 8px 12px;
+  font-size: 0.8125rem;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border-lt);
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  transition: background var(--transition);
+}
+
+.tag-merge-list-item:last-child { border-bottom: none; }
+.tag-merge-list-item:hover { background: var(--accent-bg); }
+.tag-merge-list-item.selected { background: var(--accent-bg); }
+
+.tag-merge-list-item-count {
+  font-size: 0.6875rem;
+  color: var(--text-3);
+  margin-left: auto;
+}
+
+.tag-merge-preview {
+  margin-top: 12px;
+  font-size: 0.8125rem;
+  color: var(--text-2);
+  padding: 12px;
+  background: var(--accent-bg);
+  border-radius: var(--radius-sm);
+  line-height: 1.5;
+  display: none;
+}
+
+.tag-merge-preview.visible { display: block; }
+
+.btn-danger-primary {
+  background: var(--danger);
+  color: white;
+}
+.btn-danger-primary:hover { opacity: 0.9; }
 
 /* ── Prompt cards ────────────────────────────────────────── */
 :root {
