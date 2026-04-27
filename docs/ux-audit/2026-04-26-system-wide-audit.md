@@ -17,6 +17,82 @@ revised where the findings warranted.
 
 ---
 
+## Next batch — scope (2026-04-23, post top-three ship)
+
+**Shape picked: A — "Blockers become real."**
+
+One Vault contract (`PUT /api/blockers/:id`) unlocks four of the six
+remaining P1s. Coherent flagship: *"a blocker can be resolved from
+wherever you see it."* The user sees blockers in three places today
+(home hero, goal-detail modal, blocker_awareness prompts) and acts on
+them in zero. After this batch: three. Plus two small standalone wins
+that don't need the contract and would be silly to defer (item 3 hero
+click, item 6 failed-dump retry).
+
+### In this batch
+
+1. **Item 1** — `blocker_awareness` prompts get CTAs: *"Open the
+   goal"* + *"Mark a blocker resolved"*. Discharges Cairn's queued
+   prompt-CTA audit entry.
+2. **Item 3** — home hero goal becomes clickable (opens goal detail);
+   in-hero blocker rows become resolve-actionable.
+3. **Item 5** — every blocker row everywhere (hero, goal-detail,
+   prompts, lists) becomes a launcher: tap to resolve, with toast
+   undo. Same affordance, same handler, every surface.
+4. **Item 6** — failed dumps on home show Retry. Reuse `retryButton(d)`
+   in the home recent-captures render. Tiny, no contract, ships in
+   the same Lumen dispatch.
+
+### Dispatch order
+
+1. **Reed** — confirm the schema decision: does "resolved" live as a
+   boolean column on `blockers`, a `status` enum (`active`/`resolved`),
+   or a `resolved_at` timestamp (presence = resolved)? One-line answer,
+   no migration design work — just the shape Vault should build to.
+2. **Vault** — write the contract for `PUT /api/blockers/:id` (resolve
+   + edit name/type), publish per Cairn's contract-before-code rule,
+   then implement. Includes the toast-undo path (a follow-up `PUT`
+   flipping back) — no separate "undo" endpoint needed.
+3. **Lumen** — wire the four items end-to-end:
+   - blocker_awareness prompt CTAs (item 1)
+   - home hero card click → `openGoalDetail` (item 3a)
+   - in-hero blocker rows actionable (item 3b)
+   - blocker rows in goal-detail modal + prompts actionable (item 5)
+   - `retryButton(d)` in home recent-captures (item 6)
+   One PR, one deploy.
+4. **Probe** — regression sweep on chromium + webkit: resolve from
+   each of the three surfaces, undo from each, prompt CTAs route
+   correctly, hero-click opens detail, failed-dump retry succeeds.
+   Re-run the previous top-three regression to confirm no drift.
+5. **Iris device pass** — iOS PWA on the actual phone: tap targets on
+   blocker chips (must clear 44pt), toast-undo timing feels right
+   one-handed, hero-click doesn't conflict with any existing gesture.
+
+### Out of scope for this batch
+
+- **Item 2 (brain-dump detail view)** — bigger lift, deserves its own
+  arc. The detail modal has to host extracted-items list + retry +
+  delete + re-process; that's not a tuck-in. Next batch.
+- **Item 4 (goal-detail growability — add task / add blocker / add
+  person from inside the modal)** — the *blocker* half lands de facto
+  in this batch (resolving is the most-needed verb on existing
+  blockers; *adding* a new blocker is a different affordance). Add-
+  task and add-person stay deferred. Goal-detail growability gets its
+  own dispatch where the inline-add affordances are designed as a
+  set.
+- **Chip-input component for in-context "× untag"** — separate
+  dispatch per the standing constraint. No reason to fold in.
+- **Other five prompt types' CTAs** (`stale_goal`, `pattern`,
+  `elicitation`, `milestone`, `activity_gap`-without-handler) —
+  none firing in prod; ship per W4 table when each rule starts firing.
+
+### Open questions for Cam
+
+None. Standing authorisation covers the call; Reed's schema question
+is internal-team, not product-shaped.
+
+---
+
 ## Walkthrough resolutions (Probe + Iris, 2026-04-26)
 
 For each unknown: original question · observed behaviour (Probe) ·
