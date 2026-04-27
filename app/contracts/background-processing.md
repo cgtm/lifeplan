@@ -175,9 +175,11 @@ All paths below are **post-mount-strip** as the Python server sees them
 prepend the mount, per practice 2.
 
 All endpoints are auth-required (existing cookie-auth middleware,
-[`cookie-auth.md`](./cookie-auth.md)). All state-changing methods require
+[`cookie-auth.md`](./cookie-auth.md)). POST/PUT require
 `Content-Type: application/json` (415 otherwise, same as cookie-auth's
-existing gate). HEAD coverage applies to the `GET` route per practice 9.
+existing gate). DELETE is exempt from the gate per cookie-auth's
+"All other routes" — body-less DELETE has no form-post CSRF surface.
+HEAD coverage applies to the `GET` route per practice 9.
 
 ### `POST /api/brain-dumps`
 

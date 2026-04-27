@@ -166,8 +166,15 @@ exception requires a valid session cookie.
 - **Cookie valid:** request proceeds. If past half-life (15 days),
   `_authenticate()` queues a refreshed `Set-Cookie` on the response.
   See Cookie spec.
-- **State-changing methods** (POST/PUT/DELETE) additionally require
-  `Content-Type: application/json` (or 415).
+- **State-changing methods** (POST/PUT) additionally require
+  `Content-Type: application/json` (or 415). **DELETE is exempt** —
+  every DELETE endpoint in our contracts declares "Request body: none",
+  and the gate's purpose is CSRF defence against cross-origin form
+  posts. HTML forms can only issue GET or POST (HTML spec), so DELETE
+  has no form-based attack surface for the gate to defend. Requiring
+  `application/json` on a body-less request would be performative, not
+  protective. The exemption lives in `do_DELETE` in `app/server.py`
+  with the rationale inline.
 
 ## Cookie spec
 
@@ -224,7 +231,7 @@ either side.
 | 401 `{"error":"unauthorized"}` | Any auth-required non-HTML request | XHR/fetch with no/invalid cookie | `app.js api()` redirects via `window.location.href = ${MOUNT}login` and returns a never-resolving promise so the caller doesn't error mid-redirect |
 | 401 `{"ok":false}` | `POST /login` | Wrong password | `login.html` clears the input, focuses it, shows "Wrong password" |
 | 429 `{"error":"too many attempts"}` | `POST /login` | Rate limit hit | `login.html` clears the input, shows "Too many attempts. Try again in a few minutes." |
-| 415 `{"error":"unsupported media type"}` | Any state-changing method | Content-Type not JSON | `login.html` falls through to "Something went wrong. Try again." (form always sends JSON, so unreachable in practice). `app.js api()` always sends JSON, same fall-through. |
+| 415 `{"error":"unsupported media type"}` | POST/PUT only (DELETE is exempt — see "All other routes") | Content-Type not JSON | `login.html` falls through to "Something went wrong. Try again." (form always sends JSON, so unreachable in practice). `app.js api()` always sends JSON, same fall-through. |
 | 400 `{"error":"invalid request"}` | `POST /login` | Body too large / not valid JSON | `login.html` shows "Something went wrong. Try again." |
 | 500 `{"error":"auth not configured"}` | `POST /login` | Server missing `LIFEPLAN_SESSION_SECRET` | `login.html` shows "Something went wrong. Try again." Operational fault — surface in logs to Forge. |
 | Network error | Any | TCP/TLS/proxy failure | `login.html` shows "Network error. Try again." `app.js api()` lets the rejection propagate to the caller. |
@@ -243,10 +250,13 @@ What this design **does** guarantee:
   outstanding cookie. Rotation is an explicit ops act.
 - **CSRF defence (partial).** `SameSite=Lax` blocks cross-site form
   posts that would otherwise carry the cookie; `Content-Type:
-  application/json` gate on every state-changing method blocks the
-  classic form-post CSRF (forms cannot set `Content-Type: application/json`
-  without a preflighted CORS request). Defence in depth: either control
-  alone would be questionable; together they're sufficient for
+  application/json` gate on POST/PUT blocks the classic form-post CSRF
+  (forms cannot set `Content-Type: application/json` without a
+  preflighted CORS request). DELETE is exempt from the content-type
+  gate because HTML forms can only issue GET/POST, so DELETE has no
+  form-post attack surface — the gate would add no defence and would
+  block legitimate body-less DELETE calls. Defence in depth: either
+  control alone would be questionable; together they're sufficient for
   single-user scope.
 - **Rate-limit on `/login`.** 5 failed attempts per IP per 15 minutes.
   Bad-JSON / oversized-body attempts also consume a slot, so probing

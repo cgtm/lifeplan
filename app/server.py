@@ -734,8 +734,18 @@ class Handler(SimpleHTTPRequestHandler):
     def do_DELETE(self):
         if not self._authenticate():
             return
-        if not self._enforce_content_type():
-            return
+        # DELETE is exempt from the JSON content-type gate. Rationale:
+        # the gate's purpose is CSRF defence in depth — blocking the
+        # classic cross-origin form-post attack. HTML forms can only
+        # issue GET or POST (HTML spec), so DELETE has no form-based
+        # attack surface for the gate to defend. Every DELETE endpoint
+        # in our contracts (tags, goals, tasks, knowledge) declares
+        # "Request body: none", and the UI's bare
+        # `fetch(url, {method: 'DELETE'})` deliberately omits a header
+        # it has no body to describe. Requiring application/json on a
+        # body-less request would be performative, not protective.
+        # CSRF protection on POST/PUT (which CAN be reached from a
+        # form) is unchanged by this exemption.
         if not self.route("DELETE"):
             self.send_json(404, {"error": "Not found"})
 
