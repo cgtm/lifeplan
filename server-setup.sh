@@ -268,9 +268,25 @@ chown "$APP_USER:$APP_USER" /opt/lifeplan/SETUP.md
 echo ""
 echo "--- setting up sudoers for deploy ---"
 cat > /etc/sudoers.d/lifeplan <<'SUDOERS'
-# Allow your-user to restart the lifeplan service + worker without a password.
+# Allow your-user to manage the lifeplan service + worker without a password.
 # Keep verbs in sync with scripts/install-sudoers.sh and deploy.sh.
-your-user ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart lifeplan, /usr/bin/systemctl stop lifeplan, /usr/bin/systemctl start lifeplan, /usr/bin/systemctl status lifeplan, /usr/bin/systemctl restart lifeplan-worker, /usr/bin/systemctl stop lifeplan-worker, /usr/bin/systemctl start lifeplan-worker, /usr/bin/systemctl status lifeplan-worker
+# sudoers matches args positionally and exactly: each form deploy.sh or
+# the runbooks invoke must be listed (no globs -- minimal grant).
+Cmnd_Alias LIFEPLAN_CTL = \
+    /usr/bin/systemctl restart lifeplan, \
+    /usr/bin/systemctl stop    lifeplan, \
+    /usr/bin/systemctl start   lifeplan, \
+    /usr/bin/systemctl status  lifeplan, \
+    /usr/bin/systemctl restart lifeplan-worker, \
+    /usr/bin/systemctl stop    lifeplan-worker, \
+    /usr/bin/systemctl start   lifeplan-worker, \
+    /usr/bin/systemctl status  lifeplan-worker, \
+    /usr/bin/systemctl restart lifeplan lifeplan-worker, \
+    /usr/bin/systemctl stop    lifeplan lifeplan-worker, \
+    /usr/bin/systemctl start   lifeplan lifeplan-worker, \
+    /usr/bin/systemctl status  lifeplan lifeplan-worker
+
+your-user ALL=(ALL) NOPASSWD: LIFEPLAN_CTL
 SUDOERS
 chmod 0440 /etc/sudoers.d/lifeplan
 visudo -c -f /etc/sudoers.d/lifeplan

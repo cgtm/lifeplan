@@ -20,7 +20,26 @@
 #   bash ~/lifeplan-staging/scripts/install-sudoers.sh
 #
 # Idempotent: safe to re-run. Overwrites the fragment with the canonical content
-# and re-validates with visudo.
+# and re-validates with visudo, then verifies every verb we grant works under
+# `sudo -n` (no password prompt).
+#
+# ── Verbs granted (NOPASSWD) ────────────────────────────────────────────
+# sudoers does positional, exact-args matching: a rule for
+#   `/usr/bin/systemctl restart lifeplan`
+# does NOT match an invocation of
+#   `sudo systemctl restart lifeplan lifeplan-worker`
+# (extra arg) -- the catch-all `(ALL) ALL` rule wins instead and prompts
+# for a password. So we explicitly list every form deploy.sh and the
+# runbooks actually invoke:
+#
+#   restart lifeplan                        -- deploy.sh line 80
+#   restart lifeplan-worker                 -- deploy.sh line 86
+#   restart lifeplan lifeplan-worker        -- runbooks/target-versions.md, manual ops
+#   stop|start|status lifeplan              -- manual ops, lp parity
+#   stop|start|status lifeplan-worker       -- manual ops, lp parity
+#
+# `is-active` is NOT granted -- deploy.sh's health check calls
+# `systemctl is-active` without sudo (it doesn't need root).
 
 set -euo pipefail
 
@@ -36,9 +55,25 @@ TMP=$(mktemp)
 trap 'rm -f "$TMP"' EXIT
 
 cat > "$TMP" <<'SUDOERS'
-# Allow your-user to restart the lifeplan service + worker without a password.
-# Installed by scripts/install-sudoers.sh. Keep verbs in sync with deploy.sh.
-your-user ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart lifeplan, /usr/bin/systemctl stop lifeplan, /usr/bin/systemctl start lifeplan, /usr/bin/systemctl status lifeplan, /usr/bin/systemctl restart lifeplan-worker, /usr/bin/systemctl stop lifeplan-worker, /usr/bin/systemctl start lifeplan-worker, /usr/bin/systemctl status lifeplan-worker
+# Allow your-user to manage the lifeplan service + worker without a password.
+# Installed by scripts/install-sudoers.sh. Keep verbs in sync with deploy.sh
+# and docs/runbooks/. sudoers matches args positionally and exactly, so each
+# combination must be listed (no globs -- we keep this minimal).
+Cmnd_Alias LIFEPLAN_CTL = \
+    /usr/bin/systemctl restart lifeplan, \
+    /usr/bin/systemctl stop    lifeplan, \
+    /usr/bin/systemctl start   lifeplan, \
+    /usr/bin/systemctl status  lifeplan, \
+    /usr/bin/systemctl restart lifeplan-worker, \
+    /usr/bin/systemctl stop    lifeplan-worker, \
+    /usr/bin/systemctl start   lifeplan-worker, \
+    /usr/bin/systemctl status  lifeplan-worker, \
+    /usr/bin/systemctl restart lifeplan lifeplan-worker, \
+    /usr/bin/systemctl stop    lifeplan lifeplan-worker, \
+    /usr/bin/systemctl start   lifeplan lifeplan-worker, \
+    /usr/bin/systemctl status  lifeplan lifeplan-worker
+
+your-user ALL=(ALL) NOPASSWD: LIFEPLAN_CTL
 SUDOERS
 
 # Validate before installing -- visudo -c -f rejects syntactically bad files.
@@ -48,15 +83,40 @@ echo "    syntax: ok"
 sudo install -o root -g root -m 0440 "$TMP" "$SUDOERS_FILE"
 echo "    installed: $SUDOERS_FILE (mode 0440, owner root)"
 
-# Verify the kernel-side sudoers cache picks it up by running the exact
-# non-interactive check deploy.sh will use. -n makes sudo fail loudly
-# instead of prompting if the entry isn't honoured.
+# Verify every verb deploy.sh + runbooks invoke. `status` is a non-mutating
+# probe so it's safe to run repeatedly. We deliberately do NOT pass --no-pager
+# or any other flag here: sudoers exact-args matching means an extra flag
+# would not match the rule and would falsely report a sudoers regression.
 echo ""
-echo "==> verifying with: sudo -n systemctl status lifeplan-worker"
-if sudo -n systemctl status lifeplan-worker --no-pager >/dev/null 2>&1; then
-    echo "    OK -- passwordless sudo for lifeplan-worker is working"
-else
-    echo "    FAIL -- sudo -n still prompts. Inspect $SUDOERS_FILE and re-run."
+echo "==> verifying sudo -n against each granted verb"
+PROBES=(
+    "status lifeplan"
+    "status lifeplan-worker"
+    "status lifeplan lifeplan-worker"
+)
+FAILED=0
+for probe in "${PROBES[@]}"; do
+    # shellcheck disable=SC2086
+    if sudo -n /usr/bin/systemctl $probe >/dev/null 2>&1; then
+        echo "    OK    sudo -n systemctl $probe"
+    else
+        # status returns non-zero when a unit is inactive/failed -- that's
+        # fine, we only care that sudo itself didn't prompt. Distinguish
+        # "sudo prompted" from "unit not active" by checking stderr.
+        ERR=$(sudo -n /usr/bin/systemctl $probe 2>&1 >/dev/null || true)
+        if echo "$ERR" | grep -qi "password is required"; then
+            echo "    FAIL  sudo -n systemctl $probe -- sudo still prompts"
+            FAILED=1
+        else
+            echo "    OK    sudo -n systemctl $probe (unit inactive but sudo did not prompt)"
+        fi
+    fi
+done
+
+if [ "$FAILED" -ne 0 ]; then
+    echo ""
+    echo "==> one or more verbs still prompt for a password."
+    echo "    inspect $SUDOERS_FILE and re-run."
     exit 1
 fi
 
