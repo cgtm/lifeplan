@@ -623,7 +623,7 @@ test.describe('brain-dump detail modal — API + UI regression', () => {
   //      Currently broken at the z-stack level (drawer covers goalDetailClose).
   //      Marked .fixme so the failure mode is captured in the test plan and
   //      gets a green tick the moment Lumen fixes the z-index/Escape priority.
-  test.fixme(
+  test(
     'UI 10b: close goal modal returns user to dump drawer (z-stack + Escape priority)',
     async ({ loggedInPage, baseURL, password }) => {
       const api = await newAuthedApi(baseURL!, password);
@@ -834,7 +834,7 @@ test.describe('brain-dump detail modal — API + UI regression', () => {
   //   to close and reopen the drawer to see worker progress.
   //   Fix is one line in `_pollOnce` (call `_refreshDumpDetail()` after
   //   loadDumps/renderHome). Lumen owns the patch.
-  test.fixme(
+  test(
     'UI 14: drawer re-renders in place when processing_status changes via poll',
     async ({ loggedInPage }) => {
     const dumpId = injectDump(

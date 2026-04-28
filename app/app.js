@@ -1127,6 +1127,22 @@ async function _pollOnce() {
       const data = await api('/dashboard');
       renderHome(data);
     }
+    // Iris's spec: "the existing 3s poll updates the modal in place".
+    // If a dump drawer is open, re-render it from the freshly-loaded
+    // allDumps so worker progress (queued -> processing -> processed)
+    // shows without forcing the user to close and reopen.
+    //
+    // Don't-clobber-edit-mode: when the user is in tap-to-edit, skip
+    // the re-render entirely. _refreshDumpDetail does a full rebuild of
+    // the body, including replacing the textarea node, which would wipe
+    // mid-typing input and steal focus. The header staleness during an
+    // edit session is the lesser evil; saving or cancelling triggers a
+    // fresh render immediately afterwards.
+    if (_currentDumpDetailId != null
+        && !$('#dumpDetailOverlay').classList.contains('hidden')
+        && !_dumpDetailEditing) {
+      _refreshDumpDetail();
+    }
   } catch (_) {
     // Network error — keep polling; the contract says "polling will resync".
   }
@@ -4157,6 +4173,20 @@ document.addEventListener('keydown', (e) => {
 
   // Escape always works
   if (e.key === 'Escape') {
+    // Lateral-nav priority: when a detail modal is stacked over the
+    // dump drawer (e.g. clicked an auto_created goal item), Escape must
+    // close the topmost surface only and leave the drawer behind, so the
+    // user lands back on the drawer they navigated from. Without this
+    // guard, the drawer-close branch below would fire in the same tick
+    // and collapse both at once.
+    const goalDetailOpen = !$('#goalDetailOverlay').classList.contains('hidden');
+    const dumpDrawerOpen = !$('#dumpDetailOverlay').classList.contains('hidden');
+    if (goalDetailOpen && dumpDrawerOpen) {
+      closeModal($('#goalDetailOverlay'));
+      document.activeElement.blur();
+      return;
+    }
+
     closeJournalComposer();
     closeModal($('#journalDetailOverlay'));
     closeModal($('#goalDetailOverlay'));

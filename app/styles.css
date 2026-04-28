@@ -3176,6 +3176,16 @@ button.tag:active,
 */
 #dumpDetailOverlay .modal-drawer { width: min(560px, 100vw); }
 
+/* Lateral nav: when a goal-detail modal is launched from inside the
+   dump drawer (auto_created goal item -> goal detail), it must paint
+   ABOVE the drawer per Iris's "z-index +1" spec. Both .overlay's share
+   z-index:100, but #dumpDetailOverlay is later in the DOM, so without
+   this override it would win the equal-z paint order and intercept
+   pointer events on #goalDetailClose. Raising #goalDetailOverlay one
+   step up matches the model that any "detail" surface is more specific
+   than the drawer that launched it. */
+#goalDetailOverlay { z-index: 101; }
+
 @media (max-width: 640px) {
   #dumpDetailOverlay .modal-drawer { width: 100vw; }
 }
