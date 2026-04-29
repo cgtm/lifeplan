@@ -2227,6 +2227,19 @@ async function openGoalDetail(goalId) {
   const resolvedBlockers = allBlockers.filter(b => b.resolved);
   const orderedBlockers = [...activeBlockers, ...resolvedBlockers];
 
+  // Iris's growability spec: Active Tasks and Blockers sections always
+  // render, even when empty. The empty states are themselves the action.
+  // Section header chips ("+ Task" / "+ Blocker") sit on the right of
+  // the section title; tapping expands an inline form (tasks) or opens
+  // the unified-search picker (blockers). The goal-detail modal stays
+  // open through every flow.
+  const blockerHeaderLabel = orderedBlockers.length
+    ? `Blockers${activeBlockers.length ? ` (${activeBlockers.length} active)` : ' (all resolved)'}`
+    : 'Blockers';
+  const taskHeaderLabel = activeTasks.length
+    ? `Active Tasks (${activeTasks.length})`
+    : 'Active Tasks';
+
   $('#goalDetailBody').innerHTML = `
     <div class="goal-detail-status">${statusPill(goal.status)}</div>
     ${goal.description ? `<div class="goal-detail-desc">${esc(goal.description)}</div>` : ''}
@@ -2243,31 +2256,57 @@ async function openGoalDetail(goalId) {
       </div>
     ` : ''}
 
-    ${orderedBlockers.length ? `
-      <div class="goal-detail-section">
-        <div class="goal-detail-section-title">Blockers${
-          activeBlockers.length
-            ? ` (${activeBlockers.length} active)`
-            : ' (all resolved)'
-        }</div>
-        <div class="goal-detail-blockers">
-          ${orderedBlockers.map(b => renderBlockerItem(b)).join('')}
-        </div>
+    <div class="goal-detail-section" data-section="blockers">
+      <div class="goal-detail-section-row">
+        <div class="goal-detail-section-title">${blockerHeaderLabel}</div>
+        <button type="button" class="grow-chip ${orderedBlockers.length ? '' : 'grow-chip--pulse'}" id="growBlockerChip" aria-label="Add a blocker">+ Blocker</button>
       </div>
-    ` : ''}
+      <div class="goal-detail-blockers">
+        ${orderedBlockers.length
+          ? orderedBlockers.map(b => renderBlockerItem(b)).join('')
+          : `<button type="button" class="grow-empty-cta" id="growBlockerEmptyCta">+ Log a blocker</button>`}
+      </div>
+    </div>
 
-    ${activeTasks.length ? `
-      <div class="goal-detail-section">
-        <div class="goal-detail-section-title">Active Tasks (${activeTasks.length})</div>
-        ${activeTasks.map(t => `
-          <div class="task-row">
-            <div class="task-check" data-task-id="${t.id}"></div>
-            <span class="task-title">${esc(t.title)}</span>
-            ${statusPill(t.status)}
-          </div>
-        `).join('')}
+    <div class="goal-detail-section" data-section="tasks">
+      <div class="goal-detail-section-row">
+        <div class="goal-detail-section-title">${taskHeaderLabel}</div>
+        <button type="button" class="grow-chip" id="growTaskChip" aria-label="Add a task">+ Task</button>
       </div>
-    ` : ''}
+      <form class="grow-task-form ${activeTasks.length ? 'hidden' : ''}" id="growTaskForm" autocomplete="off">
+        <input
+          type="text"
+          id="growTaskTitle"
+          class="form-input grow-task-title"
+          placeholder="Add a task…"
+          aria-label="New task title"
+          maxlength="200"
+        />
+        <div class="grow-task-extras hidden" id="growTaskExtras">
+          <textarea
+            id="growTaskDesc"
+            class="form-textarea grow-task-desc"
+            placeholder="Description (optional)"
+            aria-label="Task description"
+            rows="2"
+          ></textarea>
+          <input
+            type="date"
+            id="growTaskDue"
+            class="form-input grow-task-due"
+            aria-label="Due date"
+          />
+        </div>
+        <div class="grow-task-actions">
+          <span class="grow-task-hint" id="growTaskHint" role="status" aria-live="polite"></span>
+          <button type="button" class="btn grow-task-cancel" id="growTaskCancel">Cancel</button>
+          <button type="submit" class="btn-primary grow-task-submit" id="growTaskSubmit" disabled>Add</button>
+        </div>
+      </form>
+      <div class="goal-detail-tasks" id="goalDetailTasks">
+        ${activeTasks.map(t => renderTaskRow(t)).join('')}
+      </div>
+    </div>
 
     ${completedTasks.length ? `
       <div class="goal-detail-section">
@@ -2284,18 +2323,15 @@ async function openGoalDetail(goalId) {
     ${tagsHtml(goal.tags)}
   `;
 
-  // Bind task completion
-  $('#goalDetailBody').querySelectorAll('.task-check:not(.checked)').forEach(check => {
-    check.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      const taskId = check.dataset.taskId;
-      await api(`/tasks/${taskId}`, { method: 'PUT', body: { status: 'completed' } });
-      openGoalDetail(goalId); // refresh
-    });
-  });
+  // Bind task completion (delegated within the active tasks list).
+  bindGoalDetailTaskChecks(goalId);
 
   // Bind blocker rows — toggle resolve + navigate to related entity.
   bindBlockerItems('#goalDetailBody', { onRefresh: () => openGoalDetail(goalId) });
+
+  // Bind growability affordances.
+  bindGrowTaskForm(goalId, { autoFocus: !activeTasks.length });
+  bindGrowBlockerChip(goalId, goal);
 
   // Add edit/delete footer to goal detail modal
   const existingFooter = document.querySelector('#goalDetailOverlay .modal-footer');
@@ -2320,6 +2356,434 @@ async function openGoalDetail(goalId) {
 
 $('#goalDetailClose').addEventListener('click', () => closeModal($('#goalDetailOverlay')));
 $('#goalDetailOverlay').addEventListener('click', e => { if (e.target === $('#goalDetailOverlay')) closeModal($('#goalDetailOverlay')); });
+
+// ── Goal-detail growability (Iris's spec, 2026-04-29) ──────────────
+//
+// Inline `+ Task` and `+ Blocker` affordances inside the goal-detail
+// modal. The modal stays open through every flow — adding a task or
+// blocker prepends an optimistic row, focus-flashes it, and resets the
+// affordance ready for the next add.
+
+function renderTaskRow(t) {
+  return `
+    <div class="task-row" data-task-id="${t.id}">
+      <div class="task-check" data-task-id="${t.id}"></div>
+      <span class="task-title">${esc(t.title)}</span>
+      ${statusPill(t.status)}
+    </div>`;
+}
+
+function bindGoalDetailTaskChecks(goalId) {
+  const list = document.getElementById('goalDetailTasks');
+  if (!list) return;
+  list.querySelectorAll('.task-check:not(.checked)').forEach(check => {
+    if (check._lpBound) return;
+    check._lpBound = true;
+    check.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const taskId = check.dataset.taskId;
+      await api(`/tasks/${taskId}`, { method: 'PUT', body: { status: 'completed' } });
+      openGoalDetail(goalId); // refresh
+    });
+  });
+}
+
+function _focusFlash(row) {
+  if (!row) return;
+  row.classList.remove('highlight-flash');
+  void row.offsetWidth;
+  row.classList.add('highlight-flash');
+  row.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+// ── + Task ─────────────────────────────────────────────────────────
+let _growTaskSubmitting = false;
+
+function bindGrowTaskForm(goalId, opts = {}) {
+  const chip = document.getElementById('growTaskChip');
+  const form = document.getElementById('growTaskForm');
+  const titleEl = document.getElementById('growTaskTitle');
+  const descEl = document.getElementById('growTaskDesc');
+  const dueEl = document.getElementById('growTaskDue');
+  const extras = document.getElementById('growTaskExtras');
+  const submit = document.getElementById('growTaskSubmit');
+  const cancel = document.getElementById('growTaskCancel');
+  const hint = document.getElementById('growTaskHint');
+  if (!form || !titleEl) return;
+
+  const setHint = (msg, isError) => {
+    if (!hint) return;
+    hint.textContent = msg || '';
+    hint.classList.toggle('error', !!isError && !!msg);
+  };
+
+  const expand = () => {
+    form.classList.remove('hidden');
+    extras?.classList.remove('hidden');
+    setTimeout(() => titleEl.focus(), 30);
+  };
+
+  // Reset to the default state. Two callers:
+  //  - cancel button / Escape → fully collapse (hide extras, hide form
+  //    if the section has any tasks).
+  //  - successful submit → soft-reset (clear fields, refocus title) so
+  //    Cam can stream-add another task without re-opening the chip.
+  const reset = ({ keepOpen = false } = {}) => {
+    titleEl.value = '';
+    if (descEl) descEl.value = '';
+    if (dueEl) dueEl.value = '';
+    submit.disabled = true;
+    setHint('');
+    if (!keepOpen) extras?.classList.add('hidden');
+    if (!keepOpen) {
+      const hasTasks = !!document.querySelector('#goalDetailTasks .task-row');
+      if (hasTasks) form.classList.add('hidden');
+    }
+  };
+  const collapse = () => reset({ keepOpen: false });
+
+  if (chip) chip.addEventListener('click', expand);
+
+  // Empty-state autofocus: form is already visible, focus the title.
+  if (opts.autoFocus) setTimeout(() => titleEl.focus(), 60);
+
+  titleEl.addEventListener('focus', () => extras?.classList.remove('hidden'));
+  titleEl.addEventListener('input', () => {
+    submit.disabled = !titleEl.value.trim();
+    setHint('');
+  });
+
+  titleEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      collapse();
+      // Don't auto-collapse when in empty-state mode.
+      if (!document.querySelector('#goalDetailTasks .task-row')) {
+        form.classList.remove('hidden');
+        extras?.classList.add('hidden');
+      }
+    }
+  });
+
+  cancel?.addEventListener('click', () => {
+    collapse();
+    if (!document.querySelector('#goalDetailTasks .task-row')) {
+      form.classList.remove('hidden');
+    }
+  });
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (_growTaskSubmitting) return;
+    const title = titleEl.value.trim();
+    if (!title) { setHint('Title is required.', true); return; }
+
+    const body = { title, goal_id: goalId };
+    const desc = descEl?.value.trim();
+    const due = dueEl?.value.trim();
+    if (desc) body.description = desc;
+    if (due) body.due_date = due;
+
+    _growTaskSubmitting = true;
+    submit.disabled = true;
+    setHint('Saving…');
+
+    let created;
+    try {
+      created = await apiTry('/tasks', { method: 'POST', body });
+    } catch (err) {
+      _growTaskSubmitting = false;
+      submit.disabled = !titleEl.value.trim();
+      // Preserve the typed text so Cam doesn't lose work.
+      setHint('Couldn\'t save — try again.', true);
+      apiError(err, { retry: () => {} });
+      return;
+    }
+    _growTaskSubmitting = false;
+    if (!created || !created.id) {
+      setHint('Couldn\'t save — try again.', true);
+      submit.disabled = !titleEl.value.trim();
+      return;
+    }
+
+    // Optimistic prepend in the active tasks list.
+    const list = document.getElementById('goalDetailTasks');
+    if (list) {
+      list.insertAdjacentHTML('afterbegin', renderTaskRow(created));
+      const row = list.querySelector(`.task-row[data-task-id="${created.id}"]`);
+      _focusFlash(row);
+      bindGoalDetailTaskChecks(goalId);
+    }
+
+    // Update the section header count.
+    _updateTaskSectionHeader();
+
+    // Soft-reset: clear fields, leave form visible and focus title so
+    // Cam can stream-add another task without re-opening the chip.
+    reset({ keepOpen: true });
+    setTimeout(() => titleEl.focus(), 30);
+  });
+}
+
+function _updateTaskSectionHeader() {
+  const section = document.querySelector('#goalDetailBody [data-section="tasks"] .goal-detail-section-title');
+  if (!section) return;
+  const count = document.querySelectorAll('#goalDetailTasks .task-row').length;
+  section.textContent = count ? `Active Tasks (${count})` : 'Active Tasks';
+}
+
+function _updateBlockerSectionHeader() {
+  const section = document.querySelector('#goalDetailBody [data-section="blockers"] .goal-detail-section-title');
+  if (!section) return;
+  const rows = document.querySelectorAll('#goalDetailBody .goal-detail-blockers .blocker-item');
+  if (!rows.length) {
+    section.textContent = 'Blockers';
+    return;
+  }
+  let active = 0;
+  rows.forEach(r => { if (!r.classList.contains('blocker--resolved')) active++; });
+  section.textContent = active
+    ? `Blockers (${active} active)`
+    : 'Blockers (all resolved)';
+}
+
+// ── + Blocker picker ───────────────────────────────────────────────
+let _blockerPickerSubmitting = false;
+
+function bindGrowBlockerChip(goalId, goal) {
+  const chip = document.getElementById('growBlockerChip');
+  const emptyCta = document.getElementById('growBlockerEmptyCta');
+  const open = () => openGrowBlockerPicker(goalId, goal);
+  if (chip) chip.addEventListener('click', open);
+  if (emptyCta) emptyCta.addEventListener('click', open);
+}
+
+async function openGrowBlockerPicker(goalId, currentGoal) {
+  // Strip any existing instance.
+  document.querySelectorAll('.grow-picker-overlay').forEach(el => el.remove());
+
+  const overlay = document.createElement('div');
+  overlay.className = 'grow-picker-overlay';
+  overlay.innerHTML = `
+    <div class="grow-picker" role="dialog" aria-label="Add a blocker">
+      <div class="grow-picker-header">
+        <div class="grow-picker-title">Add a blocker to <span class="grow-picker-target">${esc(currentGoal.title)}</span></div>
+        <button type="button" class="grow-picker-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="grow-picker-search">
+        <input type="search" id="growPickerSearch" class="form-input grow-picker-input"
+               placeholder="Search goals, tasks, or systems…"
+               aria-label="Search blockers" autocomplete="off" />
+      </div>
+      <div class="grow-picker-results" id="growPickerResults">
+        <div class="grow-picker-loading">Loading…</div>
+      </div>
+      <div class="grow-picker-notes hidden" id="growPickerNotes">
+        <label class="grow-picker-notes-label" for="growPickerNotesInput">Notes (optional)</label>
+        <textarea id="growPickerNotesInput" class="form-textarea grow-picker-notes-input"
+                  rows="3" placeholder="Why is this blocking?"></textarea>
+      </div>
+      <div class="grow-picker-footer">
+        <button type="button" class="btn grow-picker-cancel">Cancel</button>
+        <button type="button" class="btn-primary grow-picker-save" id="growPickerSave" disabled>Save</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  requestAnimationFrame(() => overlay.classList.add('visible'));
+
+  const input = overlay.querySelector('#growPickerSearch');
+  const resultsEl = overlay.querySelector('#growPickerResults');
+  const notesWrap = overlay.querySelector('#growPickerNotes');
+  const notesEl = overlay.querySelector('#growPickerNotesInput');
+  const saveBtn = overlay.querySelector('#growPickerSave');
+  const closeBtn = overlay.querySelector('.grow-picker-close');
+  const cancelBtn = overlay.querySelector('.grow-picker-cancel');
+
+  let pool = []; // unified merged list
+  let picked = null; // { type, id, name }
+
+  const close = () => {
+    overlay.classList.remove('visible');
+    setTimeout(() => overlay.remove(), 200);
+  };
+  closeBtn.addEventListener('click', close);
+  cancelBtn.addEventListener('click', close);
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+
+  // Fetch in parallel; client-side merge.
+  try {
+    const [goals, tasks, externals] = await Promise.all([
+      apiTry('/goals'),
+      apiTry('/tasks'),
+      apiTry('/external-systems'),
+    ]);
+    const gItems = (Array.isArray(goals) ? goals : []).map(g => ({
+      type: 'goal', id: g.id, name: g.title, status: g.status,
+      disabled: g.id === goalId,
+      disabledReason: g.id === goalId ? 'this goal' : null,
+    }));
+    const tItems = (Array.isArray(tasks) ? tasks : []).map(t => ({
+      type: 'task', id: t.id, name: t.title, status: t.status,
+      goal_title: t.goal_title,
+    }));
+    const xItems = (Array.isArray(externals) ? externals : []).map(x => ({
+      type: 'external_system', id: x.id, name: x.name,
+    }));
+    pool = [...gItems, ...tItems, ...xItems];
+  } catch (err) {
+    apiError(err);
+    resultsEl.innerHTML = `<div class="grow-picker-empty">Couldn't load. Close and try again.</div>`;
+    return;
+  }
+
+  const renderResults = () => {
+    const q = (input.value || '').trim().toLowerCase();
+    const filtered = q
+      ? pool.filter(r => r.name && r.name.toLowerCase().includes(q))
+      : pool.slice(0, 30); // sensible cap when query is empty
+
+    if (!filtered.length) {
+      // Iris's §5: external_system "no match" signpost.
+      resultsEl.innerHTML = `
+        <div class="grow-picker-empty">
+          <div class="grow-picker-empty-msg">No matches${q ? ` for "${esc(q)}"` : ''}.</div>
+          <div class="grow-picker-signpost" aria-disabled="true">
+            + Add as new external system
+            <span class="grow-picker-signpost-sub">Coming soon — external systems management</span>
+          </div>
+        </div>
+      `;
+      return;
+    }
+
+    resultsEl.innerHTML = filtered.map(r => {
+      const badge = r.type === 'goal' ? 'Goal'
+        : r.type === 'task' ? 'Task'
+        : 'External';
+      const sub = r.type === 'task' && r.goal_title
+        ? `<span class="grow-picker-result-sub">${esc(r.goal_title)}</span>`
+        : '';
+      const disabledAttr = r.disabled ? 'disabled aria-disabled="true"' : '';
+      const disabledHint = r.disabled
+        ? `<span class="grow-picker-result-sub">${esc(r.disabledReason || 'unavailable')}</span>`
+        : '';
+      const isPicked = picked && picked.type === r.type && picked.id === r.id;
+      return `
+        <button type="button" class="grow-picker-result ${isPicked ? 'picked' : ''}" ${disabledAttr}
+                data-type="${esc(r.type)}" data-id="${r.id}">
+          <span class="grow-picker-result-badge type-${esc(r.type)}">${badge}</span>
+          <span class="grow-picker-result-name">${esc(r.name || '(unnamed)')}</span>
+          ${sub || disabledHint}
+        </button>`;
+    }).join('');
+
+    resultsEl.querySelectorAll('.grow-picker-result:not([disabled])').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const type = btn.dataset.type;
+        const id = parseInt(btn.dataset.id);
+        const name = btn.querySelector('.grow-picker-result-name')?.textContent || '';
+        picked = { type, id, name };
+        notesWrap.classList.remove('hidden');
+        saveBtn.disabled = false;
+        // Visual: mark current selection.
+        resultsEl.querySelectorAll('.grow-picker-result').forEach(r => r.classList.remove('picked'));
+        btn.classList.add('picked');
+      });
+    });
+  };
+
+  let typingTimer;
+  input.addEventListener('input', () => {
+    clearTimeout(typingTimer);
+    typingTimer = setTimeout(renderResults, 80);
+  });
+
+  setTimeout(() => input.focus(), 80);
+  renderResults();
+
+  saveBtn.addEventListener('click', async () => {
+    if (!picked || _blockerPickerSubmitting) return;
+    _blockerPickerSubmitting = true;
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving…';
+
+    const body = {
+      goal_id: goalId,
+      blocker_type: picked.type,
+    };
+    if (picked.type === 'goal') body.blocker_goal_id = picked.id;
+    else if (picked.type === 'task') body.blocker_task_id = picked.id;
+    else if (picked.type === 'external_system') body.blocker_external_system_id = picked.id;
+    const notes = (notesEl.value || '').trim();
+    if (notes) body.notes = notes;
+
+    let created;
+    try {
+      created = await apiTry('/blockers', { method: 'POST', body });
+    } catch (err) {
+      _blockerPickerSubmitting = false;
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Save';
+
+      const status = err && err.status;
+      if (status === 409) {
+        // Existing blocker — close picker and flash the existing row in the modal.
+        const existingId = err.payload && err.payload.id;
+        showToast('Blocker already exists.');
+        close();
+        if (existingId) {
+          requestAnimationFrame(() => {
+            const row = document.querySelector(`#goalDetailBody .blocker-item[data-blocker-id="${existingId}"]`);
+            _focusFlash(row);
+          });
+        }
+        return;
+      }
+      if (status === 422) {
+        showToast("A goal can't block itself.");
+        return;
+      }
+      if (status === 404) {
+        showToast('That item is no longer here.');
+        // Refresh the picker results.
+        try {
+          const [goals, tasks, externals] = await Promise.all([
+            apiTry('/goals'), apiTry('/tasks'), apiTry('/external-systems'),
+          ]);
+          pool = [
+            ...goals.map(g => ({ type: 'goal', id: g.id, name: g.title, status: g.status, disabled: g.id === goalId, disabledReason: g.id === goalId ? 'this goal' : null })),
+            ...tasks.map(t => ({ type: 'task', id: t.id, name: t.title, status: t.status, goal_title: t.goal_title })),
+            ...externals.map(x => ({ type: 'external_system', id: x.id, name: x.name })),
+          ];
+          picked = null;
+          notesWrap.classList.add('hidden');
+          saveBtn.disabled = true;
+          renderResults();
+        } catch (_) { /* fall through */ }
+        return;
+      }
+      apiError(err);
+      return;
+    }
+    _blockerPickerSubmitting = false;
+
+    // Success — optimistically prepend within active blockers in the goal-detail modal.
+    const blockersWrap = document.querySelector('#goalDetailBody .goal-detail-blockers');
+    if (blockersWrap) {
+      // If the wrap currently contains the empty-state CTA, replace it.
+      const emptyCta = blockersWrap.querySelector('.grow-empty-cta');
+      if (emptyCta) blockersWrap.innerHTML = '';
+      // Insert at the top (active blockers come first, then resolved).
+      blockersWrap.insertAdjacentHTML('afterbegin', renderBlockerItem(created));
+      bindBlockerItems('#goalDetailBody', { onRefresh: () => openGoalDetail(goalId) });
+      const row = blockersWrap.querySelector(`.blocker-item[data-blocker-id="${created.id}"]`);
+      _focusFlash(row);
+    }
+    _updateBlockerSectionHeader();
+    close();
+  });
+}
 
 // Goal filter pills
 $('#goalFilters').addEventListener('click', e => {

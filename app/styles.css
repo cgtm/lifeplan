@@ -3425,3 +3425,368 @@ button.tag:active,
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+
+/* ── Goal-detail growability (Iris's spec, 2026-04-29) ────────────
+   Inline "+ Task" / "+ Blocker" affordances inside the goal-detail
+   modal. Section headers wrap the title and the chip; expanding form
+   for tasks; full picker overlay for blockers (bottom-sheet on mobile,
+   centred modal on desktop). The goal-detail modal stays open through
+   every flow.
+*/
+.goal-detail-section-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.goal-detail-section-row .goal-detail-section-title {
+  margin-bottom: 0;
+}
+
+.grow-chip {
+  font-family: var(--font);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  color: var(--text-3);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: color var(--transition), border-color var(--transition), background var(--transition);
+  /* Tap target: keep at ≥ 28px line-box; pad container if needed on mobile */
+  min-height: 28px;
+}
+
+.grow-chip:hover,
+.grow-chip:focus-visible {
+  color: var(--text);
+  border-color: var(--text-3);
+  background: var(--accent-bg);
+  outline: none;
+}
+
+@keyframes growChipPulse {
+  0%, 100% { box-shadow: 0 0 0 0 transparent; border-color: var(--border); }
+  50%      { box-shadow: 0 0 0 3px var(--accent-bg); border-color: var(--text-3); }
+}
+
+.grow-chip--pulse {
+  animation: growChipPulse 2.6s ease-in-out 2;
+}
+
+/* Empty-state CTA — full-row affordance shown when a section has zero items. */
+.grow-empty-cta {
+  display: block;
+  width: 100%;
+  font-family: var(--font);
+  font-size: 0.8125rem;
+  color: var(--text-3);
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  cursor: pointer;
+  text-align: center;
+  transition: color var(--transition), border-color var(--transition), background var(--transition);
+}
+
+.grow-empty-cta:hover,
+.grow-empty-cta:focus-visible {
+  color: var(--text);
+  border-color: var(--text-3);
+  background: var(--accent-bg);
+  outline: none;
+}
+
+/* Inline +Task form */
+.grow-task-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  margin-bottom: 10px;
+  animation: inlineCreateSlide 160ms ease-out;
+}
+
+.grow-task-form.hidden {
+  display: none;
+}
+
+.grow-task-title {
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.grow-task-extras {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.grow-task-extras.hidden { display: none; }
+
+.grow-task-desc {
+  min-height: 48px;
+  resize: vertical;
+}
+
+.grow-task-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.grow-task-hint {
+  flex: 1;
+  font-size: 0.75rem;
+  color: var(--text-3);
+  min-height: 1em;
+}
+
+.grow-task-hint.error { color: var(--danger); }
+
+.grow-task-actions .btn,
+.grow-task-actions .btn-primary {
+  font-size: 0.75rem;
+  padding: 6px 14px;
+}
+
+/* Picker overlay — centred modal on desktop, bottom-sheet on mobile.
+   Stacks above #goalDetailOverlay (z 101) so the modal stays visible
+   underneath. */
+.grow-picker-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(28, 25, 23, 0.36);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: min(12vh, 100px);
+  z-index: 200;
+  opacity: 0;
+  transition: opacity 200ms ease;
+}
+
+.grow-picker-overlay.visible { opacity: 1; }
+
+.grow-picker {
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg), 0 0 0 1px rgba(0,0,0,0.04);
+  width: min(480px, calc(100vw - 48px));
+  max-height: calc(100vh - 140px);
+  display: flex;
+  flex-direction: column;
+  transform: translateY(8px) scale(0.98);
+  transition: transform 200ms ease;
+  overflow: hidden;
+}
+
+.grow-picker-overlay.visible .grow-picker {
+  transform: translateY(0) scale(1);
+}
+
+.grow-picker-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px 8px;
+  gap: 8px;
+}
+
+.grow-picker-title {
+  font-size: 0.8125rem;
+  color: var(--text-2, var(--text));
+  line-height: 1.4;
+}
+
+.grow-picker-target {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.grow-picker-close {
+  background: none;
+  border: none;
+  font-size: 1.125rem;
+  color: var(--text-3);
+  cursor: pointer;
+  padding: 4px 8px;
+  line-height: 1;
+}
+.grow-picker-close:hover { color: var(--text); }
+
+.grow-picker-search {
+  padding: 8px 20px 12px;
+  border-bottom: 1px solid var(--border-lt, var(--border));
+}
+
+.grow-picker-input {
+  width: 100%;
+  font-size: 0.875rem;
+  padding: 10px 12px;
+}
+
+.grow-picker-results {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 12px;
+  min-height: 180px;
+  max-height: 50vh;
+}
+
+.grow-picker-loading,
+.grow-picker-empty {
+  padding: 32px 16px;
+  text-align: center;
+  color: var(--text-3);
+  font-size: 0.8125rem;
+}
+
+.grow-picker-empty-msg {
+  margin-bottom: 16px;
+}
+
+.grow-picker-signpost {
+  display: inline-block;
+  font-size: 0.75rem;
+  color: var(--text-3);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  background: var(--accent-bg);
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.grow-picker-signpost-sub {
+  display: block;
+  font-size: 0.6875rem;
+  color: var(--text-3);
+  margin-top: 4px;
+  font-style: italic;
+}
+
+.grow-picker-result {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  padding: 10px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font: inherit;
+  color: var(--text);
+  min-height: 44px;
+  transition: background var(--transition);
+}
+
+.grow-picker-result:hover:not([disabled]),
+.grow-picker-result:focus-visible:not([disabled]) {
+  background: var(--accent-bg);
+  outline: none;
+}
+
+.grow-picker-result.picked {
+  background: var(--accent-bg);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.grow-picker-result[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.grow-picker-result-badge {
+  font-size: 0.625rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 2px 8px;
+  border-radius: 100px;
+  background: var(--border-lt, var(--border));
+  color: var(--text-3);
+  flex-shrink: 0;
+  min-width: 56px;
+  text-align: center;
+}
+
+.grow-picker-result-badge.type-goal    { background: var(--accent-bg); color: var(--text); }
+.grow-picker-result-badge.type-task    { background: var(--border-lt, var(--border)); color: var(--text-2, var(--text)); }
+.grow-picker-result-badge.type-external_system { background: var(--amber-bg, var(--accent-bg)); color: var(--amber, var(--text-2, var(--text))); }
+
+.grow-picker-result-name {
+  flex: 1;
+  font-size: 0.875rem;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.grow-picker-result-sub {
+  font-size: 0.6875rem;
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+
+.grow-picker-notes {
+  padding: 10px 20px 0;
+  border-top: 1px solid var(--border-lt, var(--border));
+}
+
+.grow-picker-notes.hidden { display: none; }
+
+.grow-picker-notes-label {
+  display: block;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 8px 0 6px;
+}
+
+.grow-picker-notes-input {
+  width: 100%;
+  font-size: 0.8125rem;
+  resize: vertical;
+}
+
+.grow-picker-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 20px 16px;
+  border-top: 1px solid var(--border-lt, var(--border));
+  background: var(--surface);
+}
+
+/* Bottom-sheet on mobile */
+@media (max-width: 640px) {
+  .grow-picker-overlay {
+    align-items: flex-end;
+    padding-top: 0;
+  }
+  .grow-picker {
+    width: 100vw;
+    max-width: none;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    max-height: 85vh;
+    transform: translateY(24px);
+  }
+  .grow-picker-overlay.visible .grow-picker {
+    transform: translateY(0);
+  }
+  .grow-picker-results { max-height: 60vh; }
+  .grow-chip { padding: 8px 14px; min-height: 36px; }
+  .grow-empty-cta { padding: 14px 12px; min-height: 44px; }
+}
