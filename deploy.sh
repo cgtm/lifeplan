@@ -89,6 +89,15 @@ if [[ "$MODE" != "--db" ]]; then
         --exclude='*.pyc' \
         "$LOCAL_DIR/ops/" \
         "$SERVER:$REMOTE_BASE/ops/"
+
+    # ── docs/user-guide.md is served at runtime by GET /api/help/user-guide.
+    # Sync just that file (the rest of docs/ — retros, audits, design docs —
+    # is engineering content and stays local).
+    echo "--- syncing user guide ---"
+    ssh "$SERVER" "mkdir -p $REMOTE_BASE/docs"
+    rsync -az \
+        "$LOCAL_DIR/docs/user-guide.md" \
+        "$SERVER:$REMOTE_BASE/docs/user-guide.md"
 fi
 
 # ── Sync database (only with explicit flag + --force) ────────────
