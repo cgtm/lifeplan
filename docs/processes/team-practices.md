@@ -27,6 +27,7 @@ changes, update this file; the persona files only carry pointers to it.
 11. [Privileged-config changes are operator-applied](#11-privileged-config-changes-are-operator-applied) — accepted
 12. [Deploys do not include uncommitted work](#12-deploys-do-not-include-uncommitted-work) — accepted
 13. [Pinned target versions for load-bearing dependencies](#13-pinned-target-versions-for-load-bearing-dependencies) — accepted
+14. [Runtime asset reads require a verified deploy.sh sync](#14-runtime-asset-reads-require-a-verified-deploysh-sync) — accepted
 
 ---
 
@@ -547,6 +548,71 @@ proposed.
 
 ---
 
+## 14. Runtime asset reads require a verified deploy.sh sync
+
+**Statement.** Any change that adds a server-side read of a file from
+disk outside `data/` (markdown, JSON manifest, static template, config,
+embedded resource — anything the database does not own) ships in the
+same PR as the `deploy.sh` entry that syncs that path to prod. The PR
+description names the path and quotes the matching `rsync` block. No
+runtime read merges without its sync line.
+
+**Why.** Lumen shipped the in-app user guide; the endpoint
+`GET /api/help/user-guide` reads `docs/user-guide.md` at request time.
+Probe's regression spec covered the endpoint and passed locally —
+because the file existed in the local tree. `deploy.sh` synced only
+`app/`, `scripts/`, `ops/`, so prod was missing `docs/user-guide.md`
+entirely. Cam opened the Help modal in prod and got "Could not load
+the user guide." Fix shipped in commit
+[`abee5c7`](https://github.com/) — added a targeted sync of just
+`docs/user-guide.md`.
+
+The class of bug: every runtime disk read carries a hidden contract
+that the file is present on every environment. `deploy.sh` is the
+choke point that makes that true on prod. A runtime read added without
+a matching sync entry passes Probe's e2e (file is on the dev box), and
+breaks silently on the first user click in prod. Same shape will hit
+any future runtime-asset addition.
+
+**How to apply.**
+
+- **Author of the change** (Lumen, Vault, Reed, anyone) is responsible
+  for the deploy.sh entry. Not Atlas, not Forge after the fact. The
+  rule is "you read it, you sync it."
+- **PR / dispatch description** must include:
+  1. The path being read at runtime.
+  2. The matching `rsync` invocation in `deploy.sh` (quoted).
+  3. A one-liner confirming the path lands at the expected location on
+     prod (`ssh your-user 'ls -l /opt/lifeplan/<path>'` after deploy).
+- **Cairn at review** checks both halves — code change and sync entry
+  — before approving cross-persona diffs. A runtime read with no sync
+  entry is a stop-the-review finding.
+- **Default to syncing the specific file, not the parent directory.**
+  `docs/` contains retros, audits, design notes — engineering content
+  that has no place on prod. Sync `docs/user-guide.md` specifically;
+  do not blanket-sync `docs/`.
+- **Operational reference:** the runbook
+  [`docs/runbooks/runtime-assets.md`](../runbooks/runtime-assets.md)
+  documents the audit pattern (enumerate every runtime read, verify
+  each is reachable from `deploy.sh`'s sync set) and the steps for
+  adding a new one.
+
+**Provenance.**
+
+- Lumen's user-guide endpoint shipping with no prod sync entry.
+- Atlas's fix in commit `abee5c7` (2026-04-29): "Sync docs/user-guide.md
+  on deploy."
+- Cam's report opening Help modal in prod and seeing "Could not load
+  the user guide."
+
+**Status:** accepted (2026-04-29). Single-occurrence rule promoted to
+accepted on Cam's authorisation: the class of bug is process-shaped
+(any persona adding a runtime read can hit it), not Lumen-specific,
+and the cost of a second occurrence — silent prod breakage past
+Probe's e2e — outweighs waiting for Rule of Two.
+
+---
+
 ## Practice lifecycle
 
 - **proposed:** entered on a single piece of evidence, awaiting a second
@@ -666,3 +732,23 @@ when picked up; Cairn owns the queue.
   `goal_id`), OR Cam asks for prompt-effectiveness analytics. Source: this
   session, 2026-04-23 — kept out of scope for the immediate fix to keep
   parts 1+2+3 shippable without a schema migration.
+
+- **Prod-shape e2e for runtime-asset endpoints (Probe).** Practice §14
+  and runbook [`runtime-assets.md`](../runbooks/runtime-assets.md) close
+  the user-guide gap by review discipline. They do not close it by test:
+  Probe's e2e still runs against the local dev tree, which has every
+  `docs/` file the server might want, so a future runtime read added
+  without a `deploy.sh` entry would still pass e2e and break in prod.
+  Two shapes worth considering when this triggers:
+  (a) e2e probes the live prod server for endpoints flagged as
+  runtime-asset reads, accepting the costs (auth, rate-limit, data
+  pollution, ordering-vs-deploy);
+  (b) e2e runs against a deliberately-stripped-down local server that
+  mirrors what `deploy.sh` actually ships (a "deploy-shape" fixture),
+  catching the gap without touching prod. (b) is probably the right
+  answer; needs design work. Trigger to pull forward: a **second**
+  runtime-asset-deploy gap shipped past Probe, OR Cam asks for
+  prod-shape coverage explicitly. Source: user-guide gap, 2026-04-29
+  (commit `abee5c7`); queued by Cairn on the rationale that one
+  occurrence justifies the practice + runbook (§14) but not yet the
+  test-infrastructure investment.
