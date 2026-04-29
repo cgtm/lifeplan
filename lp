@@ -82,7 +82,8 @@ case "${1:-help}" in
     echo "  Done. Local database updated from droplet."
     ;;
   deploy)
-    cd "$(dirname "$0")" && bash deploy.sh "${2:-}"
+    shift
+    cd "$(dirname "$0")" && bash deploy.sh "$@"
     ;;
   *)
     echo "Usage: lp <command>"
@@ -98,6 +99,7 @@ case "${1:-help}" in
     echo "  serve         Run the server in foreground (for debugging)"
     echo "  prompts       Manually run prompt generation"
     echo "  pull-db       Download the droplet database (backs up local first)"
-    echo "  deploy        Deploy to droplet (code only by default, --with-db to include db)"
+    echo "  deploy        Deploy to droplet (code only by default)"
+    echo "                  lp deploy --with-db --force  overwrites prod db (requires --force)"
     ;;
 esac

@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # deploy.sh -- push lifeplan to the DigitalOcean droplet
-# Usage: ./deploy.sh          (deploy app files only -- safe default)
-#        ./deploy.sh --with-db (app files + overwrite remote db with local)
-#        ./deploy.sh --db     (database only)
+# Usage: ./deploy.sh                       (deploy app files only -- safe default)
+#        ./deploy.sh --with-db --force     (app files + overwrite remote db with local)
+#        ./deploy.sh --db --force          (database only -- overwrites remote db)
 #
 # Prerequisites: server-setup.sh must have been run once on the droplet.
 # Idempotent: safe to re-run at any time.
-# NOTE: The droplet database is the source of truth. Use --with-db only if
-#       you are certain the local db should replace the remote one.
+# NOTE: The droplet database is the source of truth. --with-db / --db will
+#       OVERWRITE the remote db with the local copy and require --force to
+#       confirm intent. Use `lp pull-db` to copy prod -> local (safe).
 
 set -euo pipefail
 
@@ -15,7 +16,32 @@ SERVER="your-user@your-domain.example"
 REMOTE_BASE="/opt/lifeplan"
 LOCAL_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-MODE="${1:-code}"
+# ── Argument parsing ─────────────────────────────────────────────
+MODE="code"
+FORCE=0
+for arg in "$@"; do
+    case "$arg" in
+        --with-db|--db)
+            MODE="$arg"
+            ;;
+        --force|--yes)
+            FORCE=1
+            ;;
+        *)
+            echo "ERROR: unknown argument: $arg"
+            echo "Usage: ./deploy.sh [--with-db --force | --db --force]"
+            exit 1
+            ;;
+    esac
+done
+
+# ── Safety check: --with-db / --db require --force ───────────────
+if [[ "$MODE" == "--with-db" || "$MODE" == "--db" ]] && [[ "$FORCE" -ne 1 ]]; then
+    echo "==> REFUSED: $MODE will OVERWRITE the production database."
+    echo "    Pass --force to confirm. (Local DB is unchanged either way.)"
+    echo "    Tip: use \`lp pull-db\` to copy prod -> local, which is safe."
+    exit 1
+fi
 
 echo "==> lifeplan deploy"
 echo "    server:  $SERVER"
@@ -65,9 +91,11 @@ if [[ "$MODE" != "--db" ]]; then
         "$SERVER:$REMOTE_BASE/ops/"
 fi
 
-# ── Sync database (only with explicit flag) ──────────────────────
+# ── Sync database (only with explicit flag + --force) ────────────
 if [[ "$MODE" == "--with-db" || "$MODE" == "--db" ]]; then
     echo ""
+    echo "==> --force confirmed. Overwriting prod DB from local in 3 seconds..."
+    sleep 3
     echo "--- syncing database ---"
     rsync -avz \
         "$LOCAL_DIR/data/lifeplan.db" \
