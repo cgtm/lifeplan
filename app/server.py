@@ -43,7 +43,8 @@ if __package__ is None or __package__ == "":
         handle_update_person, handle_delete_person,
         handle_get_knowledge, handle_create_knowledge,
         handle_update_knowledge, handle_delete_knowledge,
-        handle_get_dependencies, handle_update_blocker, handle_get_dashboard,
+        handle_get_dependencies, handle_update_blocker, handle_create_blocker,
+        handle_get_external_systems, handle_get_dashboard,
         handle_get_prompts, handle_update_prompt, handle_get_prompt_count,
         handle_generate_prompts,
         enrich_goal, enrich_task, enrich_person,
@@ -72,7 +73,8 @@ else:
         handle_update_person, handle_delete_person,
         handle_get_knowledge, handle_create_knowledge,
         handle_update_knowledge, handle_delete_knowledge,
-        handle_get_dependencies, handle_update_blocker, handle_get_dashboard,
+        handle_get_dependencies, handle_update_blocker, handle_create_blocker,
+        handle_get_external_systems, handle_get_dashboard,
         handle_get_prompts, handle_update_prompt, handle_get_prompt_count,
         handle_generate_prompts,
         enrich_goal, enrich_task, enrich_person,
@@ -579,8 +581,24 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json(status, data)
             return True
 
+        # ── External systems (read-only for now) ──
+        # Used by the +Blocker picker's unified search. No POST here —
+        # external_system create-on-the-fly is deferred per Iris's
+        # design (see docs/ux-design/2026-04-29-goal-detail-growability.md).
+
+        if method == "GET" and path == "/api/external-systems":
+            status, data = handle_get_external_systems(params)
+            self.send_json(status, data)
+            return True
+
         # ── Blockers (UI-facing alias for dependencies rows) ──
         # See app/contracts/blockers.md for the URL→table mapping rationale.
+
+        if method == "POST" and path == "/api/blockers":
+            body = self.read_body()
+            status, data = handle_create_blocker(body)
+            self.send_json(status, data)
+            return True
 
         if method == "PUT" and path.startswith("/api/blockers/"):
             bid = self.parse_id(path)

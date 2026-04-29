@@ -1,14 +1,15 @@
-# Contract: blockers (partial update)
+# Contract: blockers (create + partial update)
 
 **Authors:** Vault (server), Lumen (client)
 **Status:** accepted
 **Last updated:** 2026-04-23
 
-Partial-update endpoint for the rows the UI calls "blockers." Backs the
-"mark resolved" / "undo" flow Iris asked for and the future
-edit-blocker-fields menu Lumen will add. Single endpoint, single
-contract — resolve-toggle is just one shape of body the same handler
-accepts.
+Create + partial-update endpoints for the rows the UI calls "blockers."
+Backs the "mark resolved" / "undo" flow Iris asked for, the future
+edit-blocker-fields menu, and the +Blocker picker in the goal-detail
+modal (Iris's growability dispatch — see
+`docs/ux-design/2026-04-29-goal-detail-growability.md`). Single
+contract covers the lifecycle: POST to create, PUT to partial-update.
 
 ## URL → table mapping (read this once, never wonder again)
 
@@ -41,6 +42,138 @@ existing mount-stripping in `server.py`. No redirects; no `Location`
 header.
 
 ## Endpoints
+
+### `POST ${MOUNT}api/blockers` — create
+
+Creates a new `dependencies` row with `blocked_type='goal'`. Backs the
++Blocker picker in the goal-detail modal. The picker only ever blocks a
+goal (Iris's design); blocking a task is out of scope for this dispatch.
+
+- **Auth:** required (cookie session). Same as every other
+  state-changing API endpoint.
+- **Request headers:** `Content-Type: application/json`. Enforced by
+  `server.py::_enforce_content_type` — non-JSON gets a 415 before the
+  handler is called.
+- **Request body:** flat shape per Iris's design — the picker emits a
+  `blocker_<type>_id` field that matches the chosen `blocker_type`,
+  rather than a generic `blocker_id` field. The server maps the flat
+  shape onto the `dependencies` polymorphic columns.
+
+  ```json
+  {
+    "goal_id":                    <int, required>,
+    "blocker_type":               "goal" | "task" | "external_system",
+    "blocker_goal_id":            <int>,    // required iff blocker_type='goal'
+    "blocker_task_id":            <int>,    // required iff blocker_type='task'
+    "blocker_external_system_id": <int>,    // required iff blocker_type='external_system'
+    "notes":                      "<string, optional>"
+  }
+  ```
+
+  Exactly one of the three `blocker_<type>_id` fields is consulted —
+  whichever matches the chosen `blocker_type`. The other two are
+  ignored if present (the picker only emits the matching one; this
+  contract does not 400 on extras to leave room for future shape
+  evolution without breaking the client).
+
+- **Response 201:** the full enriched row, same shape as one row of
+  `GET /api/dependencies` and identical to the response of
+  `PUT /api/blockers/<id>`. Concretely:
+
+  ```json
+  {
+    "id":           <int>,
+    "blocker_type": "goal" | "task" | "external_system",
+    "blocker_id":   <int>,
+    "blocker_name": "<JOIN-derived>",
+    "blocked_type": "goal",
+    "blocked_id":   <int>,
+    "blocked_name": "<JOIN-derived>",
+    "notes":        "<string or null>",
+    "resolved":     0,
+    "resolved_at":  null,
+    "created_at":   "<ISO8601 UTC>"
+  }
+  ```
+
+  `resolved=0`, `resolved_at=null`, and `created_at=now()` are server
+  defaults — the client cannot set them. The shape matches the existing
+  goal-detail blocker render path so the new row drops in without a
+  follow-up GET.
+
+- **Response 400:** missing or malformed input. Body is `{"error":
+  "<message>"}`; the message names the field, never the value.
+  Specific messages:
+  - `goal_id is required` — missing or empty `goal_id`.
+  - `goal_id must be an integer` — non-int `goal_id`.
+  - `blocker_type is required` — missing/empty.
+  - `blocker_type must be one of: goal, task, external_system` —
+    unsupported value.
+  - `blocker_<type>_id is required for blocker_type='<type>'` — the
+    matching id field is missing for the chosen type.
+  - `blocker_<type>_id must be an integer` — non-int id.
+  - `notes must be a string or null` — wrong type.
+  - `body must be a JSON object` — body wasn't an object.
+
+- **Response 404:** referenced entity does not exist.
+  - `{"error": "goal not found"}` — `goal_id` doesn't match any
+    `goals` row.
+  - `{"error": "<blocker_type> not found"}` — the chosen
+    `blocker_<type>_id` doesn't match any row in the referenced table
+    (e.g. `task not found`, `external_system not found`).
+
+- **Response 409:** duplicate edge. A row with the same
+  `(blocked_type='goal', blocked_id, blocker_type, blocker_id)` already
+  exists. Resolved-state is **not** part of the dedupe key — re-adding
+  an edge that was previously resolved is still a duplicate of the
+  existing row.
+
+  ```json
+  {"error": "blocker already exists", "id": <existing-row-id>}
+  ```
+
+  The `id` lets the picker navigate to (or flash) the existing row
+  instead of creating a parallel one.
+
+- **Response 422:** self-block. `blocker_type='goal'` with
+  `blocker_goal_id == goal_id`. A goal cannot block itself.
+
+  ```json
+  {"error": "a goal cannot block itself"}
+  ```
+
+  Distinguished from 400 because the input is well-formed; the failure
+  is semantic (the edge would be a self-loop). 422 lets the UI render
+  a tailored message.
+
+- **Response 415:** non-JSON `Content-Type`. Issued by
+  `_enforce_content_type` before the handler runs.
+
+#### Validation order
+
+The handler validates in this order, bailing on the first failure:
+
+1. Body is a JSON object.
+2. `goal_id` present, integer.
+3. `blocker_type` present, in the supported set.
+4. Matching `blocker_<type>_id` present, integer.
+5. `notes` is string-or-null if present.
+6. Self-block check (cheap, before any DB hit).
+7. `goal_id` exists in `goals` (404).
+8. Blocker entity exists in its table (404).
+9. Duplicate-edge check (409).
+10. Insert and return the enriched row (201).
+
+The order matters for the error matrix: the structural 400s come
+before the semantic 422 before the lookup 404s before the conflict
+409. Clients can rely on this ordering for error handling.
+
+#### Privacy
+
+- No logging of `notes` content.
+- No logging of the enriched row's `blocker_name` or `blocked_name`
+  (could leak goal/task titles).
+- 400 responses echo only field names, never the offending value.
 
 ### `PUT ${MOUNT}api/blockers/<id>` — partial update
 

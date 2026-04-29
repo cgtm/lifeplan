@@ -1242,6 +1242,27 @@ def handle_delete_knowledge(item_id):
         conn.close()
 
 
+# ── External systems handler ────────────────────────────────────
+
+def handle_get_external_systems(params):
+    """
+    List all external_systems rows. Used by the +Blocker picker's unified
+    search (client-side merge across goals/tasks/external_systems).
+
+    Returns rows in id-asc order. Shape matches the table directly — no
+    enrichment required, no junction tables on this entity.
+    """
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT id, name, description, answers, url, notes, "
+            "created_at, updated_at FROM external_systems ORDER BY id"
+        ).fetchall()
+        return 200, rows_to_dicts(rows)
+    finally:
+        conn.close()
+
+
 # ── Dependencies handler ────────────────────────────────────────
 
 def handle_get_dependencies(params):
@@ -1369,6 +1390,144 @@ def handle_update_blocker(blocker_id, body):
 
         row = conn.execute(_BLOCKER_SELECT, (blocker_id,)).fetchone()
         return 200, dict(row)
+    finally:
+        conn.close()
+
+
+# ── Blocker create handler ──────────────────────────────────────
+
+# Mapping from blocker_type → (table_name, flat-body field name).
+# Iris's design surfaces the body as a flat shape (`blocker_goal_id`,
+# `blocker_task_id`, `blocker_external_system_id`); this map drives both
+# the body-field lookup and the existence-check SELECT.
+_BLOCKER_TYPE_MAP = {
+    "goal":            ("goals",            "blocker_goal_id"),
+    "task":            ("tasks",            "blocker_task_id"),
+    "external_system": ("external_systems", "blocker_external_system_id"),
+}
+
+
+def handle_create_blocker(body):
+    """
+    Create a new dependencies row (UI-facing word: "blocker") with
+    blocked_type='goal'. Backs the +Blocker picker in the goal-detail
+    modal.
+
+    Contract: app/contracts/blockers.md (POST section).
+
+    Body shape (flat, per Iris's design):
+        {
+          "goal_id":                    <int, required>,
+          "blocker_type":               "goal" | "task" | "external_system",
+          "blocker_goal_id":            <int>     # if blocker_type='goal'
+          "blocker_task_id":            <int>     # if blocker_type='task'
+          "blocker_external_system_id": <int>     # if blocker_type='external_system'
+          "notes":                      <string, optional>
+        }
+
+    Returns the same enriched shape as one row of GET /api/dependencies
+    (i.e. _BLOCKER_SELECT) on 201.
+
+    Status codes:
+      400 — missing/invalid goal_id, missing/invalid blocker_type,
+            missing matching blocker_<type>_id, body not a JSON object.
+      404 — goal_id doesn't exist; or chosen blocker_<type>_id doesn't
+            exist in its referenced table.
+      422 — self-block (blocker_type='goal' and the blocker goal id
+            equals goal_id). Rejected explicitly with a structured body
+            so the UI can render a tailored message.
+      409 — duplicate edge: same (goal_id, blocker_type, blocker_id)
+            already exists. Body includes the existing row id so the
+            UI can navigate to / flash it.
+      201 — full enriched row, resolved=0, resolved_at=NULL,
+            created_at=now().
+
+    Privacy: never logs notes content, blocker/blocked names, or the
+    request body. Echoes only field names in error responses.
+    """
+    if not isinstance(body, dict):
+        return 400, {"error": "body must be a JSON object"}
+
+    # ── goal_id (the blocked entity; always a goal in this dispatch) ──
+    goal_id = body.get("goal_id")
+    if goal_id is None or goal_id == "":
+        return 400, {"error": "goal_id is required"}
+    if isinstance(goal_id, bool) or not isinstance(goal_id, int):
+        return 400, {"error": "goal_id must be an integer"}
+
+    # ── blocker_type ──
+    blocker_type = body.get("blocker_type")
+    if not blocker_type:
+        return 400, {"error": "blocker_type is required"}
+    if blocker_type not in _BLOCKER_TYPE_MAP:
+        return 400, {"error": "blocker_type must be one of: goal, task, external_system"}
+
+    table, id_field = _BLOCKER_TYPE_MAP[blocker_type]
+
+    # ── matching blocker_<type>_id ──
+    if id_field not in body or body.get(id_field) is None or body.get(id_field) == "":
+        return 400, {"error": f"{id_field} is required for blocker_type='{blocker_type}'"}
+    blocker_id = body[id_field]
+    if isinstance(blocker_id, bool) or not isinstance(blocker_id, int):
+        return 400, {"error": f"{id_field} must be an integer"}
+
+    # ── notes (optional) ──
+    notes = body.get("notes")
+    if notes is not None and not isinstance(notes, str):
+        return 400, {"error": "notes must be a string or null"}
+
+    # ── self-block check (cheap, do before any DB work) ──
+    # A goal can't block itself. 422 with structured body so the UI can
+    # surface the specific reason rather than a generic 400.
+    if blocker_type == "goal" and blocker_id == goal_id:
+        return 422, {"error": "a goal cannot block itself"}
+
+    conn = get_db()
+    try:
+        # ── existence checks ──
+        # Goal (the blocked entity).
+        if not conn.execute(
+            "SELECT 1 FROM goals WHERE id = ?", (goal_id,)
+        ).fetchone():
+            return 404, {"error": "goal not found"}
+
+        # Blocker entity in its referenced table. Table name is
+        # whitelisted via _BLOCKER_TYPE_MAP, so this f-string is safe
+        # from injection — only the integer id is parameterised.
+        if not conn.execute(
+            f"SELECT 1 FROM {table} WHERE id = ?", (blocker_id,)
+        ).fetchone():
+            return 404, {"error": f"{blocker_type} not found"}
+
+        # ── duplicate-edge check ──
+        # Match the full identity of the edge: same blocked goal, same
+        # blocker triple. Resolved-state is intentionally NOT part of
+        # the dedupe key — re-adding the same edge after it was resolved
+        # is still a duplicate of the existing row (the UI can navigate
+        # to it and un-resolve it instead of creating a parallel row).
+        dup = conn.execute(
+            "SELECT id FROM dependencies "
+            "WHERE blocked_type = 'goal' AND blocked_id = ? "
+            "  AND blocker_type = ? AND blocker_id = ?",
+            (goal_id, blocker_type, blocker_id),
+        ).fetchone()
+        if dup:
+            return 409, {"error": "blocker already exists", "id": dup["id"]}
+
+        # ── insert ──
+        ts = now_utc()
+        cur = conn.execute(
+            "INSERT INTO dependencies "
+            "(blocker_type, blocker_id, blocked_type, blocked_id, "
+            " notes, resolved, resolved_at, created_at) "
+            "VALUES (?, ?, 'goal', ?, ?, 0, NULL, ?)",
+            (blocker_type, blocker_id, goal_id, notes, ts),
+        )
+        new_id = cur.lastrowid
+        conn.commit()
+
+        row = conn.execute(_BLOCKER_SELECT, (new_id,)).fetchone()
+        return 201, dict(row)
     finally:
         conn.close()
 
