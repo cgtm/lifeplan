@@ -387,6 +387,332 @@ function closeModal(el) {
   setTimeout(() => el.classList.add('hidden'), 200);
 }
 
+// ══════════════════════════════════════════════════════════
+// HELP / USER GUIDE
+// ══════════════════════════════════════════════════════════
+//
+// Renders docs/user-guide.md inside an in-app modal. The server returns
+// the raw markdown via GET /api/help/user-guide; we convert client-side
+// so the Python server stays out of presentation concerns.
+//
+// The renderer covers the subset Iris's guide uses: h1-h4, paragraphs,
+// **bold**, *italic*, `code`, fenced code blocks, ordered/unordered
+// lists (one level of nesting), [links](url), --- horizontal rules,
+// pipe tables, and YAML front matter (which we strip).
+//
+// Rule of thumb: if Iris adds a markdown construct this parser doesn't
+// handle, either keep the doc clean or extend the parser — never pull
+// in a library. (See Lumen's brief.)
+
+const _helpState = { loaded: false, markdown: null };
+
+function _mdEscape(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// Inline transformations: code spans, bold, italic, links. Run on
+// already-html-escaped text so the output is safe to insert.
+function _renderInline(text) {
+  // Code spans first — their contents are inert (no further inline
+  // processing). We extract them, substitute placeholders, then
+  // re-inject after the other transforms have run.
+  const codes = [];
+  text = text.replace(/`([^`\n]+)`/g, (_, code) => {
+    codes.push(`<code>${code}</code>`);
+    return ` C${codes.length - 1} `;
+  });
+
+  // Links: [label](url) — url and label both already html-escaped.
+  text = text.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, url) => {
+    // Permit only http(s) and relative — strip anything else for safety.
+    const safe = /^(https?:|\/|#)/.test(url) ? url : '#';
+    return `<a href="${safe}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+  });
+
+  // Bold then italic. Bold uses ** or __; italic uses * or _.
+  text = text.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+  text = text.replace(/__([^_\n]+)__/g, '<strong>$1</strong>');
+  text = text.replace(/(^|[\s(])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+  text = text.replace(/(^|[\s(])_([^_\n]+)_/g, '$1<em>$2</em>');
+
+  // Re-inject code spans.
+  text = text.replace(/ C(\d+) /g, (_, i) => codes[parseInt(i)]);
+  return text;
+}
+
+// Block-level parser. Walks the markdown line-by-line, accumulating
+// HTML for each block construct it recognises.
+function renderMarkdown(src) {
+  // Strip a leading YAML front-matter block (--- … ---).
+  src = src.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '');
+
+  const lines = src.split(/\r?\n/);
+  const out = [];
+  let i = 0;
+
+  // Helpers ────────────────────────────────────────────────
+  const flushParagraph = (buf) => {
+    if (!buf.length) return;
+    const text = _renderInline(_mdEscape(buf.join(' ')));
+    out.push(`<p>${text}</p>`);
+    buf.length = 0;
+  };
+
+  // Render a list item's text including the inline transforms.
+  const renderItemText = (s) => _renderInline(_mdEscape(s));
+
+  // Detect a list line. Returns {ordered, indent, marker, content} or null.
+  const matchListLine = (line) => {
+    const m = line.match(/^(\s*)([-*+]|\d+\.)\s+(.*)$/);
+    if (!m) return null;
+    return {
+      ordered: /\d+\./.test(m[2]),
+      indent: m[1].length,
+      content: m[3],
+    };
+  };
+
+  // Parse a contiguous list block starting at index `start`. Supports one
+  // level of nesting via indentation (>= 2 spaces).
+  const parseList = (start) => {
+    const first = matchListLine(lines[start]);
+    if (!first) return null;
+    const baseIndent = first.indent;
+    const ordered = first.ordered;
+    let j = start;
+    const items = []; // [{ content: string, children: htmlString | null }]
+    while (j < lines.length) {
+      const m = matchListLine(lines[j]);
+      if (!m || m.indent < baseIndent) break;
+      if (m.indent === baseIndent && m.ordered === ordered) {
+        items.push({ content: m.content, children: null });
+        j++;
+        // Look ahead for a nested list (deeper indent).
+        if (j < lines.length) {
+          const n = matchListLine(lines[j]);
+          if (n && n.indent > baseIndent) {
+            const nested = parseList(j);
+            if (nested) {
+              items[items.length - 1].children = nested.html;
+              j = nested.next;
+            }
+          }
+        }
+      } else {
+        break;
+      }
+    }
+    const tag = ordered ? 'ol' : 'ul';
+    const html =
+      `<${tag}>` +
+      items
+        .map(
+          (it) =>
+            `<li>${renderItemText(it.content)}${it.children || ''}</li>`,
+        )
+        .join('') +
+      `</${tag}>`;
+    return { html, next: j };
+  };
+
+  // Pipe-table parser: header row, separator row, body rows. Returns
+  // {html, next} or null.
+  const parseTable = (start) => {
+    const headerLine = lines[start];
+    const sepLine = lines[start + 1];
+    if (!headerLine || !sepLine) return null;
+    if (!/^\s*\|.*\|\s*$/.test(headerLine)) return null;
+    if (!/^\s*\|?\s*:?-{2,}.*$/.test(sepLine)) return null;
+    if (!sepLine.includes('|')) return null;
+
+    const splitRow = (l) =>
+      l
+        .replace(/^\s*\|/, '')
+        .replace(/\|\s*$/, '')
+        .split('|')
+        .map((c) => c.trim());
+
+    const headers = splitRow(headerLine);
+    let j = start + 2;
+    const rows = [];
+    while (j < lines.length && /^\s*\|.*\|\s*$/.test(lines[j])) {
+      rows.push(splitRow(lines[j]));
+      j++;
+    }
+    const thead =
+      '<thead><tr>' +
+      headers.map((h) => `<th>${_renderInline(_mdEscape(h))}</th>`).join('') +
+      '</tr></thead>';
+    const tbody =
+      '<tbody>' +
+      rows
+        .map(
+          (r) =>
+            '<tr>' +
+            r.map((c) => `<td>${_renderInline(_mdEscape(c))}</td>`).join('') +
+            '</tr>',
+        )
+        .join('') +
+      '</tbody>';
+    return { html: `<table>${thead}${tbody}</table>`, next: j };
+  };
+
+  const paragraphBuf = [];
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // Blank line — close any open paragraph.
+    if (/^\s*$/.test(line)) {
+      flushParagraph(paragraphBuf);
+      i++;
+      continue;
+    }
+
+    // Fenced code block: ``` … ```
+    const fence = line.match(/^```(\w*)\s*$/);
+    if (fence) {
+      flushParagraph(paragraphBuf);
+      const lang = fence[1] || '';
+      const buf = [];
+      i++;
+      while (i < lines.length && !/^```\s*$/.test(lines[i])) {
+        buf.push(lines[i]);
+        i++;
+      }
+      i++; // consume closing fence (or end-of-input)
+      const cls = lang ? ` class="lang-${lang.replace(/[^a-zA-Z0-9_-]/g, '')}"` : '';
+      out.push(`<pre><code${cls}>${_mdEscape(buf.join('\n'))}</code></pre>`);
+      continue;
+    }
+
+    // Horizontal rule: --- or *** (3+).
+    if (/^\s*([-*_])\1\1[-*_\s]*$/.test(line)) {
+      flushParagraph(paragraphBuf);
+      out.push('<hr>');
+      i++;
+      continue;
+    }
+
+    // Heading: # to ####.
+    const heading = line.match(/^(#{1,4})\s+(.*?)\s*#*\s*$/);
+    if (heading) {
+      flushParagraph(paragraphBuf);
+      const level = heading[1].length;
+      out.push(
+        `<h${level}>${_renderInline(_mdEscape(heading[2]))}</h${level}>`,
+      );
+      i++;
+      continue;
+    }
+
+    // Block quote: > line.
+    if (/^\s*>\s?/.test(line)) {
+      flushParagraph(paragraphBuf);
+      const buf = [];
+      while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
+        buf.push(lines[i].replace(/^\s*>\s?/, ''));
+        i++;
+      }
+      out.push(
+        `<blockquote>${_renderInline(_mdEscape(buf.join(' ')))}</blockquote>`,
+      );
+      continue;
+    }
+
+    // Pipe table.
+    if (/^\s*\|.*\|\s*$/.test(line)) {
+      const table = parseTable(i);
+      if (table) {
+        flushParagraph(paragraphBuf);
+        out.push(table.html);
+        i = table.next;
+        continue;
+      }
+    }
+
+    // List.
+    if (matchListLine(line)) {
+      const list = parseList(i);
+      if (list) {
+        flushParagraph(paragraphBuf);
+        out.push(list.html);
+        i = list.next;
+        continue;
+      }
+    }
+
+    // Paragraph line.
+    paragraphBuf.push(line.trim());
+    i++;
+  }
+
+  flushParagraph(paragraphBuf);
+  return out.join('\n');
+}
+
+async function openHelpModal() {
+  const overlay = $('#helpOverlay');
+  const body = $('#helpBody');
+  openModal(overlay);
+
+  if (!_helpState.loaded) {
+    body.innerHTML = '<div class="help-loading">Loading&hellip;</div>';
+    try {
+      const res = await fetch(`${MOUNT}api/help/user-guide`, {
+        headers: { 'Accept': 'text/plain' },
+      });
+      if (res.status === 401) {
+        window.location.href = `${MOUNT}login`;
+        return;
+      }
+      if (!res.ok) {
+        body.innerHTML =
+          '<div class="help-loading">Could not load the user guide.</div>';
+        return;
+      }
+      _helpState.markdown = await res.text();
+      _helpState.loaded = true;
+    } catch (_) {
+      body.innerHTML =
+        '<div class="help-loading">Network error — try again.</div>';
+      return;
+    }
+  }
+
+  body.innerHTML = `<div class="help-content">${renderMarkdown(_helpState.markdown)}</div>`;
+  // Reset the body scroll on open so re-opens always start at the top.
+  body.scrollTop = 0;
+}
+
+function closeHelpModal() {
+  closeModal($('#helpOverlay'));
+}
+
+// Wire up Help nav entries (desktop link + mobile More menu) and modal
+// close patterns: × button, click-outside, Esc (handled in the global
+// keydown block).
+{
+  const desktopBtn = document.getElementById('navHelpBtnDesktop');
+  if (desktopBtn) desktopBtn.addEventListener('click', openHelpModal);
+  const mobileBtn = document.getElementById('navHelpBtn');
+  if (mobileBtn) {
+    mobileBtn.addEventListener('click', () => {
+      const menu = document.getElementById('navMoreMenu');
+      if (menu) menu.classList.add('hidden');
+      openHelpModal();
+    });
+  }
+  const closeBtn = document.getElementById('helpClose');
+  if (closeBtn) closeBtn.addEventListener('click', closeHelpModal);
+  const overlay = document.getElementById('helpOverlay');
+  if (overlay) {
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) closeHelpModal();
+    });
+  }
+}
+
 // ── Action menu helpers ────────────────────────────────
 // Close any open action menus when clicking elsewhere
 document.addEventListener('click', (e) => {
@@ -452,6 +778,7 @@ function navigate(view) {
 $$('.nav-link, .nav-brand').forEach(el => {
   el.addEventListener('click', () => {
     if (el.id === 'navMoreBtn') return; // handled separately
+    if (el.id === 'navHelpBtnDesktop') return; // opens the help modal, no view change
     navigate(el.dataset.view || 'home');
   });
 });
@@ -475,6 +802,13 @@ if (navMoreBtn && navMoreMenu) {
       if (el.id === 'navLogoutBtn') {
         navMoreMenu.classList.add('hidden');
         logout();
+        return;
+      }
+      if (el.id === 'navHelpBtn') {
+        // Help opens a modal — no view navigation. The dedicated handler
+        // (registered in the help-modal block) hides the More menu and
+        // opens the modal; we just bail here so navigate() doesn't fire
+        // a stray loadHome().
         return;
       }
       navigate(el.dataset.view);
@@ -524,7 +858,11 @@ function renderHome(data) {
       </div>
     `;
     bindHeroGoalCard(pg.id);
-    bindBlockerItems('#homeHero', { onRefresh: () => loadHome() });
+    bindBlockerItems('#homeHero', {
+      surface: 'home',
+      onRefresh: () => loadHome(),
+    });
+    renderUndoResolveChip('home');
   }
 
   // Active goals
@@ -825,8 +1163,10 @@ function renderPrompts() {
     const isKnowledgeGap = p.prompt_type === 'knowledge_gap';
     const isBlockerAwareness = p.prompt_type === 'blocker_awareness';
 
-    // "Got it" stays as the secondary dismiss across all prompt types.
-    let actionsHtml = `<button class="prompt-btn" onclick="dismissPrompt(${p.id})">Got it</button>`;
+    // Iris paper-cut #3: "Got it" reads as dismissive even though the action
+    // is genuinely useful (mark prompt seen, keep moving). "Noted" lands
+    // closer to "I've absorbed this" — same behaviour, calmer word.
+    let actionsHtml = `<button class="prompt-btn" onclick="dismissPrompt(${p.id})">Noted</button>`;
     if (isKnowledgeGap) {
       actionsHtml += `<button class="prompt-btn prompt-btn-primary" onclick="addNoteFromPrompt(${p.id})">Add a note</button>`;
     }
@@ -938,12 +1278,19 @@ async function resolveBlockerFromPrompt(promptId, goalId) {
   }
   if (active.length === 1) {
     await toggleBlockerResolved(active[0].id, true, {
+      surface: 'home',
+      goalId,
+      blockerName: active[0].blocker_name || '',
       onRefresh: () => loadHome(),
     });
     return;
   }
   openBlockerPicker(active, async (blockerId) => {
+    const picked = active.find(b => b.id === blockerId);
     await toggleBlockerResolved(blockerId, true, {
+      surface: 'home',
+      goalId,
+      blockerName: picked ? picked.blocker_name || '' : '',
       onRefresh: () => loadHome(),
     });
   });
@@ -1239,6 +1586,11 @@ function bindBlockerItems(container, opts = {}) {
         toggleBlockerResolved(blockerId, !wasResolved, {
           onRefresh: opts.onRefresh,
           row,
+          // Surface/goalId thread through so the persistent undo chip
+          // knows which canvas to pin to and where to refresh on undo.
+          surface: opts.surface,
+          goalId: opts.goalId,
+          blockerName: row.querySelector('.blocker-name')?.textContent,
         });
       });
     }
@@ -1267,6 +1619,70 @@ function navigateToBlockerTarget(blockerType, targetId) {
     navigate('tasks');
   }
   // external_system has no detail surface — silent no-op.
+}
+
+// ── Persistent "Undo last resolve" chip ─────────────────────
+// Iris paper-cut #2: the 5-second undo toast disappears too fast. The
+// toast still fires (immediate, low-friction); this chip is the
+// longer-tail safety net — pinned to the surface where the resolve
+// happened, visible until clicked or the window (30 minutes) expires.
+//
+// Only `mark resolved` actions land in here — un-resolves (the
+// "I clicked the wrong row" path) don't need their own undo affordance
+// because the un-resolve action is already itself an undo.
+const UNDO_CHIP_WINDOW_MS = 30 * 60 * 1000;
+let _lastResolvedBlocker = null; // {id, blockerName, surface, resolvedAt}
+
+function _surfaceContainer(surface) {
+  if (surface === 'home') return document.getElementById('homeHero');
+  if (surface === 'goal-detail') return document.getElementById('goalDetailBody');
+  return null;
+}
+
+// Idempotent: removes any stale chip first, then re-renders fresh state.
+function renderUndoResolveChip(surface) {
+  // Strip every chip on the page first — there should only ever be one
+  // visible, on the active surface. (Re-renders of either surface call
+  // through here on each refresh.)
+  document.querySelectorAll('.undo-resolve-chip').forEach(el => el.remove());
+
+  const last = _lastResolvedBlocker;
+  if (!last) return;
+  if (last.surface !== surface) return;
+  if (Date.now() - last.resolvedAt > UNDO_CHIP_WINDOW_MS) {
+    _lastResolvedBlocker = null;
+    return;
+  }
+  const container = _surfaceContainer(surface);
+  if (!container) return;
+
+  const chip = document.createElement('button');
+  chip.type = 'button';
+  chip.className = 'undo-resolve-chip';
+  chip.setAttribute('aria-label', 'Undo last resolve');
+  const name = last.blockerName ? `"${last.blockerName}"` : 'last blocker';
+  chip.innerHTML =
+    `<span class="undo-resolve-chip-arrow">↶</span>` +
+    `<span>Undo resolving ${esc(name)}</span>`;
+  chip.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    // Capture before clearing — the un-resolve refreshes the surface,
+    // which calls renderUndoResolveChip again and would otherwise see
+    // stale state.
+    const target = _lastResolvedBlocker;
+    _lastResolvedBlocker = null;
+    chip.remove();
+    if (!target) return;
+    // Fire the inverse. Surface refreshes the surface that originated it.
+    await toggleBlockerResolved(target.id, false, {
+      onRefresh:
+        target.surface === 'goal-detail'
+          ? () => openGoalDetail(target.goalId)
+          : () => loadHome(),
+      _isUndoChip: true, // suppress re-recording
+    });
+  });
+  container.appendChild(chip);
 }
 
 // Optimistic resolve / un-resolve with toast undo.
@@ -1298,6 +1714,22 @@ async function toggleBlockerResolved(blockerId, nextResolved, opts = {}) {
       'Undo',
       () => toggleBlockerResolved(blockerId, !nextResolved, opts),
     );
+    // Record for the persistent undo chip — only on the resolve direction
+    // (un-resolves are themselves undos). Skip when the click came from
+    // the undo chip itself (would re-arm the chip immediately otherwise).
+    if (nextResolved && !opts._isUndoChip) {
+      const blockerName =
+        opts.blockerName ||
+        (row ? row.querySelector('.blocker-name')?.textContent : null) ||
+        '';
+      _lastResolvedBlocker = {
+        id: blockerId,
+        blockerName,
+        surface: opts.surface || 'home',
+        goalId: opts.goalId || null,
+        resolvedAt: Date.now(),
+      };
+    }
     if (typeof opts.onRefresh === 'function') opts.onRefresh();
   } catch (err) {
     // Revert.
@@ -2327,7 +2759,12 @@ async function openGoalDetail(goalId) {
   bindGoalDetailTaskChecks(goalId);
 
   // Bind blocker rows — toggle resolve + navigate to related entity.
-  bindBlockerItems('#goalDetailBody', { onRefresh: () => openGoalDetail(goalId) });
+  bindBlockerItems('#goalDetailBody', {
+    surface: 'goal-detail',
+    goalId,
+    onRefresh: () => openGoalDetail(goalId),
+  });
+  renderUndoResolveChip('goal-detail');
 
   // Bind growability affordances.
   bindGrowTaskForm(goalId, { autoFocus: !activeTasks.length });
@@ -2776,7 +3213,11 @@ async function openGrowBlockerPicker(goalId, currentGoal) {
       if (emptyCta) blockersWrap.innerHTML = '';
       // Insert at the top (active blockers come first, then resolved).
       blockersWrap.insertAdjacentHTML('afterbegin', renderBlockerItem(created));
-      bindBlockerItems('#goalDetailBody', { onRefresh: () => openGoalDetail(goalId) });
+      bindBlockerItems('#goalDetailBody', {
+        surface: 'goal-detail',
+        goalId,
+        onRefresh: () => openGoalDetail(goalId),
+      });
       const row = blockersWrap.querySelector(`.blocker-item[data-blocker-id="${created.id}"]`);
       _focusFlash(row);
     }
@@ -4662,6 +5103,7 @@ document.addEventListener('keydown', (e) => {
     closeModal($('#tagRenameOverlay'));
     closeModal($('#tagMergeOverlay'));
     closeModal($('#tagDeleteOverlay'));
+    closeModal($('#helpOverlay'));
     if (!$('#dumpDetailOverlay').classList.contains('hidden')) {
       closeModal($('#dumpDetailOverlay'));
       _currentDumpDetailId = null;

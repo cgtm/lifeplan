@@ -637,7 +637,37 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json(status, data)
             return True
 
+        # ── In-app help — serve docs/user-guide.md as plaintext markdown ──
+        # Lumen's lane: client-side renders the markdown into the help modal.
+        # Auth-gated like every other /api route — cheap, no reason to expose
+        # publicly. Returns text/plain so Cmd+F works on the rendered HTML
+        # rather than the source.
+        if method == "GET" and path == "/api/help/user-guide":
+            self._serve_user_guide()
+            return True
+
         return False
+
+    def _serve_user_guide(self):
+        """GET /api/help/user-guide. Returns docs/user-guide.md as plaintext.
+
+        Path is resolved against the repo root (parent of app/). No directory
+        traversal possible — the path is a constant string baked here.
+        """
+        try:
+            here = os.path.dirname(os.path.abspath(__file__))
+            guide_path = os.path.join(os.path.dirname(here), "docs", "user-guide.md")
+            with open(guide_path, "rb") as f:
+                body = f.read()
+        except OSError:
+            self.send_json(404, {"error": "user guide not found"})
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     # ── Login / logout handlers ──────────────────────────────────
 

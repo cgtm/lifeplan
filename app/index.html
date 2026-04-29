@@ -31,6 +31,7 @@
         <a class="nav-link nav-desktop" data-view="journal">Journal</a>
         <a class="nav-link nav-desktop" data-view="knowledge">Knowledge</a>
         <a class="nav-link nav-desktop" data-view="tags">Tags</a>
+        <a class="nav-link nav-desktop" id="navHelpBtnDesktop" title="User guide">Help</a>
         <a class="nav-link nav-more" id="navMoreBtn">More</a>
         <button class="theme-toggle nav-desktop" id="themeToggle" title="Toggle theme">auto</button>
         <button class="nav-logout nav-desktop" id="navLogoutDesktopBtn" title="Log out" aria-label="Log out">Log out</button>
@@ -41,6 +42,7 @@
         <a class="nav-more-item" data-view="journal">Journal</a>
         <a class="nav-more-item" data-view="knowledge">Knowledge</a>
         <a class="nav-more-item" data-view="tags">Tags</a>
+        <a class="nav-more-item" id="navHelpBtn">Help</a>
         <div class="nav-more-theme" id="mobileThemeToggle">
           <span>Theme</span>
           <span class="nav-more-theme-label" id="mobileThemeLabel">auto</span>
@@ -672,6 +674,21 @@
       <div class="modal-footer">
         <button class="btn" onclick="closeModal($('#editKnowledgeOverlay'))">Cancel</button>
         <button class="btn-primary" id="saveKnowledgeBtn">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ HELP / USER GUIDE MODAL ════════════════════════════ -->
+  <!-- Full-screen overlay. Body scrolls; the header stays sticky.    -->
+  <!-- Renders client-side from /api/help/user-guide (markdown text). -->
+  <div class="overlay overlay-help hidden" id="helpOverlay">
+    <div class="modal modal-help" role="dialog" aria-labelledby="helpModalTitle">
+      <div class="modal-header help-header">
+        <h2 id="helpModalTitle">Lifeplan user guide</h2>
+        <button class="modal-close" id="helpClose" aria-label="Close help">&times;</button>
+      </div>
+      <div class="modal-body help-body" id="helpBody">
+        <div class="help-loading">Loading&hellip;</div>
       </div>
     </div>
   </div>
