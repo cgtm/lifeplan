@@ -28,6 +28,7 @@ changes, update this file; the persona files only carry pointers to it.
 12. [Deploys do not include uncommitted work](#12-deploys-do-not-include-uncommitted-work) — accepted
 13. [Pinned target versions for load-bearing dependencies](#13-pinned-target-versions-for-load-bearing-dependencies) — accepted
 14. [Runtime asset reads require a verified deploy.sh sync](#14-runtime-asset-reads-require-a-verified-deploysh-sync) — accepted
+15. [User guide reviewed before commit on user-visible changes](#15-user-guide-reviewed-before-commit-on-user-visible-changes) — accepted
 
 ---
 
@@ -610,6 +611,72 @@ accepted on Cam's authorisation: the class of bug is process-shaped
 (any persona adding a runtime read can hit it), not Lumen-specific,
 and the cost of a second occurrence — silent prod breakage past
 Probe's e2e — outweighs waiting for Rule of Two.
+
+---
+
+## 15. User guide reviewed before commit on user-visible changes
+
+**Statement.** Any commit that changes user-visible behaviour reviews
+[`docs/user-guide.md`](../user-guide.md) before `git commit` and updates
+the affected sections in the same commit. The guide commit is part of
+the change, not a follow-up.
+
+**Why.** The user guide is a load-bearing artefact: Cam reads it as a
+reference, and it is the source of the in-app Help modal
+(`GET /api/help/user-guide`). A user-visible change shipped without a
+guide pass leaves the next persona reading wrong information and
+misleads Cam in-app. Cam's standing instruction (2026-04-29, verbatim):
+*"Please make the team aware that the user guide should be reviewed
+just before commit and updated if required."*
+
+**Trigger.** Fires on user-visible behaviour changes:
+
+- New affordances (buttons, modals, views, entity types).
+- Removed affordances.
+- Changed labels, copy, or flows.
+- New endpoints surfaced in the UI.
+- Modified prompts (the user-facing kind, not internal LLM scaffolding).
+
+Does **not** fire on: internal refactors, test additions,
+infrastructure work, docs/process changes that don't affect users,
+persona-file edits, retros. When in doubt: ship it through the rule.
+
+**Ownership.** The persona shipping the change owns the review and any
+update. Iris is the canonical voice owner for the guide; co-author with
+Iris when the change touches a substantial section needing voice
+rework, or route to Iris for a voice pass if the draft can't land the
+guide's tone (opinion-forward, plain language, demos over documents).
+The guide is an editorial artefact, not a free-for-all wiki.
+
+**How to apply.**
+
+1. Before `git commit`, scan the guide for sections that touch the
+   surface being changed.
+2. If a section is now stale: edit it in the same commit.
+3. If no sections are stale: nothing to do — but the review happened.
+   Don't add a "I checked the guide" line to every commit message; the
+   practice is the contract, not a per-commit ritual.
+4. If a section needs rework beyond a small edit and the shipping
+   persona can't match Iris's voice, route to Iris before committing.
+
+**Failure mode.** A user-visible change ships with a stale guide
+section: the next persona to read the guide finds wrong information,
+and Cam's in-app Help modal misleads him. Cairn catches drift at retro
+time and routes a guide-update dispatch to Iris.
+
+**Cross-references.**
+
+- [`docs/user-guide.md`](../user-guide.md) — the artefact under review.
+- Practice [§14](#14-runtime-asset-reads-require-a-verified-deploysh-sync)
+  — sister practice that keeps the guide *reachable* on prod once it's
+  correct. §15 keeps the content current; §14 keeps the file shipped.
+- Commit `abee5c7` (2026-04-29, "Sync docs/user-guide.md on deploy") —
+  the round that lit this up; the guide became load-bearing once the
+  in-app Help modal started reading it at runtime.
+
+**Status:** accepted (2026-04-29). Single-directive rule from Cam
+(supersedes Rule of Two): a standing directive lands accepted, not
+proposed.
 
 ---
 
