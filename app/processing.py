@@ -75,6 +75,47 @@ class UnknownItemType(Exception):
         self.itype = itype
         super().__init__(f"unknown itype: {itype!r}")
 
+
+class UpdateDrift(Exception):
+    """Per `braindump-updates.md` §4: the entity's current value drifted from
+    what the LLM saw at extraction time, OR the append-note has already been
+    applied (provenance prefix already present).
+
+    Carries `field` (the column name, static enum-shaped string, safe to log),
+    `expected_value` (what the LLM saw at extraction), and `current_value`
+    (what the row reads now). The latter two MUST NOT be logged -- they are
+    user content (status enums excepted, but we don't bother filtering by
+    field; treat the values as opaque from a logging standpoint).
+
+    Caller (`handle_approve_item`) translates to a 409 with the body shape
+    {error: "drift", field, expected_value, current_value}.
+    """
+
+    def __init__(self, field: str, expected_value, current_value, reason: str = "drift"):
+        self.field = field
+        self.expected_value = expected_value
+        self.current_value = current_value
+        # `reason` distinguishes a value-mismatch from an already-applied append.
+        # One of: "drift", "already_applied". Logged as enum-shaped string.
+        self.reason = reason
+        super().__init__(
+            f"update drift on field={field!r} (reason={reason})"
+        )
+
+
+class TargetEntityGone(Exception):
+    """Per `braindump-updates.md` §4: the target entity row is missing at
+    apply time (deleted between extraction and approve).
+
+    Carries `entity_type` (one of "task", "goal", "blocker", "person") and
+    `entity_id`. Both safe to log.
+    """
+
+    def __init__(self, entity_type: str, entity_id):
+        self.entity_type = entity_type
+        self.entity_id = entity_id
+        super().__init__(f"target entity gone: {entity_type} #{entity_id}")
+
 _env = _load_env()
 OLLAMA_URL = _env.get("OLLAMA_URL", "http://localhost:11434") + "/api/generate"
 OLLAMA_MODEL = "mistral"
@@ -1092,8 +1133,24 @@ def match_goal_links(content, dump_id, goals_data):
     return items
 
 
-def _build_llm_prompt(content, dump_id, goals_data, known_people, known_tags, reference_date):
-    """Build the extraction prompt for Ollama/Mistral."""
+def _build_llm_prompt(
+    content,
+    dump_id,
+    goals_data,
+    known_people,
+    known_tags,
+    reference_date,
+    open_tasks=None,
+    active_blockers=None,
+):
+    """Build the extraction prompt for Ollama/Mistral.
+
+    `open_tasks` and `active_blockers` are optional context lists for the
+    Phase 1b update-extraction story (`braindump-updates.md` §7). When None
+    or empty, the corresponding sections are omitted from the prompt --
+    keeping older callers (and tests that synthesise minimal inputs) working
+    unchanged.
+    """
     today_str = reference_date.strftime("%Y-%m-%d")
 
     goals_list = "\n".join(
@@ -1105,6 +1162,37 @@ def _build_llm_prompt(content, dump_id, goals_data, known_people, known_tags, re
         for p in known_people
     )
     tags_list = ", ".join(t["name"] for t in known_tags)
+
+    # Active-only filter at the active goals view (per contract §7). The
+    # full goals_data list still includes inactive ones; we re-filter here
+    # to keep the active view tight without changing the broader prompt.
+    active_goals_list = "\n".join(
+        f"  - ID {g['id']}: \"{g['title']}\""
+        for g in goals_data if g.get("status") == "active"
+    ) or "  (none)"
+
+    open_tasks = open_tasks or []
+    active_blockers = active_blockers or []
+
+    open_tasks_list = "\n".join(
+        # Echo only id, title, status, due_date, goal_id per contract §7.
+        # No descriptions -- prompt budget. The LLM matches on title alone.
+        f"  - ID {t['id']}: \"{t['title']}\" "
+        f"(status: {t.get('status', 'active')}, "
+        f"due: {t.get('due_date') or 'none'}, "
+        f"goal_id: {t.get('goal_id') if t.get('goal_id') is not None else 'none'})"
+        for t in open_tasks
+    ) or "  (none)"
+
+    active_blockers_list = "\n".join(
+        # `label` is the server-built `<blocker_type> blocker on
+        # <blocked_type> <blocked_label>` string composed below in
+        # process_brain_dump_llm. notes intentionally omitted: appending to
+        # blocker notes is out of scope for v1 (contract §"What's out of
+        # scope (Phase 1)"); resolve is the only blocker mutation supported.
+        f"  - ID {b['id']}: \"{b['label']}\""
+        for b in active_blockers
+    ) or "  (none)"
 
     prompt = f"""You are an extraction engine for a personal knowledge management system. Today's date is {today_str}.
 
@@ -1124,6 +1212,12 @@ Analyse the following brain dump text and extract structured items from it. Retu
 ### Existing tags:
 {tags_list}
 
+### Open tasks (active, top 50 by recent activity):
+{open_tasks_list}
+
+### Active blockers (top 30 by recent activity):
+{active_blockers_list}
+
 ## Extraction rules
 
 1. **Tasks**: Actionable items. Look for "todo:", "need to", "should", "must", "have to", "remind me to", checkbox syntax, or imperative verbs at line start. Each task needs a title (concise imperative), description (original text), optional due_date (ISO 8601), optional goal_id (from the goals list above), and status "active".
@@ -1139,6 +1233,28 @@ Analyse the following brain dump text and extract structured items from it. Retu
 6. **New goals**: Explicit requests to create a new goal. Look for "create a goal", "new goal", "goal:", "my goal is to", "add goal", "set a goal to". Extract the goal title, optional target_date (ISO 8601), and status "active". Only create goal_new items when the user is explicitly asking for a NEW goal to be created -- do NOT confuse this with tasks or goal links.
 
 7. **Tags**: Which existing tags apply? Also suggest new tags (lowercase, hyphenated, max 30 chars) for recurring themes not covered by existing tags. Each tag carries an `apply_to` list naming the OTHER extracted items it should attach to (see "Tag scoping" below).
+
+8. **Task updates**: When the dump reports that an EXISTING open task from the list above has progressed -- completed, cancelled, has a new due date, or warrants a note appended -- emit a `task_updates` entry. Match strictly by `id` from the open-tasks list; never invent ids. Allowed fields: `status` (only `completed` or `cancelled`), `due_date` (ISO date or null), `description` (a NEW snippet to append, NOT the merged final value). Include the task's title at extraction time as `task_title_at_extraction` so Cam can verify the match, and the field's current value as `current_value_at_extraction` (e.g. the prior status `"active"`). DO NOT emit task updates for goals -- updates target the table where the entity lives.
+
+9. **Goal updates**: Same shape as task updates but for an EXISTING goal from the active goals list. Allowed fields: `status` (`completed` or `cancelled`), `target_date` (ISO date or null), `description` (snippet to append). Match by `id` from the active goals list. Echo `goal_title_at_extraction` and `current_value_at_extraction`.
+
+10. **Blocker resolves**: When the dump reports an active blocker has cleared (e.g. "the visa came through"), emit a `blocker_resolves` entry. Match by `id` from the active blockers list. Echo `blocker_label_at_extraction` (the label string from the list) and `current_resolved_at_extraction: 0`. Set `resolved: true`. Resolve is the ONLY blocker mutation v1 supports -- don't emit anything else for blockers.
+
+11. **Person note appends**: When the dump carries a piece of context about an EXISTING person from the people list above and that context isn't itself a new task / new knowledge item already extracted, emit a `person_note_appends` entry with the snippet to append. Match by `id`. Echo `person_name_at_extraction`. Keep the snippet concise; it will be prefixed with provenance and prepended to the person's existing notes by the apply step.
+
+### Update-extraction matching rules (load-bearing)
+
+- **Match by id only.** If the dump implies an update to a task / goal / blocker / person that is NOT in the relevant context list above, emit NOTHING for the update. Do not guess. The dump may still produce a NEW item via rules 1-7; that's fine.
+- **Knowledge items have NO update path.** If the dump augments existing knowledge, emit a NEW `knowledge_items` entry instead. Never emit `knowledge_update`.
+- **No reverse transitions.** Status updates are forward-only: `active -> completed | cancelled`. Never emit `completed -> active` or similar.
+- **Title rewrites are out of scope.** No `task.title` / `goal.title` updates. If Cam wants to rename an entity, that's a UI action, not a dump update.
+- **Confidence guidelines for updates:**
+  - Explicit completion language ("done", "booked", "finished") + exact title match: 0.90-0.95
+  - Explicit completion + paraphrased title match: 0.80-0.85
+  - Implicit completion ("flights are sorted") + exact title: 0.75
+  - Date update with explicit new date: 0.85
+  - Append-note items: 0.70 default (lower because additive)
+  - Below 0.50: don't emit at all.
 
 ## Tag scoping (apply_to)
 
@@ -1238,6 +1354,47 @@ Return a JSON object with this exact structure:
       "apply_to": [
         {{"type": "task|knowledge|goal_new|person_new|person_mention", "source_text": "exact source_text of the target item"}}
       ]
+    }}
+  ],
+  "task_updates": [
+    {{
+      "task_id": "integer (must match an id from Open tasks above)",
+      "task_title_at_extraction": "string (title verbatim from the list)",
+      "field": "status|due_date|description",
+      "current_value_at_extraction": "string or null (prior value as it appears in the list)",
+      "new_value": "string or null (for description: the snippet to append)",
+      "confidence": 0.0-1.0,
+      "source_text": "exact substring from the brain dump"
+    }}
+  ],
+  "goal_updates": [
+    {{
+      "goal_id": "integer (must match an id from Existing goals)",
+      "goal_title_at_extraction": "string",
+      "field": "status|target_date|description",
+      "current_value_at_extraction": "string or null",
+      "new_value": "string or null (for description: the snippet to append)",
+      "confidence": 0.0-1.0,
+      "source_text": "exact substring"
+    }}
+  ],
+  "blocker_resolves": [
+    {{
+      "blocker_id": "integer (must match an id from Active blockers)",
+      "blocker_label_at_extraction": "string (label verbatim from the list)",
+      "current_resolved_at_extraction": 0,
+      "resolved": true,
+      "confidence": 0.0-1.0,
+      "source_text": "exact substring"
+    }}
+  ],
+  "person_note_appends": [
+    {{
+      "person_id": "integer (must match an id from Existing people)",
+      "person_name_at_extraction": "string",
+      "note_text": "string (the snippet to append; will be provenance-prefixed by the server)",
+      "confidence": 0.0-1.0,
+      "source_text": "exact substring"
     }}
   ]
 }}
@@ -1344,6 +1501,83 @@ Output (relevant fragments):
 
 Note how `family` does NOT cross-attach to the ML knowledge item, and `machine-learning` does NOT attach to the call-mum task. The two topics in the dump stay separate. If a tag is dump-level (no specific item it belongs to), use `apply_to: []`.
 
+### Example 3 (task update -- status completed):
+Assume Open tasks include: `ID 42: "Book flights to Seoul" (status: active, due: 2026-09-01, goal_id: 1)`.
+
+Input: "I booked the flights for Seoul this morning."
+
+Output (relevant fragment):
+{{
+  "task_updates": [
+    {{
+      "task_id": 42,
+      "task_title_at_extraction": "Book flights to Seoul",
+      "field": "status",
+      "current_value_at_extraction": "active",
+      "new_value": "completed",
+      "confidence": 0.92,
+      "source_text": "I booked the flights for Seoul this morning."
+    }}
+  ]
+}}
+
+### Example 4 (goal update -- target_date):
+Assume Existing goals include: `ID 1: "Move to Seoul" (status: active)` with target_date 2026-08-01 (visible elsewhere in your context).
+
+Input: "Decided to push the Seoul move to October."
+
+Output (relevant fragment):
+{{
+  "goal_updates": [
+    {{
+      "goal_id": 1,
+      "goal_title_at_extraction": "Move to Seoul",
+      "field": "target_date",
+      "current_value_at_extraction": "2026-08-01",
+      "new_value": "2026-10-01",
+      "confidence": 0.85,
+      "source_text": "Decided to push the Seoul move to October."
+    }}
+  ]
+}}
+
+### Example 5 (blocker resolve):
+Assume Active blockers include: `ID 7: "external_system blocker on goal Move to Seoul"`.
+
+Input: "Nadia's visa came through this morning."
+
+Output (relevant fragment):
+{{
+  "blocker_resolves": [
+    {{
+      "blocker_id": 7,
+      "blocker_label_at_extraction": "external_system blocker on goal Move to Seoul",
+      "current_resolved_at_extraction": 0,
+      "resolved": true,
+      "confidence": 0.90,
+      "source_text": "Nadia's visa came through this morning."
+    }}
+  ]
+}}
+
+### Example 6 (person note append):
+Assume Existing people include: `ID 12: "Mum"`.
+
+Input: "talked to mum, she wants the loan back by August."
+
+Output (relevant fragment):
+{{
+  "person_note_appends": [
+    {{
+      "person_id": 12,
+      "person_name_at_extraction": "Mum",
+      "note_text": "she wants the loan back by August",
+      "confidence": 0.75,
+      "source_text": "talked to mum, she wants the loan back by August."
+    }}
+  ]
+}}
+
 Now extract items from the brain dump text above. Return ONLY the JSON object, no other text."""
 
     return prompt
@@ -1416,12 +1650,61 @@ def _call_mistral(prompt):
     return result
 
 
-def _llm_response_to_items(llm_data, dump_id, known_tags):
-    """Convert the LLM's structured JSON into the standard processed_items format."""
+def _llm_response_to_items(
+    llm_data,
+    dump_id,
+    known_tags,
+    open_task_ids=None,
+    active_goal_ids=None,
+    active_blocker_ids=None,
+    known_person_ids=None,
+):
+    """Convert the LLM's structured JSON into the standard processed_items format.
+
+    Phase 1b extension (per `braindump-updates.md` §1, §2, §7):
+    Parses the four update item types -- `task_update`, `goal_update`,
+    `blocker_resolve`, `person_note_append`. Sanitises:
+      - Drops items whose `target_*_id` doesn't resolve to an existing
+        entity at extraction time (LLM hallucinated the id).
+      - Validates `field` against the allow-list per §2.
+      - Validates `new_value` shape against the field.
+      - For `person_note_append`: drops items with empty `note_text`.
+
+    Items that fail validation get `confidence` zeroed out so the existing
+    0.50 threshold downstream discards them. We do NOT raise -- the LLM is
+    untrusted input and a malformed update item should be silent at parse
+    time, not bubble up.
+
+    `open_task_ids`, `active_goal_ids`, `active_blocker_ids`,
+    `known_person_ids` are sets of ints used for the resolve check. None
+    or empty means "no entity matched -- drop." Old callers passing the
+    six-arg shape get None defaults and the four update arrays parse but
+    every entry fails the resolve check (zeroed confidence -> dropped),
+    which is the safe degenerate path.
+    """
     items = []
 
     # Map existing tag names to IDs for quick lookup
     tag_id_map = {t["name"]: t["id"] for t in known_tags}
+
+    # Cohorts for the update-item resolve check. Cast to set-of-int so the
+    # `id in set` lookup is constant-time and tolerant of LLMs returning
+    # ids as strings.
+    def _to_int_set(values):
+        out = set()
+        if not values:
+            return out
+        for v in values:
+            try:
+                out.add(int(v))
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    open_task_id_set = _to_int_set(open_task_ids)
+    active_goal_id_set = _to_int_set(active_goal_ids)
+    active_blocker_id_set = _to_int_set(active_blocker_ids)
+    known_person_id_set = _to_int_set(known_person_ids)
 
     # Tasks
     for task in llm_data.get("tasks", []):
@@ -1561,6 +1844,200 @@ def _llm_response_to_items(llm_data, dump_id, known_tags):
             "created_id": None,
         })
 
+    # Knowledge updates -- not in scope (contract §"What's out of scope (Phase
+    # 1)"). If the LLM emits prompt-drift `knowledge_updates`, drop them and
+    # log the count for visibility. No user content in the log line.
+    if llm_data.get("knowledge_updates"):
+        try:
+            ku_count = len(llm_data["knowledge_updates"])
+        except TypeError:
+            ku_count = 0
+        if ku_count:
+            logger.info(
+                "processing.update.knowledge_drop dump_id=%s count=%d",
+                dump_id, ku_count,
+            )
+
+    # Phase 1b update items. Per `braindump-updates.md` §3 these are ALWAYS
+    # `suggested` regardless of confidence (no auto-apply branch). The
+    # cross-cutting 0.50 floor is enforced downstream in
+    # `process_brain_dump_for_worker`; we set confidence to 0.0 on items
+    # that fail validation here so they're naturally dropped.
+
+    def _is_iso_date_or_null(val):
+        if val is None:
+            return True
+        if not isinstance(val, str):
+            return False
+        try:
+            datetime.strptime(val.strip(), "%Y-%m-%d")
+            return True
+        except ValueError:
+            return False
+
+    # task_update
+    _TASK_FIELDS = {"status", "due_date", "description"}
+    for tu in llm_data.get("task_updates", []):
+        if not isinstance(tu, dict):
+            continue
+        conf = _clamp_confidence(tu.get("confidence", 0.70))
+        try:
+            task_id = int(tu.get("task_id"))
+        except (TypeError, ValueError):
+            continue  # silent drop -- malformed id
+        field = tu.get("field")
+        new_value = tu.get("new_value")
+        # Validation: id resolves, field in allow-list, new_value shape OK.
+        valid = task_id in open_task_id_set and field in _TASK_FIELDS
+        if valid and field == "status":
+            valid = new_value in ("completed", "cancelled")
+        elif valid and field == "due_date":
+            valid = _is_iso_date_or_null(new_value)
+        elif valid and field == "description":
+            valid = isinstance(new_value, str) and new_value.strip() != ""
+        if not valid:
+            # Zero out confidence so the cross-cutting >=0.50 filter drops it.
+            conf = 0.0
+        items.append({
+            "type": "task_update",
+            "confidence": conf,
+            "status": "suggested",  # always suggested; no auto-apply (§3)
+            "source_text": tu.get("source_text", ""),
+            "data": {
+                "task_id": task_id,
+                "task_title_at_extraction": tu.get("task_title_at_extraction", ""),
+                "field": field,
+                "current_value_at_extraction": tu.get("current_value_at_extraction"),
+                "new_value": new_value,
+            },
+            "created_id": None,
+        })
+        if conf >= 0.50:
+            # Privacy: NO new_value content in the log line. Field is one
+            # of three enum-shaped strings.
+            logger.info(
+                "processing.update.matched dump_id=%s item_index=%d "
+                "item_type=task_update target_id=%s field=%s",
+                dump_id, len(items) - 1, task_id, field,
+            )
+
+    # goal_update
+    _GOAL_FIELDS = {"status", "target_date", "description"}
+    for gu in llm_data.get("goal_updates", []):
+        if not isinstance(gu, dict):
+            continue
+        conf = _clamp_confidence(gu.get("confidence", 0.70))
+        try:
+            goal_id = int(gu.get("goal_id"))
+        except (TypeError, ValueError):
+            continue
+        field = gu.get("field")
+        new_value = gu.get("new_value")
+        valid = goal_id in active_goal_id_set and field in _GOAL_FIELDS
+        if valid and field == "status":
+            valid = new_value in ("completed", "cancelled")
+        elif valid and field == "target_date":
+            valid = _is_iso_date_or_null(new_value)
+        elif valid and field == "description":
+            valid = isinstance(new_value, str) and new_value.strip() != ""
+        if not valid:
+            conf = 0.0
+        items.append({
+            "type": "goal_update",
+            "confidence": conf,
+            "status": "suggested",
+            "source_text": gu.get("source_text", ""),
+            "data": {
+                "goal_id": goal_id,
+                "goal_title_at_extraction": gu.get("goal_title_at_extraction", ""),
+                "field": field,
+                "current_value_at_extraction": gu.get("current_value_at_extraction"),
+                "new_value": new_value,
+            },
+            "created_id": None,
+        })
+        if conf >= 0.50:
+            logger.info(
+                "processing.update.matched dump_id=%s item_index=%d "
+                "item_type=goal_update target_id=%s field=%s",
+                dump_id, len(items) - 1, goal_id, field,
+            )
+
+    # blocker_resolve -- resolve-only, no field branching
+    for br in llm_data.get("blocker_resolves", []):
+        if not isinstance(br, dict):
+            continue
+        conf = _clamp_confidence(br.get("confidence", 0.80))
+        try:
+            blocker_id = int(br.get("blocker_id"))
+        except (TypeError, ValueError):
+            continue
+        # Required: id resolves AND `resolved` payload is true. The contract
+        # has no `unresolve` path; anything other than true is a no-op.
+        resolved = br.get("resolved")
+        valid = (
+            blocker_id in active_blocker_id_set
+            and resolved is True
+        )
+        if not valid:
+            conf = 0.0
+        items.append({
+            "type": "blocker_resolve",
+            "confidence": conf,
+            "status": "suggested",
+            "source_text": br.get("source_text", ""),
+            "data": {
+                "blocker_id": blocker_id,
+                "blocker_label_at_extraction": br.get("blocker_label_at_extraction", ""),
+                "current_resolved_at_extraction": br.get("current_resolved_at_extraction", 0),
+                "resolved": True,
+            },
+            "created_id": None,
+        })
+        if conf >= 0.50:
+            # `field` omitted per contract §9 (implicit for resolve).
+            logger.info(
+                "processing.update.matched dump_id=%s item_index=%d "
+                "item_type=blocker_resolve target_id=%s",
+                dump_id, len(items) - 1, blocker_id,
+            )
+
+    # person_note_append
+    for pna in llm_data.get("person_note_appends", []):
+        if not isinstance(pna, dict):
+            continue
+        conf = _clamp_confidence(pna.get("confidence", 0.70))
+        try:
+            person_id = int(pna.get("person_id"))
+        except (TypeError, ValueError):
+            continue
+        note_text = pna.get("note_text")
+        valid = (
+            person_id in known_person_id_set
+            and isinstance(note_text, str)
+            and note_text.strip() != ""
+        )
+        if not valid:
+            conf = 0.0
+        items.append({
+            "type": "person_note_append",
+            "confidence": conf,
+            "status": "suggested",
+            "source_text": pna.get("source_text", ""),
+            "data": {
+                "person_id": person_id,
+                "person_name_at_extraction": pna.get("person_name_at_extraction", ""),
+                "note_text": note_text if isinstance(note_text, str) else "",
+            },
+            "created_id": None,
+        })
+        if conf >= 0.50:
+            logger.info(
+                "processing.update.matched dump_id=%s item_index=%d "
+                "item_type=person_note_append target_id=%s",
+                dump_id, len(items) - 1, person_id,
+            )
+
     return items
 
 
@@ -1616,7 +2093,64 @@ def process_brain_dump_llm(dump_id, conn, dump, goals_data, known_people, known_
     """
     content = dump["content"]
 
-    prompt = _build_llm_prompt(content, dump_id, goals_data, known_people, known_tags, ref_date)
+    # Phase 1b context: open tasks (top 50 by recent activity) + active
+    # blockers (top 30 by recent activity). Loaded here, in
+    # `process_brain_dump_llm`, because we have the `conn` here -- the
+    # builder is pure-text. Caps per `braindump-updates.md` §10.5.
+    try:
+        open_tasks_rows = rows_to_dicts(conn.execute(
+            "SELECT id, title, status, due_date, goal_id "
+            "FROM tasks WHERE status = 'active' "
+            "ORDER BY updated_at DESC LIMIT 50"
+        ).fetchall())
+    except sqlite3.Error:
+        open_tasks_rows = []
+
+    try:
+        # Active-blockers SELECT joins to the blocked entity to compose the
+        # human-readable label the LLM echoes back. Per contract §1, label
+        # shape is "<blocker_type> blocker on <blocked_type> <blocked_label>".
+        blocker_rows = rows_to_dicts(conn.execute(
+            "SELECT d.id, d.blocker_type, d.blocked_type, d.blocked_id, "
+            "       d.notes, d.created_at "
+            "FROM dependencies d "
+            "WHERE d.resolved = 0 "
+            "ORDER BY d.created_at DESC LIMIT 30"
+        ).fetchall())
+    except sqlite3.Error:
+        blocker_rows = []
+
+    active_blockers = []
+    for b in blocker_rows:
+        # Resolve blocked-side label (goal title or task title). Best-effort;
+        # if the blocked entity is gone, label falls back to "<type> #<id>".
+        blocked_label = f"{b['blocked_type']} #{b['blocked_id']}"
+        try:
+            if b["blocked_type"] == "goal":
+                row = conn.execute(
+                    "SELECT title FROM goals WHERE id = ?", (b["blocked_id"],)
+                ).fetchone()
+                if row:
+                    blocked_label = row["title"]
+            elif b["blocked_type"] == "task":
+                row = conn.execute(
+                    "SELECT title FROM tasks WHERE id = ?", (b["blocked_id"],)
+                ).fetchone()
+                if row:
+                    blocked_label = row["title"]
+        except sqlite3.Error:
+            pass
+        label = (
+            f"{b['blocker_type']} blocker on "
+            f"{b['blocked_type']} {blocked_label}"
+        )
+        active_blockers.append({"id": b["id"], "label": label})
+
+    prompt = _build_llm_prompt(
+        content, dump_id, goals_data, known_people, known_tags, ref_date,
+        open_tasks=open_tasks_rows,
+        active_blockers=active_blockers,
+    )
 
     # Tier 1: Local Ollama
     llm_data = _call_ollama(prompt)
@@ -1638,7 +2172,17 @@ def process_brain_dump_llm(dump_id, conn, dump, goals_data, known_people, known_
         return None
 
     logger.info("processing.llm.ok tier=%s", tier_used)
-    items = _llm_response_to_items(llm_data, dump_id, known_tags)
+    # Resolve cohorts for the update parser. Active goals (status='active')
+    # is the legitimate update target set per contract §2; the broader
+    # goals_data list (which may include completed/stalled goals) is what
+    # the prompt context shows but the update-parser allow-list is tighter.
+    items = _llm_response_to_items(
+        llm_data, dump_id, known_tags,
+        open_task_ids=[t["id"] for t in open_tasks_rows],
+        active_goal_ids=[g["id"] for g in goals_data if g.get("status") == "active"],
+        active_blocker_ids=[b["id"] for b in active_blockers],
+        known_person_ids=[p["id"] for p in known_people],
+    )
 
     # Post-processing: Mistral often misclassifies explicit goal requests as tasks.
     # Run regex goal detection and promote any matching tasks to goals.
@@ -2010,6 +2554,284 @@ def _auto_create_item(conn, item, dump_id, sibling_items=None):
         return None
 
 
+_UPDATE_ITEM_TYPES = (
+    "task_update",
+    "goal_update",
+    "blocker_resolve",
+    "person_note_append",
+)
+
+
+def _format_appended_notes(dump_id, note_text, existing):
+    """Per `braindump-updates.md` §"Append format". Newer-first, single
+    newline separator, single-space after the bracket. Trailing-strip
+    handles `existing in (None, "")` uniformly.
+
+    Provenance prefix is the load-bearing detail -- it's both the audit
+    trail AND the idempotency key (`_append_already_applied` scans for
+    the literal substring).
+    """
+    return f"[from dump #{dump_id}] {note_text}\n{existing or ''}".rstrip()
+
+
+def _append_already_applied(existing, dump_id):
+    """Idempotency check for append-note fields per contract §4.
+
+    Returns True iff `existing` already contains the literal provenance
+    prefix `[from dump #<dump_id>]` for THIS dump. Case-sensitive, exact
+    bracket match.
+    """
+    if not existing:
+        return False
+    return f"[from dump #{dump_id}]" in existing
+
+
+def _norm_iso_date(value):
+    """Normalise an ISO date for drift comparison. None/empty -> None.
+    Strings are trimmed. Anything else returns the input unchanged so
+    drift comparisons surface the unexpected shape rather than swallow it.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        v = value.strip()
+        return v if v else None
+    return value
+
+
+def _apply_task_update(conn, item, dump_id):
+    """Apply one `task_update` item per `braindump-updates.md` §4."""
+    data = item["data"]
+    task_id = data["task_id"]
+    field = data.get("field")
+    new_value = data.get("new_value")
+
+    row = conn.execute(
+        "SELECT status, due_date, description FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        raise TargetEntityGone("task", task_id)
+
+    if field == "status":
+        current = row["status"]
+        expected = data.get("current_value_at_extraction")
+        if current != expected:
+            raise UpdateDrift("status", expected, current)
+        if new_value not in ("completed", "cancelled"):
+            # Belt-and-braces: parser should have zeroed conf, but a
+            # later edit_data could have routed an out-of-allow-list
+            # value here. Treat as drift so the UI can reflect it.
+            raise UpdateDrift("status", new_value, current, reason="invalid_value")
+        conn.execute(
+            "UPDATE tasks SET status = ?, "
+            "completed_at = CASE WHEN ? = 'completed' THEN datetime('now') "
+            "                    ELSE completed_at END, "
+            "updated_at = datetime('now') WHERE id = ?",
+            (new_value, new_value, task_id),
+        )
+    elif field == "due_date":
+        current = _norm_iso_date(row["due_date"])
+        expected = _norm_iso_date(data.get("current_value_at_extraction"))
+        if current != expected:
+            raise UpdateDrift("due_date", expected, current)
+        new_norm = _norm_iso_date(new_value)
+        conn.execute(
+            "UPDATE tasks SET due_date = ?, updated_at = datetime('now') "
+            "WHERE id = ?",
+            (new_norm, task_id),
+        )
+    elif field == "description":
+        existing = row["description"]
+        if _append_already_applied(existing, dump_id):
+            raise UpdateDrift(
+                "description", "not yet appended", "already appended",
+                reason="already_applied",
+            )
+        merged = _format_appended_notes(dump_id, new_value, existing)
+        conn.execute(
+            "UPDATE tasks SET description = ?, updated_at = datetime('now') "
+            "WHERE id = ?",
+            (merged, task_id),
+        )
+    else:
+        # Field not in allow-list. Treat as malformed -> drift with a
+        # clear reason; caller still 409s. (We don't introduce a separate
+        # 400 surface for this in the handler -- the practice is `409 +
+        # body that names what shifted` per contract §10.4.)
+        raise UpdateDrift(
+            field or "<missing>",
+            "field in allow-list",
+            "field not in allow-list",
+            reason="invalid_field",
+        )
+
+    return task_id
+
+
+def _apply_goal_update(conn, item, dump_id):
+    """Apply one `goal_update` item per `braindump-updates.md` §4."""
+    data = item["data"]
+    goal_id = data["goal_id"]
+    field = data.get("field")
+    new_value = data.get("new_value")
+
+    row = conn.execute(
+        "SELECT status, target_date, description FROM goals WHERE id = ?",
+        (goal_id,),
+    ).fetchone()
+    if row is None:
+        raise TargetEntityGone("goal", goal_id)
+
+    if field == "status":
+        current = row["status"]
+        expected = data.get("current_value_at_extraction")
+        if current != expected:
+            raise UpdateDrift("status", expected, current)
+        if new_value not in ("completed", "cancelled"):
+            raise UpdateDrift("status", new_value, current, reason="invalid_value")
+        conn.execute(
+            "UPDATE goals SET status = ?, "
+            "completed_at = CASE WHEN ? = 'completed' THEN datetime('now') "
+            "                    ELSE completed_at END, "
+            "updated_at = datetime('now') WHERE id = ?",
+            (new_value, new_value, goal_id),
+        )
+    elif field == "target_date":
+        current = _norm_iso_date(row["target_date"])
+        expected = _norm_iso_date(data.get("current_value_at_extraction"))
+        if current != expected:
+            raise UpdateDrift("target_date", expected, current)
+        new_norm = _norm_iso_date(new_value)
+        conn.execute(
+            "UPDATE goals SET target_date = ?, updated_at = datetime('now') "
+            "WHERE id = ?",
+            (new_norm, goal_id),
+        )
+    elif field == "description":
+        existing = row["description"]
+        if _append_already_applied(existing, dump_id):
+            raise UpdateDrift(
+                "description", "not yet appended", "already appended",
+                reason="already_applied",
+            )
+        merged = _format_appended_notes(dump_id, new_value, existing)
+        conn.execute(
+            "UPDATE goals SET description = ?, updated_at = datetime('now') "
+            "WHERE id = ?",
+            (merged, goal_id),
+        )
+    else:
+        raise UpdateDrift(
+            field or "<missing>",
+            "field in allow-list",
+            "field not in allow-list",
+            reason="invalid_field",
+        )
+
+    return goal_id
+
+
+def _apply_blocker_resolve(conn, item, dump_id):
+    """Apply one `blocker_resolve` item per `braindump-updates.md` §4.
+
+    Resolve-only. The drift recompute compares against
+    `current_resolved_at_extraction` (always 0 in the LLM-emitted shape).
+    """
+    data = item["data"]
+    blocker_id = data["blocker_id"]
+
+    row = conn.execute(
+        "SELECT resolved FROM dependencies WHERE id = ?",
+        (blocker_id,),
+    ).fetchone()
+    if row is None:
+        raise TargetEntityGone("blocker", blocker_id)
+
+    current = row["resolved"]
+    expected = data.get("current_resolved_at_extraction", 0)
+    # Both sides cast to int -- sqlite gives us an int already, the LLM's
+    # echo might come through as 0/1 or false/true.
+    try:
+        expected_int = int(expected)
+    except (TypeError, ValueError):
+        expected_int = 0
+    if int(current) != expected_int:
+        raise UpdateDrift("resolved", expected_int, int(current))
+
+    conn.execute(
+        "UPDATE dependencies SET resolved = 1, resolved_at = datetime('now') "
+        "WHERE id = ?",
+        (blocker_id,),
+    )
+    return blocker_id
+
+
+def _apply_person_note_append(conn, item, dump_id):
+    """Apply one `person_note_append` item per `braindump-updates.md` §4."""
+    data = item["data"]
+    person_id = data["person_id"]
+    note_text = data.get("note_text", "")
+
+    row = conn.execute(
+        "SELECT notes FROM people WHERE id = ?",
+        (person_id,),
+    ).fetchone()
+    if row is None:
+        raise TargetEntityGone("person", person_id)
+
+    if not isinstance(note_text, str) or not note_text.strip():
+        # Defensive: parser should have zeroed conf, but edit_data could
+        # have routed an empty note_text through. Surface as a drift so
+        # the UI's per-row error path catches it.
+        raise UpdateDrift(
+            "note_text", "non-empty", "empty", reason="invalid_value",
+        )
+
+    existing = row["notes"]
+    if _append_already_applied(existing, dump_id):
+        raise UpdateDrift(
+            "notes", "not yet appended", "already appended",
+            reason="already_applied",
+        )
+    merged = _format_appended_notes(dump_id, note_text, existing)
+    conn.execute(
+        "UPDATE people SET notes = ?, updated_at = datetime('now') "
+        "WHERE id = ?",
+        (merged, person_id),
+    )
+    return person_id
+
+
+_UPDATE_DISPATCH = {
+    "task_update": _apply_task_update,
+    "goal_update": _apply_goal_update,
+    "blocker_resolve": _apply_blocker_resolve,
+    "person_note_append": _apply_person_note_append,
+}
+
+
+def _apply_item_update(conn, item, dump_id):
+    """Per `braindump-updates.md` §4. Dispatch one update item to its
+    per-type apply helper. Caller (`handle_approve_item`) owns the
+    `BEGIN IMMEDIATE` boundary and the commit/rollback.
+
+    Returns the target entity id on success.
+    Raises:
+      - `UpdateDrift` when the field's value drifted, the append already
+        landed, or a malformed value/field slipped through edit_data.
+      - `TargetEntityGone` when the target row no longer exists.
+      - `UnknownItemType` when the item's `type` isn't one of the four.
+        Caller treats as 500 to match the existing programming-error path.
+      - `sqlite3.Error` propagates -- caller rolls back.
+    """
+    itype = item.get("type")
+    fn = _UPDATE_DISPATCH.get(itype)
+    if fn is None:
+        raise UnknownItemType(itype or "<missing>")
+    return fn(conn, item, dump_id)
+
+
 def process_brain_dump_for_worker(conn, dump_id):
     """
     Worker-callable form of brain-dump processing.
@@ -2162,6 +2984,14 @@ def process_brain_dump_for_worker(conn, dump_id):
     suggest_count = 0
     dropped_count = 0
     for item in ordered_items:
+        # Update items (`task_update` / `goal_update` / `blocker_resolve` /
+        # `person_note_append`) are ALWAYS suggested, regardless of
+        # confidence (`braindump-updates.md` §3). No auto-apply, no call
+        # to `_auto_create_item` (which only knows the create-side types).
+        if item["type"] in _UPDATE_ITEM_TYPES:
+            item["status"] = "suggested"
+            suggest_count += 1
+            continue
         if item["confidence"] >= 0.80:
             created_id = _auto_create_item(
                 conn, item, dump_id, sibling_items=filtered_items,
@@ -2944,6 +3774,13 @@ def handle_approve_item(dump_id, body):
         item = processed_items["items"][item_index]
 
         if action == "unlink":
+            # Per `braindump-updates.md` §6: unlink is N/A for update items.
+            # The action surface is the disown-an-auto-created-entity affordance;
+            # update items don't create entities, so there's nothing to unlink.
+            if item.get("type") in _UPDATE_ITEM_TYPES:
+                return 409, {
+                    "error": "unlink is not applicable to update items"
+                }
             # Precondition: only auto_created / approved items can be unlinked
             # (Reed §5.2). Reject otherwise so 409 -> Iris can show the right
             # affordance instead of silently 200ing.
@@ -3043,6 +3880,15 @@ def handle_approve_item(dump_id, body):
             if "error" in item:
                 item["error"] = None
         elif action == "retry":
+            # Per `braindump-updates.md` §6: retry is N/A for update items.
+            # No update item ever lands in `failed`; the apply path's failure
+            # modes leave the item `suggested` (drift/gone -> 409/404) or
+            # bubble to 500. Surfacing 409 here makes the constraint
+            # structural rather than implicit.
+            if item.get("type") in _UPDATE_ITEM_TYPES:
+                return 409, {
+                    "error": "retry is not applicable to update items"
+                }
             # Precondition: item MUST currently be `failed`. 409 otherwise --
             # retry is the recovery affordance for system-side drops, not a
             # general re-run button.
@@ -3090,39 +3936,102 @@ def handle_approve_item(dump_id, body):
                 return 409, {"error": "only suggested items can be approved"}
             if edit_data:
                 item["data"].update(edit_data)
-            # Per auto-create contract: UnknownItemType propagates here as
-            # a typed catch -> 500 with class-name only (no exception text
-            # leak). Any other unexpected exception bubbles to the framework
-            # 500 handler unchanged. We do NOT broaden to `except Exception`
-            # -- that would re-introduce the swallow this audit is killing.
-            try:
-                # sibling_items lets the tag branch fan out apply_to
-                # references to any siblings already created on the worker
-                # path (e.g. the high-confidence task this tag belongs to).
-                # Tag approvals through this handler will only attach to
-                # siblings that already have `created_id` set; pending
-                # `suggested` siblings are skipped (no_created_id).
-                created_id = _auto_create_item(
-                    conn, item, dump_id,
-                    sibling_items=processed_items["items"],
-                )
-            except UnknownItemType as e:
-                return 500, {"error": f"internal error: {type(e).__name__}"}
-            if created_id is None:
-                # Invariant 1: status MUST NOT be `approved` when no row was
-                # created. Mark `failed`, surface via the returned dump.
-                # HTTP shape unchanged -- 200, the approve action was accepted;
-                # the underlying create is what failed.
-                item["status"] = "failed"
-                item["created_id"] = None
-                logger.warning(
-                    "processing.auto_create.dropped dump_id=%s item_index=%d "
-                    "item_type=%s caller=approve",
-                    dump_id, item_index, item["type"],
+            # Update items (`task_update`/`goal_update`/`blocker_resolve`/
+            # `person_note_append`) follow the parallel apply path per
+            # `braindump-updates.md` §4: BEGIN IMMEDIATE, drift recompute,
+            # UPDATE, success -> status='approved' with created_id pointing
+            # at the bound entity. UpdateDrift -> 409 with the field-level
+            # body shape. TargetEntityGone -> 404. The HTTP body shapes are
+            # NEW for update items; the create path doesn't carry these.
+            if item.get("type") in _UPDATE_ITEM_TYPES:
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                except sqlite3.OperationalError:
+                    # already in a transaction (test harness / wrapper);
+                    # the outer scope owns the lock
+                    pass
+                try:
+                    target_id = _apply_item_update(conn, item, dump_id)
+                except UpdateDrift as drift:
+                    conn.rollback()
+                    logger.warning(
+                        "processing.update.drift dump_id=%s item_index=%d "
+                        "item_type=%s target_id=%s field=%s reason=%s",
+                        dump_id, item_index, item.get("type"),
+                        # target_id is on the data payload; fish it back
+                        # rather than re-deriving from the helper signature.
+                        item.get("data", {}).get("task_id")
+                        or item.get("data", {}).get("goal_id")
+                        or item.get("data", {}).get("blocker_id")
+                        or item.get("data", {}).get("person_id"),
+                        drift.field, drift.reason,
+                    )
+                    return 409, {
+                        "error": "drift",
+                        "field": drift.field,
+                        "expected_value": drift.expected_value,
+                        "current_value": drift.current_value,
+                    }
+                except TargetEntityGone as gone:
+                    conn.rollback()
+                    logger.warning(
+                        "processing.update.drift dump_id=%s item_index=%d "
+                        "item_type=%s target_id=%s reason=target_missing",
+                        dump_id, item_index, item.get("type"),
+                        gone.entity_id,
+                    )
+                    return 404, {"error": "target entity no longer exists"}
+                except UnknownItemType as e:
+                    conn.rollback()
+                    return 500, {"error": f"internal error: {type(e).__name__}"}
+                # Success: the update landed. Symmetric with create-path
+                # provenance: `created_id` carries the entity bound to this
+                # item (which for an update IS the entity that already
+                # existed and was modified). Status `approved` -- never
+                # `auto_created` because nothing was created.
+                item["created_id"] = target_id
+                item["status"] = "approved"
+                if "error" in item:
+                    item["error"] = None
+                logger.info(
+                    "processing.update.applied dump_id=%s item_index=%d "
+                    "item_type=%s target_id=%s result=ok",
+                    dump_id, item_index, item.get("type"), target_id,
                 )
             else:
-                item["created_id"] = created_id
-                item["status"] = "approved"
+                # Per auto-create contract: UnknownItemType propagates here as
+                # a typed catch -> 500 with class-name only (no exception text
+                # leak). Any other unexpected exception bubbles to the framework
+                # 500 handler unchanged. We do NOT broaden to `except Exception`
+                # -- that would re-introduce the swallow this audit is killing.
+                try:
+                    # sibling_items lets the tag branch fan out apply_to
+                    # references to any siblings already created on the worker
+                    # path (e.g. the high-confidence task this tag belongs to).
+                    # Tag approvals through this handler will only attach to
+                    # siblings that already have `created_id` set; pending
+                    # `suggested` siblings are skipped (no_created_id).
+                    created_id = _auto_create_item(
+                        conn, item, dump_id,
+                        sibling_items=processed_items["items"],
+                    )
+                except UnknownItemType as e:
+                    return 500, {"error": f"internal error: {type(e).__name__}"}
+                if created_id is None:
+                    # Invariant 1: status MUST NOT be `approved` when no row was
+                    # created. Mark `failed`, surface via the returned dump.
+                    # HTTP shape unchanged -- 200, the approve action was accepted;
+                    # the underlying create is what failed.
+                    item["status"] = "failed"
+                    item["created_id"] = None
+                    logger.warning(
+                        "processing.auto_create.dropped dump_id=%s item_index=%d "
+                        "item_type=%s caller=approve",
+                        dump_id, item_index, item["type"],
+                    )
+                else:
+                    item["created_id"] = created_id
+                    item["status"] = "approved"
 
         # Update processed_items JSON
         ts = now_utc()

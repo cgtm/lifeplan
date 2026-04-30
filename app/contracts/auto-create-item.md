@@ -413,6 +413,19 @@ no-op'd at 200).
 | **`unlink`** *(new 2026-04-30)* | `auto_created` or `approved` | no (delegates to per-entity delete/detach helper) | `rejected` (with `unlinked_path` and `unlinked_reasons` recorded on the item) | n/a | `{error: "only auto-created or approved items can be unlinked"}`. On heuristic-drift between preview and confirm: 409 `{error: "state changed", new_path, reasons}`. |
 | *(unknown)*     | n/a                          | no                         | n/a                    | n/a                  | 400 `{error: "unknown action: <repr>"}`        |
 
+**Update-item action handling (added 2026-04-30).** The four update item
+types — `task_update`, `goal_update`, `blocker_resolve`,
+`person_note_append` — share this handler but follow the parallel apply
+path documented in [`braindump-updates.md`](./braindump-updates.md) §4–§6.
+In short: `approve` / `edit_approve` invoke `_apply_item_update` inside
+`BEGIN IMMEDIATE` (drift recompute → UPDATE; 409 with field-level body on
+`UpdateDrift`, 404 on `TargetEntityGone`); `reject` flips status only;
+`unreject` flips back to `suggested`; `retry` and `unlink` are not
+applicable and surface 409 with a clear message. No update item ever
+lands in `failed`. Refer to `braindump-updates.md` for the per-type
+allow-list, drift body shape, and append-format invariants — duplicating
+them here would be lossy.
+
 **`retry` semantics.** Re-runs the create against the item's existing
 `data` payload (no `edit_data` merge — retry is "the data was fine, the
 create flaked," not "edit and re-attempt"; for the latter the user
