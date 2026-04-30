@@ -29,6 +29,7 @@ changes, update this file; the persona files only carry pointers to it.
 13. [Pinned target versions for load-bearing dependencies](#13-pinned-target-versions-for-load-bearing-dependencies) — accepted
 14. [Runtime asset reads require a verified deploy.sh sync](#14-runtime-asset-reads-require-a-verified-deploysh-sync) — accepted
 15. [User guide reviewed before commit on user-visible changes](#15-user-guide-reviewed-before-commit-on-user-visible-changes) — accepted
+16. [Per-dispatch test invocation](#16-per-dispatch-test-invocation) — accepted
 
 ---
 
@@ -677,6 +678,96 @@ time and routes a guide-update dispatch to Iris.
 **Status:** accepted (2026-04-29). Single-directive rule from Cam
 (supersedes Rule of Two): a standing directive lands accepted, not
 proposed.
+
+---
+
+## 16. Per-dispatch test invocation
+
+**Statement.** Every Atlas dispatch that asks a persona to verify a
+change runs `cd tests/e2e && npm test` as the default. `npm test` is the
+smoke set — a curated subset of the e2e suite tagged `@smoke`, with a
+≤ 60 s wall-clock target. The full suite is `npm run gate` and is run
+only by Probe at the deploy gate, never by every dispatcher.
+
+**Why.** A 17–20 minute default suite was past the harness stream-idle
+and tool-timeout thresholds team members hit in routine work. Vault
+hit "tool failed to return", Lumen hit stream-idle, Probe hit
+usage-limit — three failures across one week, all on `npm test`, none
+of them about the code under test. The right invocation must be the
+path of least resistance: typing `npm test` already takes dispatchers
+to the right place, so they cannot reach for a slower default by
+muscle memory. Provenance:
+[`docs/runbooks/probe-suite-scoping.md`](../runbooks/probe-suite-scoping.md),
+accepted 2026-04-30. The proposal sets out the smoke cut, the
+surface-scoped scripts, the env-var gates, and the limiter-probe
+mitigation in detail.
+
+**How to apply (dispatchers — Vault, Lumen, Reed, Iris, Forge).**
+
+1. Default invocation in every dispatch where the persona must verify
+   their own change before handing back:
+
+   ```sh
+   cd tests/e2e && npm test
+   ```
+
+2. If the change clearly touches a single surface, run smoke + the
+   surface:
+
+   - Auth changes: `npm test && npm run auth`
+   - Tag changes: `npm test && npm run tags`
+   - Blocker / goal-detail changes: `npm test && npm run blocker`
+   - Brain-dump / worker changes: `npm test && npm run dump`
+   - People / Knowledge inline-add changes: `npm test && npm run add`
+
+3. If unsure which surface: smoke alone is enough. Probe runs the
+   full gate.
+
+**How to apply (Atlas).** Atlas's dispatch line — the literal sentence
+that goes into a Vault / Lumen / Reed / Iris / Forge dispatch when
+verification is in scope — is:
+
+> "Before handing back, run `cd tests/e2e && npm test`. If your change
+> touches the auth / tags / blockers / dump / add surface, also run
+> the matching `npm run <surface>` script."
+
+Atlas does not write `npm test -- <file>` or `npm run gate` into
+delegated dispatches. The full gate is Probe's; surgical file invocations
+are a debugging tool, not a verification contract.
+
+**How to apply (Probe).** Probe runs `npm run gate` at the deploy gate.
+That command is the load-bearing contract in `probe-go-no-go.md` §Steps
+step 1. Probe's runbook names `npm run gate` explicitly so a future
+reader cannot accidentally accept the smoke set as a deploy gate.
+
+**Failure mode.** A dispatcher reaches for `npm run gate` (or pre-§16,
+`npm test` against the old full-suite definition) on a routine change,
+exhausts their tool budget on a 17-minute run, and fails to complete
+their task. Or — opposite direction — Probe accepts a smoke run
+(`npm test` post-§16) as a deploy gate, missing the env-var-gated and
+slower polling tests that catch worker / dump / auth-cascade
+regressions. Both failures are forms of the same root cause: the
+invocation didn't tell the runner what bar it was clearing. §16 closes
+that by binding one command to one bar.
+
+**Cross-references.**
+
+- [`docs/runbooks/probe-suite-scoping.md`](../runbooks/probe-suite-scoping.md)
+  — accepted proposal; implementation brief for Probe.
+- [`docs/runbooks/probe-go-no-go.md`](../runbooks/probe-go-no-go.md) —
+  the deploy gate; updated by Probe in the same round to call
+  `npm run gate`.
+- [`tests/e2e/README.md`](../../tests/e2e/README.md) — entry-point
+  documentation; updated by Probe in the same round to name the new
+  scripts and the `@`-tag taxonomy.
+- Practice [§8](#8-probe-verification-mandatory) — the deploy-gate
+  trigger; §16 supplies the smoke-vs-gate split that §8 now sits on
+  top of.
+
+**Status:** accepted (2026-04-30). Provenance: Cairn sign-off on
+`probe-suite-scoping.md` after Cam's directive. Single-incident root
+(three persona failures in one week, same cause) — Cam's standing
+authorisation to plan-and-agree is the acceptance signal.
 
 ---
 

@@ -1,14 +1,16 @@
 ---
 title: e2e Suite Scoping & Pruning Plan
-status: proposed
+status: accepted
 owner: Probe
 reviewer: Cairn
 date: 2026-04-30
+accepted_date: 2026-04-30
 ---
 
 # e2e Suite Scoping & Pruning Plan
 
-**Status:** proposed. Cairn reviews next; she flips to accepted or pushes back.
+**Status:** accepted by Cairn 2026-04-30. Probe is unblocked to implement.
+Cairn's decisions on the open questions are inline in §10.
 Cam's directive (verbatim):
 > "Either they're taking too long or they're failing. It keeps causing the
 > team members to fail to complete their tasks. I suggest doing a review of
@@ -200,9 +202,18 @@ surface scopes without being split.
 
 ### 6.3 npm scripts as the documented entry points
 
+**Cairn override (2026-04-30):** Probe's original draft kept `npm test` as
+the full suite and added `npm run smoke` for the default. Cam's nudge
+during review: the default-dispatch invocation must be the path of least
+resistance — if `npm test` is faster to type than `npm run smoke`,
+dispatchers will reach for `npm test` regardless of doc. So `npm test`
+**becomes** the smoke run. The full suite moves to `npm run gate`.
+
 Add to `tests/e2e/package.json`:
 
 ```json
+"test":    "playwright test --grep @smoke",
+"gate":    "playwright test",
 "smoke":   "playwright test --grep @smoke",
 "auth":    "playwright test --grep @auth",
 "dump":    "playwright test --grep '@dump|@worker'",
@@ -212,8 +223,17 @@ Add to `tests/e2e/package.json`:
 "full":    "playwright test"
 ```
 
-`npm test` stays as `playwright test` (the full suite) so the on-demand
-deploy gate is unchanged. `npm run smoke` is what dispatchers use.
+`npm test` is now the smoke run (≤ 60 s target). `npm run gate` is the
+full deploy-gate suite (Probe's job). `npm run smoke` is kept as an
+alias for clarity in docs that name the run explicitly. `npm run full`
+is kept as the historical alias for `npm run gate`; both run the same
+thing.
+
+**Migration note for Probe:** the deploy-gate runbook
+(`probe-go-no-go.md`) must update every `npm test` reference to
+`npm run gate` in the same commit that lands these scripts. A `npm test`
+in `probe-go-no-go.md` after this change runs only the smoke set —
+which would silently degrade the gate.
 
 ### 6.4 No file-renaming required
 
@@ -263,28 +283,31 @@ not a six-month refactor."
 
 ## 8. The team-member-friendly invocation
 
-Replace this in every Vault / Lumen / Reed dispatch:
+Every Vault / Lumen / Reed / Iris dispatch from Atlas says:
 
+> **Default (every dispatch, ≤ 60 s target):**
 > `cd tests/e2e && npm test`
 
-With this:
+That command runs the smoke set. Dispatchers do not need to remember a
+second name; the path of least resistance is the right path.
 
-> **Smoke (default for every dispatch, ≤ 60 s target):**
-> `cd tests/e2e && npm run smoke`
->
-> **Surface-scoped (for dispatches that touch a specific surface):**
-> - Auth changes: `npm run auth`
-> - Tag changes: `npm run tags`
-> - Blocker / goal-detail changes: `npm run blocker`
-> - Brain-dump / worker changes: `npm run dump`
-> - People / Knowledge inline-add changes: `npm run add`
->
+> **Surface-scoped (when the dispatch clearly touches one surface, run
+> smoke + the surface):**
+> - Auth changes: `npm test && npm run auth`
+> - Tag changes: `npm test && npm run tags`
+> - Blocker / goal-detail changes: `npm test && npm run blocker`
+> - Brain-dump / worker changes: `npm test && npm run dump`
+> - People / Knowledge inline-add changes: `npm test && npm run add`
+
 > **Full suite (deploy gate only — Probe runs this before `lp deploy`):**
-> `npm test`
+> `npm run gate`
 
 Atlas should pick the right one when dispatching. If unsure, smoke. If
-the change clearly touches auth, run smoke + auth. The full suite is
+the change clearly touches auth, run smoke + auth. The full gate is
 Probe's job, not every dispatcher's.
+
+This convention is encoded as practice §16 in
+[`docs/processes/team-practices.md`](../processes/team-practices.md).
 
 For dispatchers who can't tell what to run: ship the relevant filename.
 `npx playwright test <relevant.spec.ts>` always works as a fallback,
@@ -309,23 +332,108 @@ move to gated.
 
 ---
 
-## 10. Open questions for Cairn
+## 10. Open questions for Cairn — decisions
 
-1. **Cadence for the full suite.** The current policy in `probe-go-no-go.md`
-   is "on-demand, not scheduled." That stays correct under this proposal
-   for the gate. But the smoke suite is now a *per-dispatch* contract,
-   not a deploy contract. Worth a one-line update to `probe-go-no-go.md`
-   to name the smoke suite as the default and the full suite as the gate?
-   I lean yes; flagging because that's a runbook touching your turf.
-2. **Tag-comment vs. test-title prefix.** Playwright `--grep` matches
-   the test title by default. I propose tags **inside** the title
-   (`'@smoke @auth contract: GET /login → 200 + form'`). An alternative
-   is `test()`-level metadata via `test.info().annotations`, which is
-   cleaner but requires a custom CLI flag wrapper. I think the in-title
-   convention is more durable and grep-friendly. Want to push back?
-3. **Smoke set membership.** §6.1 lists my proposed smoke cases. You
-   have the better lens for "what would Cam regret missing on a default
-   run." If you want a different cut, say so before implementation.
+### Q1. Update `probe-go-no-go.md` — **Yes, with a tweak.**
+
+Yes, update it. The smoke suite is the per-dispatch contract; the gate
+suite is the deploy contract. Both names need to appear in the gate
+runbook so future readers don't conflate them. **Tweak:** the gate
+invocation becomes `npm run gate`, not `npm test` (see §6.3 override).
+Probe owns that edit and lands it in the same commit as the npm-script
+changes.
+
+Concrete edits Probe makes to `probe-go-no-go.md`:
+
+- §Steps step 1 (Automated suite): replace `npm test` with `npm run gate`.
+- §Steps step 3 (Background processing → Pre-deploy automated): replace
+  `npm test` with `npm run gate`. The gated-suite invocations in that
+  section (`FORCE_FAIL_TEST=1 npm test`, `WATCHDOG_TEST=1 npm test`,
+  and the new `BG_HAPPY_TEST=1` / `BG_LIVE_UI_TEST=1` /
+  `DUMP_RETRY_TEST=1`) keep `npm test` because the env-var gates flip
+  the gated cases on regardless of grep — but spell out in a sentence
+  that "the env-var gates run **with** the smoke set; pair with
+  `npm run gate` for full coverage when you need it."
+- §Steps step 5 (Production smoke): replace `npm test` with
+  `npm run gate`.
+- New paragraph under §Cadence: "The smoke suite (`npm test`) is the
+  per-dispatch default for any team member running Probe-remit
+  verification ad-hoc; the full gate (`npm run gate`) is Probe's
+  deploy-time contract."
+
+### Q2. In-title `@` tags vs `test.info().annotations` — **In-title.**
+
+Agreed with Probe. In-title prefix wins on three axes:
+
+1. **Grep-friendly.** `--grep "@smoke"` works out of the box; no custom
+   CLI wrapper to maintain.
+2. **Durable.** Annotations are runtime API; titles survive Playwright
+   upgrades and are visible in stack traces and reporters with no
+   config.
+3. **Reviewable.** A diff that adds `@smoke` to a title is a one-line
+   review; an annotations API change can be missed.
+
+Convention as Probe wrote it stands: tags name the **surface**, not the
+persona. A test can carry multiple. Title example:
+`'@smoke @auth contract: GET /login → 200 + form'`.
+
+### Q3. Smoke-set membership — **Probe's cut, plus one.**
+
+Probe's §6.1 list is sound. One addition:
+
+- `add-entity.spec.ts` (post-merge) — also include the **400-on-empty-name**
+  case. It's ~50 ms, exercises the validation-error contract clause Cam
+  hits every session via the inline-add affordance, and it's the kind
+  of regression that'd be embarrassing to ship. Smoke set is now
+  ~16–21 cases × 2 projects.
+
+Otherwise, ship the cut as proposed.
+
+### Cairn's additional requirements (sign-off conditions baked in)
+
+1. **Limiter follow-up ticket.** The `beforeAll` limiter probe in §7 is
+   the right ship-today move. It is also a band-aid. Probe files a
+   triage line to Atlas naming Vault as owner of a follow-up: make the
+   in-process rate limiter test-aware (e.g. honour a
+   `LIFEPLAN_TEST_MODE` env var that exempts loopback, or a separate
+   limiter bucket per `X-Forwarded-For`-style trust). Not a blocker for
+   this PR. Logged so it doesn't get lost.
+
+2. **Single-worker stays.** Confirmed. §7 is correct as written. Per-test
+   DB isolation is not on the table at this suite size; if a future
+   change pressure-tests parallel execution, that's an ADR-shaped
+   decision, not a config flip.
+
+3. **Scheduled full-suite agent — deferred.** Probe's gating bar (env
+   vars off by default) is correct. The deploy gate is the right
+   enforcement point for now. A scheduled remote agent that runs the
+   full suite + `BG_HAPPY_TEST=1` + `BG_LIVE_UI_TEST=1` + `DUMP_RETRY_TEST=1`
+   nightly is plausible *if* deploy cadence picks up or third-party
+   churn rises. Flagged here, not implemented. Cairn's call to wire it
+   when the conditions warrant (per the existing language in
+   `probe-go-no-go.md` §Cadence).
+
+4. **Practice §16.** Cairn lands practice §16 ("Per-dispatch test
+   invocation") in `docs/processes/team-practices.md` in the same round
+   so Atlas's dispatch line is sourced from one place. See
+   [§16](../processes/team-practices.md#16-per-dispatch-test-invocation).
+
+5. **Implementation checklist for Probe.** When Probe lands the PR-shaped
+   commit, all of the following are in scope and reviewed together:
+   - npm scripts as in §6.3 (with `test` → smoke, `gate` → full).
+   - `@`-tag annotations across all spec titles per §6.1 cut + the
+     `add-entity` 400-on-empty-name addition above.
+   - Pruning per §3 (collapse the parametrised cases; delete UI 15;
+     leave UI 9 vs UI 8 as a single test with two click-target
+     assertions, not two separate tests).
+   - `add-person` + `add-knowledge` → `add-entity` combine per §4.
+   - Env-var gates per §5 (`BG_HAPPY_TEST`, `BG_LIVE_UI_TEST`,
+     `DUMP_RETRY_TEST`).
+   - `beforeAll` limiter probe per §7.
+   - `probe-go-no-go.md` updates per Q1 above.
+   - `tests/e2e/README.md` updates: name the new entry points, document
+     the tag taxonomy, mention `npm run gate` is the deploy gate.
+   - The Vault triage line for the limiter-source fix.
 
 ---
 
