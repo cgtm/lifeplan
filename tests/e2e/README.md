@@ -30,10 +30,32 @@ manually if you'd rather skip the prompt.
 
 ## Run the suite (the team — including Probe — does this)
 
+The suite is **scoped by default** so any persona dispatch finishes fast:
+
 ```sh
 cd tests/e2e
-npm test
+npm test          # SMOKE set (~44 cases, ~90s) — what every dispatch runs
+npm run gate      # FULL suite — Probe-only, deploy gate
 ```
+
+Per-surface subsets (when one feature surface is touched):
+
+```sh
+npm run auth      # auth.spec.ts (login / logout / cookie / mount)
+npm run tags      # tags-first-class + apply-to-fanout
+npm run blocker   # blockers-become-real + goal-detail-growability
+npm run dump      # dump-detail-modal + auto-create-item-truthfulness + bg
+npm run add       # add-entity (people + knowledge create flows)
+```
+
+In-title `@`-tags are the source of truth. Every test starts with one or
+more (`@smoke`, `@auth`, `@tags`, `@blockers`, `@goal`, `@dump`, `@worker`,
+`@people`, `@knowledge`); the npm scripts grep on these.
+
+**Adding a new test:** tag it `@smoke` only if it's a contract clause Cam
+hits every session and runs in <1s. Otherwise tag it by surface and let
+it ride the gate. Probe rule 6 — slow/optional tests are worse green
+than skipped.
 
 `playwright.config.ts` loads `tests/e2e/.env` at startup via `dotenv`, so
 no env vars need to be passed inline. If the file is missing, the auth

@@ -84,20 +84,27 @@ Probe writes one line to Atlas naming the missing precondition.
 
 ### 1. Automated suite
 
+The suite is scoped (Practice §16). Atlas's per-dispatch default is
+`npm test` (smoke). Probe's gate runs the **full** suite:
+
 ```sh
 cd tests/e2e
-npm test
+npm run gate    # full suite — every spec, every project, every clause
 ```
 
-That's it. `playwright.config.ts` loads `tests/e2e/.env` at startup, so
-no inline env vars are needed for a normal Probe pass. For a
-production-target run (post-deploy verification), pass overrides inline
-— they win over `.env`:
+`npm test` (smoke) is what the team-member dispatches use; `npm run gate`
+is what Probe runs for sign-off. Per-surface scripts (`npm run auth /
+tags / blocker / dump / add`) are for ad-hoc smoke during a focused
+implementation, not for the gate.
+
+`playwright.config.ts` loads `tests/e2e/.env` at startup, so no inline
+env vars are needed for a normal Probe pass. For a production-target run
+(post-deploy verification), pass overrides inline — they win over `.env`:
 
 ```sh
 LIFEPLAN_TEST_BASE_URL='https://your-domain.example/lifeplan/' \
 LIFEPLAN_TEST_PASSWORD='<prod-password>' \
-  npm test
+  npm run gate
 ```
 
 Both `chromium` and `webkit` projects must run. WebKit is non-negotiable
