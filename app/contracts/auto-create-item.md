@@ -410,6 +410,7 @@ no-op'd at 200).
 | `reject`        | `suggested` *(no precondition gate today; reject from any status is harmless and the per-item state machine treats it as terminal)* | no | `rejected`             | n/a                  | n/a                                            |
 | **`retry`** *(new 2026-04-27)* | `failed`             | yes                        | `approved` (matches approve path) | `failed` (200) | `{error: "only failed items can be retried"}`  |
 | **`unreject`** *(new 2026-04-27)* | `rejected`         | no                         | `suggested`            | n/a                  | `{error: "only rejected items can be un-rejected"}` |
+| **`unlink`** *(new 2026-04-30)* | `auto_created` or `approved` | no (delegates to per-entity delete/detach helper) | `rejected` (with `unlinked_path` and `unlinked_reasons` recorded on the item) | n/a | `{error: "only auto-created or approved items can be unlinked"}`. On heuristic-drift between preview and confirm: 409 `{error: "state changed", new_path, reasons}`. |
 | *(unknown)*     | n/a                          | no                         | n/a                    | n/a                  | 400 `{error: "unknown action: <repr>"}`        |
 
 **`retry` semantics.** Re-runs the create against the item's existing
@@ -475,9 +476,119 @@ Compact transition table:
 | `suggested`   | `reject`         | `rejected`   | n/a                                        |
 | `failed`      | `retry`          | `approved`   | `failed` (no transition)                   |
 | `rejected`    | `unreject`       | `suggested`  | n/a                                        |
+| `auto_created`| `unlink`         | `rejected`   | n/a (drift -> 409, no transition)          |
+| `approved`    | `unlink`         | `rejected`   | n/a (drift -> 409, no transition)          |
 
 Out-of-precondition transitions return 409 and do NOT mutate state.
 Unknown `action` returns 400 and does NOT mutate state.
+
+### `unlink` semantics (added 2026-04-30)
+
+Disowns an auto-created item from the dump that produced it. Two
+terminal shapes, both ending in `status='rejected'` so Iris's existing
+`↶ Un-reject` affordance works as the undo:
+
+- **`delete` path** — entity row + this dump's junctions are removed.
+  Used when the entity is exactly what the dump made and has acquired
+  no foreign data.
+- **`detach` path** — entity row stays; only this dump's link is severed
+  (for tags: the `brain_dump_tags` row; for everything else: nulling
+  `created_id` on the JSON item is enough). Used when the entity has
+  accreted other data (edits, junctions from elsewhere, sibling
+  references).
+
+A third shape, `already_gone`, applies when the entity row is missing
+at action time (manually deleted between auto-create and unlink). The
+JSON item still flips to `rejected`; no entity work.
+
+The decision is made by Reed's per-entity safety heuristic
+([`docs/architecture/unlink-safety-heuristic.md`](../../docs/architecture/unlink-safety-heuristic.md)).
+The heuristic is the load-bearing detail; this contract only documents
+the action surface.
+
+**Body shape.** `POST /api/brain-dumps/<id>/approve-item` with:
+
+```json
+{"item_index": <int>, "action": "unlink",
+ "confirmed_path": "delete" | "detach"}
+```
+
+`confirmed_path` is the UI's "I showed the user this specific path"
+assertion. The handler ALWAYS recomputes the heuristic inside
+`BEGIN IMMEDIATE` and rejects on mismatch with 409 (drift): the UI
+re-runs preview and re-prompts. On `already_gone` recompute the
+client's `confirmed_path` is ignored — the cleanup is the same in
+either case.
+
+**Item-side mutations on success.** All paths set:
+
+```python
+item["status"] = "rejected"
+item["created_id"] = None
+item["unlinked_path"] = "delete" | "detach" | "already_gone"
+item["unlinked_reasons"] = [<reason kind>, ...]
+item["error"] = None  # cleared; the item is intentionally rejected, not failed
+```
+
+`unlinked_path` and `unlinked_reasons` are the audit trail (separate
+sub-fields under the same `rejected` status; piggybacking on `rejected`
+preserves the un-reject undo affordance per Iris's design).
+
+**Special-case short-circuits (Reed §4).** `goal_link` and
+`person_mention` items reference PRE-EXISTING rows by definition. They
+have no "delete the entity" semantic — unlink ALWAYS detaches with
+`reasons=['external_reference']`. The heuristic short-circuits at the
+top before consulting per-entity logic.
+
+**`work_queue` interaction.** None. Unlink is synchronous; the worker
+is uninvolved.
+
+**Logging.** Two events on the `lifeplan.processing` logger:
+
+- `processing.unlink.preview` — emitted from the preview endpoint.
+  Fields: `dump_id`, `item_index`, `item_type`, `path`, `reasons`.
+- `processing.unlink.applied` — emitted from the action arm on success.
+  Same fields.
+- `processing.unlink.drift` (INFO) — emitted on 409 drift. Same fields
+  plus `confirmed`, `recomputed`.
+
+Privacy invariant from this contract carries over: no entity titles,
+names, or content. IDs and enum-shaped fields only.
+
+### Sister API: `POST /api/brain-dumps/<id>/unlink-preview`
+
+Read-only verdict for Iris's confirm dialog. Body and response shapes
+distinct from the action above:
+
+**Body:** `{"item_index": <int>}`
+
+**Response 200:**
+
+```json
+{
+  "path": "delete" | "detach" | "already_gone",
+  "entity_label": "the task #42",
+  "reasons": ["edited", "applied_tags", ...]
+}
+```
+
+- `entity_label` is content-free by design — Iris renders the
+  human-readable title client-side from the dump JSON it already has.
+- `reasons` is empty for `delete` and `already_gone`; non-empty for
+  `detach`.
+- `path == "already_gone"` means the entity was deleted elsewhere
+  (manual UI delete, race). UI shows the "this is already gone" dialog;
+  the action endpoint accepts the unlink regardless of `confirmed_path`
+  on this path.
+
+**Errors:** 404 dump or item missing; 400 invalid `item_index`; 409
+when item status is not `auto_created` or `approved` (mirrors Reed §5.2
+precondition gate).
+
+**No DB mutation.** Idempotent. Heuristic is recomputed inside the
+action arm anyway, so two preview calls can disagree without
+correctness consequences — the action's recompute under
+`BEGIN IMMEDIATE` is the source of truth.
 
 ## Error matrix
 

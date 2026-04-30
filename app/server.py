@@ -24,7 +24,7 @@ if __package__ is None or __package__ == "":
     from app.db import get_db, now_utc, rows_to_dicts, get_tags_for, set_tags_for, get_entry_tags, enrich_entries
     from app.processing import (
         process_brain_dump, handle_process_brain_dump, handle_retry_brain_dump,
-        handle_approve_item,
+        handle_approve_item, handle_unlink_preview,
         GOAL_KEYWORDS, COMMON_WORDS, IMPERATIVE_VERBS, STEM_MAP,
         segment_text, detect_dates, detect_people, detect_tasks, match_goal,
         detect_knowledge, detect_tags, match_goal_links,
@@ -54,7 +54,7 @@ else:
     from .db import get_db, now_utc, rows_to_dicts, get_tags_for, set_tags_for, get_entry_tags, enrich_entries
     from .processing import (
         process_brain_dump, handle_process_brain_dump, handle_retry_brain_dump,
-        handle_approve_item,
+        handle_approve_item, handle_unlink_preview,
         GOAL_KEYWORDS, COMMON_WORDS, IMPERATIVE_VERBS, STEM_MAP,
         segment_text, detect_dates, detect_people, detect_tasks, match_goal,
         detect_knowledge, detect_tags, match_goal_links,
@@ -406,6 +406,13 @@ class Handler(SimpleHTTPRequestHandler):
             did = int(re.search(r'/api/brain-dumps/(\d+)/approve-item', path).group(1))
             body = self.read_body()
             status, data = handle_approve_item(did, body)
+            self.send_json(status, data)
+            return True
+
+        if method == "POST" and re.match(r'/api/brain-dumps/\d+/unlink-preview$', path):
+            did = int(re.search(r'/api/brain-dumps/(\d+)/unlink-preview', path).group(1))
+            body = self.read_body()
+            status, data = handle_unlink_preview(did, body)
             self.send_json(status, data)
             return True
 

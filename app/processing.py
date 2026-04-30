@@ -2414,6 +2414,504 @@ def handle_retry_brain_dump(dump_id):
         conn.close()
 
 
+# ── Unlink (per Reed's safety heuristic) ─────────────────────────
+#
+# The unlink action is "disown an auto-created item from the dump that
+# spawned it." Two terminal shapes:
+#
+#   * delete  -- the entity row is exactly what this dump made and has
+#                acquired no foreign data; safe to drop.
+#   * detach  -- the entity has accreted other data (edits, junctions
+#                from elsewhere, sibling references); leave the row
+#                alone, only sever this dump's claim.
+#
+# A third shape, `already_gone`, covers the race where the entity was
+# manually deleted between auto-create and unlink.
+#
+# `goal_link` and `person_mention` reference PRE-EXISTING rows by
+# definition -- they have no "delete the entity" semantic, so unlink
+# always detaches with reason `external_reference`. Short-circuit at the
+# top of the heuristic; do not consult per-entity logic.
+#
+# Reed's six choice points (encoded inline below):
+#   1. Status string: `rejected` (Iris's design uses ↶ Un-reject as undo);
+#      we record unlink-specific metadata in `unlinked_path` and
+#      `unlinked_reasons` sub-fields so the audit trail survives.
+#   2. Clear `error` field on unlink -- the item is intentionally
+#      rejected, not failed.
+#   3. JSON1 (`json_extract`/`json_each`) is enabled on every supported
+#      SQLite Lifeplan ships against; confirmed.
+#   4. goal_link / person_mention: always detach (external_reference).
+#   5. Logging: emit `processing.unlink.preview` and
+#      `processing.unlink.applied` on `lifeplan.processing`. IDs/types/
+#      path/reasons only -- no entity content.
+#   6. work_queue: no enqueue. Unlink is synchronous, the worker is
+#      uninvolved.
+
+# Map per-item type -> (entity table, junction table for tags, fk col).
+_UNLINK_ENTITY_TABLES = {
+    "task":           ("tasks",           "task_tags",      "task_id"),
+    "knowledge":      ("knowledge_items", "knowledge_tags", "knowledge_id"),
+    "goal_new":       ("goals",           "goal_tags",      "goal_id"),
+    "person_new":     ("people",          "person_tags",    "person_id"),
+    "person_mention": ("people",          "person_tags",    "person_id"),
+    # tag has its own per-junction sweep, handled below
+    "tag":            ("tags",            None,             None),
+    # goal_link short-circuits to detach (external_reference); the table
+    # is `goals` for the existence probe so already_gone still works.
+    "goal_link":      ("goals",           "goal_tags",      "goal_id"),
+}
+
+
+def _entity_label(item_type, entity_id):
+    """Tiny, content-free label for the dialog headline.
+
+    Privacy: deliberately does NOT include the entity's title/name. Iris
+    renders type + label client-side ("the task #42"); we keep the label
+    structural so accidental log dumps of the response body never leak
+    user content. The dialog enriches via the existing dump-detail view
+    (which already has title in the JSON blob it loaded).
+    """
+    label_type = {
+        "task": "task",
+        "knowledge": "knowledge item",
+        "goal_new": "goal",
+        "goal_link": "goal",
+        "person_new": "person",
+        "person_mention": "person",
+        "tag": "tag",
+    }.get(item_type, "item")
+    if entity_id is None:
+        return f"the {label_type}"
+    return f"the {label_type} #{entity_id}"
+
+
+def _unlink_entity_exists(conn, item_type, entity_id):
+    """Returns True iff the entity row referenced by an auto-created item
+    is still present. Used to detect the `already_gone` race."""
+    if entity_id is None:
+        return False
+    table = _UNLINK_ENTITY_TABLES.get(item_type, (None,))[0]
+    if table is None:
+        return False
+    row = conn.execute(
+        f"SELECT 1 FROM {table} WHERE id = ?", (entity_id,)
+    ).fetchone()
+    return row is not None
+
+
+def _unlink_heuristic_task(conn, dump_id, entity_id):
+    """Reed §3.1 -- task safe-delete predicate, decomposed so we can
+    return the failing reason list rather than a flat boolean."""
+    reasons = []
+    row = conn.execute(
+        "SELECT created_at, updated_at, status, completed_at FROM tasks "
+        "WHERE id = ?", (entity_id,)
+    ).fetchone()
+    if not row:
+        return None, []  # already_gone caught upstream; defensive
+    if row["created_at"] != row["updated_at"]:
+        reasons.append("edited")
+    if row["status"] != "active" or row["completed_at"] is not None:
+        reasons.append("completed")
+    # Foreign tags: any task_tags row whose tag is not in this dump's
+    # brain_dump_tags. Tags THIS dump wrote count as "what this dump
+    # added," not as foreign accretion.
+    foreign_tags = conn.execute(
+        "SELECT COUNT(*) AS c FROM task_tags tt "
+        "WHERE tt.task_id = ? AND tt.tag_id NOT IN ("
+        "  SELECT bt.tag_id FROM brain_dump_tags bt "
+        "   WHERE bt.brain_dump_id = ?"
+        ")",
+        (entity_id, dump_id),
+    ).fetchone()["c"]
+    if foreign_tags:
+        reasons.append("applied_tags")
+    if conn.execute(
+        "SELECT 1 FROM task_people WHERE task_id = ?", (entity_id,)
+    ).fetchone():
+        reasons.append("linked_people")
+    if conn.execute(
+        "SELECT 1 FROM dependencies WHERE "
+        "(blocker_type='task' AND blocker_id=?) OR "
+        "(blocked_type='task' AND blocked_id=?)",
+        (entity_id, entity_id),
+    ).fetchone():
+        reasons.append("blockers")
+    return ("delete" if not reasons else "detach"), reasons
+
+
+def _unlink_heuristic_goal(conn, dump_id, entity_id):
+    """Reed §3.2."""
+    reasons = []
+    row = conn.execute(
+        "SELECT created_at, updated_at, status, completed_at FROM goals "
+        "WHERE id = ?", (entity_id,)
+    ).fetchone()
+    if not row:
+        return None, []
+    if row["created_at"] != row["updated_at"]:
+        reasons.append("edited")
+    if row["status"] != "active" or row["completed_at"] is not None:
+        reasons.append("completed")
+    if conn.execute(
+        "SELECT 1 FROM tasks WHERE goal_id = ?", (entity_id,)
+    ).fetchone():
+        reasons.append("linked_tasks")
+    foreign_tags = conn.execute(
+        "SELECT COUNT(*) AS c FROM goal_tags gt "
+        "WHERE gt.goal_id = ? AND gt.tag_id NOT IN ("
+        "  SELECT bt.tag_id FROM brain_dump_tags bt "
+        "   WHERE bt.brain_dump_id = ?"
+        ")",
+        (entity_id, dump_id),
+    ).fetchone()["c"]
+    if foreign_tags:
+        reasons.append("applied_tags")
+    if conn.execute(
+        "SELECT 1 FROM dependencies WHERE "
+        "(blocker_type='goal' AND blocker_id=?) OR "
+        "(blocked_type='goal' AND blocked_id=?)",
+        (entity_id, entity_id),
+    ).fetchone():
+        reasons.append("blockers")
+    return ("delete" if not reasons else "detach"), reasons
+
+
+def _unlink_heuristic_person(conn, dump_id, entity_id):
+    """Reed §3.3 -- includes the JSON1 cross-dump scan."""
+    reasons = []
+    row = conn.execute(
+        "SELECT created_at, updated_at FROM people WHERE id = ?",
+        (entity_id,),
+    ).fetchone()
+    if not row:
+        return None, []
+    if row["created_at"] != row["updated_at"]:
+        reasons.append("edited")
+    # Other dumps that mention this person via processed_items JSON.
+    other_dumps = conn.execute(
+        "SELECT 1 FROM brain_dumps b, json_each(b.processed_items, '$.items') je "
+        "WHERE b.id != ? "
+        "  AND b.processed_items IS NOT NULL "
+        "  AND CAST(json_extract(je.value, '$.created_id') AS INTEGER) = ? "
+        "  AND json_extract(je.value, '$.type') IN ('person_new','person_mention') "
+        "LIMIT 1",
+        (dump_id, entity_id),
+    ).fetchone()
+    if other_dumps:
+        reasons.append("other_dumps")
+    # goal_people: any link to a goal NOT created by this dump.
+    foreign_goal_link = conn.execute(
+        "SELECT 1 FROM goal_people gp "
+        "WHERE gp.person_id = ? "
+        "  AND gp.goal_id NOT IN ("
+        "    SELECT CAST(json_extract(je.value, '$.created_id') AS INTEGER) "
+        "      FROM brain_dumps b, json_each(b.processed_items, '$.items') je "
+        "     WHERE b.id = ? "
+        "       AND json_extract(je.value, '$.type') = 'goal_new' "
+        "       AND json_extract(je.value, '$.created_id') IS NOT NULL"
+        "  ) "
+        "LIMIT 1",
+        (entity_id, dump_id),
+    ).fetchone()
+    if foreign_goal_link:
+        reasons.append("linked_goals")
+    if conn.execute(
+        "SELECT 1 FROM task_people WHERE person_id = ?", (entity_id,)
+    ).fetchone():
+        reasons.append("linked_tasks")
+    foreign_tags = conn.execute(
+        "SELECT COUNT(*) AS c FROM person_tags pt "
+        "WHERE pt.person_id = ? AND pt.tag_id NOT IN ("
+        "  SELECT bt.tag_id FROM brain_dump_tags bt "
+        "   WHERE bt.brain_dump_id = ?"
+        ")",
+        (entity_id, dump_id),
+    ).fetchone()["c"]
+    if foreign_tags:
+        reasons.append("applied_tags")
+    return ("delete" if not reasons else "detach"), reasons
+
+
+def _unlink_heuristic_knowledge(conn, dump_id, entity_id):
+    """Reed §3.4."""
+    reasons = []
+    row = conn.execute(
+        "SELECT created_at, updated_at, source FROM knowledge_items "
+        "WHERE id = ?", (entity_id,)
+    ).fetchone()
+    if not row:
+        return None, []
+    if row["created_at"] != row["updated_at"]:
+        reasons.append("edited")
+    expected_source = f"brain_dump:{dump_id}"
+    if row["source"] is not None and row["source"] != expected_source:
+        reasons.append("source_changed")
+    other_dumps = conn.execute(
+        "SELECT 1 FROM brain_dumps b, json_each(b.processed_items, '$.items') je "
+        "WHERE b.id != ? "
+        "  AND b.processed_items IS NOT NULL "
+        "  AND CAST(json_extract(je.value, '$.created_id') AS INTEGER) = ? "
+        "  AND json_extract(je.value, '$.type') = 'knowledge' "
+        "LIMIT 1",
+        (dump_id, entity_id),
+    ).fetchone()
+    if other_dumps:
+        reasons.append("other_dumps")
+    foreign_tags = conn.execute(
+        "SELECT COUNT(*) AS c FROM knowledge_tags kt "
+        "WHERE kt.knowledge_id = ? AND kt.tag_id NOT IN ("
+        "  SELECT bt.tag_id FROM brain_dump_tags bt "
+        "   WHERE bt.brain_dump_id = ?"
+        ")",
+        (entity_id, dump_id),
+    ).fetchone()["c"]
+    if foreign_tags:
+        reasons.append("applied_tags")
+    return ("delete" if not reasons else "detach"), reasons
+
+
+def _unlink_heuristic_tag(conn, dump_id, entity_id):
+    """Reed §3.5 -- the special case. A tag is rarely safely deletable."""
+    reasons = []
+    # Other dumps reference this tag via brain_dump_tags?
+    if conn.execute(
+        "SELECT 1 FROM brain_dump_tags WHERE tag_id = ? AND brain_dump_id != ?",
+        (entity_id, dump_id),
+    ).fetchone():
+        reasons.append("other_dumps")
+    # Per-junction "applied to entity not created by this dump".
+    apply_junctions = (
+        ("task_tags",      "task_id",      "task"),
+        ("knowledge_tags", "knowledge_id", "knowledge"),
+        ("goal_tags",      "goal_id",      "goal_new"),
+        ("person_tags",    "person_id",    "person_new"),
+    )
+    foreign_apply = 0
+    for jtable, fk, sibling_type in apply_junctions:
+        # person junctions from this dump can come from BOTH person_new and
+        # person_mention siblings; allow both for the person case.
+        if sibling_type == "person_new":
+            sibling_clause = "json_extract(je.value, '$.type') IN ('person_new','person_mention')"
+        else:
+            sibling_clause = f"json_extract(je.value, '$.type') = '{sibling_type}'"
+        n = conn.execute(
+            f"SELECT COUNT(*) AS c FROM {jtable} "
+            f"WHERE tag_id = ? "
+            f"  AND {fk} NOT IN ("
+            f"    SELECT CAST(json_extract(je.value, '$.created_id') AS INTEGER) "
+            f"      FROM brain_dumps b, json_each(b.processed_items, '$.items') je "
+            f"     WHERE b.id = ? "
+            f"       AND {sibling_clause} "
+            f"       AND json_extract(je.value, '$.created_id') IS NOT NULL"
+            f"  )",
+            (entity_id, dump_id),
+        ).fetchone()["c"]
+        foreign_apply += n
+    if foreign_apply:
+        reasons.append("junction_apply_to")
+    if conn.execute(
+        "SELECT 1 FROM entry_tags WHERE tag_id = ?", (entity_id,)
+    ).fetchone():
+        reasons.append("entry_tags")
+    return ("delete" if not reasons else "detach"), reasons
+
+
+def _unlink_heuristic(conn, dump_id, item):
+    """Top-level dispatch. Returns (path, reasons, entity_label).
+
+    `path` is one of `delete`, `detach`, `already_gone`. `reasons` is an
+    ordered list of short reason kinds (empty for delete / already_gone).
+    `entity_label` is content-free ("the task #42").
+    """
+    item_type = item.get("type")
+    entity_id = item.get("created_id")
+
+    # External-reference short-circuit: goal_link and person_mention
+    # reference pre-existing rows. Unlink ALWAYS detaches; never consult
+    # the per-entity logic. (Reed's choice point #4.)
+    if item_type in ("goal_link", "person_mention"):
+        # If the entity is gone, that's still "already_gone" -- the
+        # reference is dangling, no point detaching nothing.
+        if not _unlink_entity_exists(conn, item_type, entity_id):
+            return "already_gone", [], _entity_label(item_type, entity_id)
+        return "detach", ["external_reference"], _entity_label(item_type, entity_id)
+
+    # `created_id` null on a created status is the legacy stale-row case
+    # (see Reed §5.3) -- treat as already_gone.
+    if entity_id is None:
+        return "already_gone", [], _entity_label(item_type, None)
+
+    if not _unlink_entity_exists(conn, item_type, entity_id):
+        return "already_gone", [], _entity_label(item_type, entity_id)
+
+    if item_type == "task":
+        path, reasons = _unlink_heuristic_task(conn, dump_id, entity_id)
+    elif item_type == "goal_new":
+        path, reasons = _unlink_heuristic_goal(conn, dump_id, entity_id)
+    elif item_type == "person_new":
+        path, reasons = _unlink_heuristic_person(conn, dump_id, entity_id)
+    elif item_type == "knowledge":
+        path, reasons = _unlink_heuristic_knowledge(conn, dump_id, entity_id)
+    elif item_type == "tag":
+        path, reasons = _unlink_heuristic_tag(conn, dump_id, entity_id)
+    else:
+        # Unknown item type (e.g. a future addition): default to detach
+        # with a fallback reason. Never silently delete.
+        path, reasons = "detach", ["used_elsewhere"]
+
+    if path is None:
+        # Defensive: heuristic returned None entity (race between exists-
+        # check and read). Treat as already_gone.
+        return "already_gone", [], _entity_label(item_type, entity_id)
+    return path, reasons, _entity_label(item_type, entity_id)
+
+
+def _unlink_delete_entity(conn, dump_id, item):
+    """Apply the safe-delete sweep for the per-entity rules.
+
+    Mirrors the per-type DELETE logic in handlers.py (handle_delete_*),
+    but tailored: tag delete sweeps every junction (predicate already
+    confirmed all rows belong to this dump's fanout); goal sweeps
+    goal_people (this dump's contribution); etc.
+    """
+    item_type = item.get("type")
+    entity_id = item.get("created_id")
+    if entity_id is None:
+        return  # already_gone path; nothing to do
+
+    if item_type == "task":
+        conn.execute("DELETE FROM task_tags WHERE task_id = ?", (entity_id,))
+        conn.execute("DELETE FROM task_people WHERE task_id = ?", (entity_id,))
+        conn.execute(
+            "DELETE FROM dependencies WHERE "
+            "(blocker_type='task' AND blocker_id=?) OR "
+            "(blocked_type='task' AND blocked_id=?)",
+            (entity_id, entity_id),
+        )
+        conn.execute("DELETE FROM tasks WHERE id = ?", (entity_id,))
+    elif item_type == "goal_new":
+        conn.execute("DELETE FROM goal_people WHERE goal_id = ?", (entity_id,))
+        conn.execute("DELETE FROM goal_tags WHERE goal_id = ?", (entity_id,))
+        conn.execute(
+            "DELETE FROM dependencies WHERE "
+            "(blocker_type='goal' AND blocker_id=?) OR "
+            "(blocked_type='goal' AND blocked_id=?)",
+            (entity_id, entity_id),
+        )
+        # Tasks under the goal: predicate guarantees none, defensive no-op
+        # safe even if a race added one (FK is SET NULL on goal_id, but
+        # we're trusting the heuristic + transaction).
+        conn.execute("DELETE FROM goals WHERE id = ?", (entity_id,))
+    elif item_type == "person_new":
+        conn.execute("DELETE FROM person_tags WHERE person_id = ?", (entity_id,))
+        conn.execute("DELETE FROM goal_people WHERE person_id = ?", (entity_id,))
+        conn.execute("DELETE FROM task_people WHERE person_id = ?", (entity_id,))
+        conn.execute("DELETE FROM people WHERE id = ?", (entity_id,))
+    elif item_type == "knowledge":
+        conn.execute("DELETE FROM knowledge_tags WHERE knowledge_id = ?", (entity_id,))
+        conn.execute("DELETE FROM knowledge_items WHERE id = ?", (entity_id,))
+    elif item_type == "tag":
+        # Predicate confirmed every junction belongs to THIS dump's
+        # fanout. Sweep them all, then delete the tag.
+        conn.execute("DELETE FROM brain_dump_tags WHERE tag_id = ?", (entity_id,))
+        conn.execute("DELETE FROM task_tags WHERE tag_id = ?", (entity_id,))
+        conn.execute("DELETE FROM knowledge_tags WHERE tag_id = ?", (entity_id,))
+        conn.execute("DELETE FROM goal_tags WHERE tag_id = ?", (entity_id,))
+        conn.execute("DELETE FROM person_tags WHERE tag_id = ?", (entity_id,))
+        conn.execute("DELETE FROM tags WHERE id = ?", (entity_id,))
+    # goal_link / person_mention should never reach here -- they always
+    # detach (external_reference). Defensive: do nothing if they do.
+
+
+def _unlink_detach_entity(conn, dump_id, item):
+    """Detach: leave the entity row alone, sever only this dump's link.
+
+    For most types, the dump's claim lives entirely in the JSON blob
+    (`processed_items.items[i].created_id`); nulling that is enough.
+    Tags are special -- they have a real `brain_dump_tags` junction row
+    that must go.
+    """
+    item_type = item.get("type")
+    entity_id = item.get("created_id")
+    if entity_id is None:
+        return
+
+    if item_type == "tag":
+        # Reed §3.5: detach removes the brain_dump_tags row only. Per-item
+        # junctions (task_tags etc.) belong to entities the user is
+        # keeping; tearing them out would be silent data loss.
+        conn.execute(
+            "DELETE FROM brain_dump_tags WHERE brain_dump_id = ? AND tag_id = ?",
+            (dump_id, entity_id),
+        )
+    # task / goal_new / person_new / knowledge: no junction rows came
+    # from this dump that aren't already legitimate accretions on the
+    # surviving entity. Reed §3.1-§3.4 are explicit on this -- leave
+    # task_tags / goal_people / person_tags alone on detach.
+    # goal_link / person_mention: nothing to do; the dump's claim is
+    # entirely in the JSON, and nulling created_id is the caller's job.
+
+
+def handle_unlink_preview(dump_id, body):
+    """Handler for POST /api/brain-dumps/<id>/unlink-preview.
+
+    Read-only verdict for Iris's confirm dialog. Body: `{item_index}`.
+    Response 200: `{path, entity_label, reasons}`. 404 on missing dump or
+    item, 400 on bad item_index, 409 on wrong status. No DB mutation.
+    """
+    item_index = body.get("item_index") if body else None
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT * FROM brain_dumps WHERE id = ?", (dump_id,)
+        ).fetchone()
+        if not row:
+            return 404, {"error": "Brain dump not found"}
+        dump = dict(row)
+        processed_items = (
+            json.loads(dump["processed_items"]) if dump["processed_items"] else None
+        )
+        if not processed_items or "items" not in processed_items:
+            return 400, {"error": "No processed items"}
+        if (
+            item_index is None
+            or not isinstance(item_index, int)
+            or item_index < 0
+            or item_index >= len(processed_items["items"])
+        ):
+            return 400, {"error": "Invalid item index"}
+
+        item = processed_items["items"][item_index]
+        status = item.get("status")
+        if status not in ("auto_created", "approved"):
+            # 409: precondition gate. Mirrors Reed §5.2 -- unlink is only
+            # valid for items the system created on the user's behalf.
+            return 409, {
+                "error": "only auto-created or approved items can be unlinked"
+            }
+
+        path, reasons, entity_label = _unlink_heuristic(conn, dump_id, item)
+
+        # Privacy: dump_id, item_index, item_type, path, reasons only.
+        # Never log entity_label (it's content-free today, but the
+        # invariant is "log nothing that could ever leak content," so we
+        # keep it out of logs even when it's safe).
+        logger.info(
+            "processing.unlink.preview dump_id=%s item_index=%d item_type=%s "
+            "path=%s reasons=%s",
+            dump_id, item_index, item.get("type"), path, reasons,
+        )
+        return 200, {
+            "path": path,
+            "entity_label": entity_label,
+            "reasons": reasons,
+        }
+    finally:
+        conn.close()
+
+
 def handle_approve_item(dump_id, body):
     """Handler for POST /api/brain-dumps/:id/approve-item"""
     conn = get_db()
@@ -2440,12 +2938,95 @@ def handle_approve_item(dump_id, body):
         # change so a typo'd payload is a loud no-op, not a silent one. Today's
         # if/elif chain would have silently 200'd on unknown action; that's the
         # status-truthfulness shape we're killing across this handler.
-        if action not in ("approve", "edit_approve", "reject", "retry", "unreject"):
+        if action not in ("approve", "edit_approve", "reject", "retry", "unreject", "unlink"):
             return 400, {"error": f"unknown action: {action!r}"}
 
         item = processed_items["items"][item_index]
 
-        if action == "reject":
+        if action == "unlink":
+            # Precondition: only auto_created / approved items can be unlinked
+            # (Reed §5.2). Reject otherwise so 409 -> Iris can show the right
+            # affordance instead of silently 200ing.
+            if item.get("status") not in ("auto_created", "approved"):
+                return 409, {
+                    "error": "only auto-created or approved items can be unlinked"
+                }
+            confirmed_path = body.get("confirmed_path")
+            if confirmed_path not in ("delete", "detach"):
+                return 400, {
+                    "error": "confirmed_path must be 'delete' or 'detach'"
+                }
+            # Iris's drift-prevention design: client tells us which path it
+            # showed the user; we recompute and reject on mismatch so the UI
+            # can re-prompt with the new verdict.
+            #
+            # BEGIN IMMEDIATE so verdict + action are atomic against any
+            # concurrent writer. sqlite3's default deferred mode would let a
+            # second writer slip in between the heuristic SELECTs and the
+            # entity DELETE.
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError:
+                # already in a transaction (test harness / wrapper); the
+                # outer scope owns the lock
+                pass
+            recomputed_path, reasons, _label = _unlink_heuristic(
+                conn, dump_id, item
+            )
+
+            if recomputed_path == "already_gone":
+                # Race: the entity was deleted between preview and confirm.
+                # Treat as success regardless of confirmed_path -- the dump's
+                # claim is the only thing left to clean. The IMMEDIATE
+                # transaction stays open; we'll just be writing the JSON.
+                effective_path = "already_gone"
+            elif recomputed_path != confirmed_path:
+                # Drift detected. Roll back any transactional state the
+                # IMMEDIATE took and respond 409 with the new verdict. The UI
+                # will re-run pre-flight + dialog with the new path.
+                conn.rollback()
+                logger.info(
+                    "processing.unlink.drift dump_id=%s item_index=%d "
+                    "item_type=%s confirmed=%s recomputed=%s reasons=%s",
+                    dump_id, item_index, item.get("type"),
+                    confirmed_path, recomputed_path, reasons,
+                )
+                return 409, {
+                    "error": "state changed",
+                    "new_path": recomputed_path,
+                    "reasons": reasons,
+                }
+            else:
+                effective_path = recomputed_path
+
+            # Apply the action.
+            if effective_path == "delete":
+                _unlink_delete_entity(conn, dump_id, item)
+            elif effective_path == "detach":
+                _unlink_detach_entity(conn, dump_id, item)
+            # `already_gone`: no entity work; just clean the JSON below.
+
+            # Per Reed's choice point #1: status -> rejected (so existing
+            # ↶ Un-reject affordance works as undo). Record unlink-specific
+            # metadata in sub-fields so the audit trail survives.
+            item["status"] = "rejected"
+            item["created_id"] = None
+            item["unlinked_path"] = effective_path
+            item["unlinked_reasons"] = reasons
+            # Choice point #2: clear `error` on unlink. The item is no
+            # longer "failed"; it is intentionally rejected.
+            if "error" in item:
+                item["error"] = None
+
+            logger.info(
+                "processing.unlink.applied dump_id=%s item_index=%d "
+                "item_type=%s path=%s reasons=%s",
+                dump_id, item_index, item.get("type"),
+                effective_path, reasons,
+            )
+            # Fall through to the rollup + persist block below.
+
+        elif action == "reject":
             item["status"] = "rejected"
         elif action == "unreject":
             # Precondition: item MUST currently be `rejected`. 409 otherwise --
