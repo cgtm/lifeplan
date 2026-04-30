@@ -3480,6 +3480,139 @@ button.tag:active,
   }
 }
 
+/* ── Update items (Iris's plan 2026-04-30, Lumen's renderer) ──────
+   Suggested updates land in their own group at the top of the
+   dump-detail items section. Three visual cues differentiate them
+   from create suggestions: a pencil/check/💬 icon, an amber
+   left-border, and a verb-leading title. The "Suggested updates"
+   group label is the fourth. */
+.dump-detail-items-group-updates {
+  /* Tighten the gap below this group's bottom border so the next
+     group's top border doesn't double-up. The group itself sits at
+     the top of the items section. */
+}
+
+.dump-detail-item-update {
+  border-left: 3px solid var(--amber, #d97706);
+  padding-left: 10px;
+  margin-left: -10px;
+  background: var(--amber-bg, rgba(217, 119, 6, 0.06));
+  border-bottom: 1px solid var(--border-lt);
+}
+
+.dump-detail-item-update:last-child { border-bottom: none; }
+
+.dump-detail-update-icon {
+  font-size: 0.875rem;
+  color: var(--amber, #d97706);
+  flex-shrink: 0;
+  width: 18px;
+  text-align: center;
+}
+
+.dump-detail-update-badge {
+  background: var(--amber-bg, rgba(217, 119, 6, 0.12));
+  color: var(--amber, #d97706);
+}
+
+.dump-detail-update-title {
+  cursor: pointer;
+  border-radius: var(--radius-sm, 6px);
+  padding: 2px 4px;
+  margin: -2px -4px;
+  transition: background var(--transition);
+}
+
+.dump-detail-update-title:hover,
+.dump-detail-update-title:focus-visible {
+  background: var(--accent-bg);
+  outline: none;
+}
+
+.dump-detail-update-title:focus-visible {
+  outline: 2px solid var(--focus, var(--accent));
+  outline-offset: 1px;
+}
+
+.dump-detail-update-transition {
+  font-size: 0.75rem;
+  color: var(--text-2);
+  margin-top: 6px;
+  padding-left: 26px; /* aligns under the title past the icon column */
+  font-family: var(--font-mono, var(--font));
+  word-break: break-word;
+}
+
+.dump-detail-update-stale {
+  font-size: 0.75rem;
+  color: var(--danger);
+  margin-top: 6px;
+  padding: 6px 10px;
+  background: var(--danger-bg, rgba(220, 38, 38, 0.08));
+  border-radius: var(--radius-sm, 6px);
+}
+
+.dump-detail-update-edit {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border-lt);
+  border-radius: var(--radius-sm, 6px);
+}
+
+.dump-detail-update-edit-label {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--text-2);
+  font-weight: 500;
+  margin-bottom: 8px;
+}
+
+.dump-detail-update-edit-input {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 8px 10px;
+  font-size: 0.8125rem;
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  resize: vertical;
+}
+
+.dump-detail-update-edit-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.dump-detail-update-edit-note {
+  font-size: 0.8125rem;
+  color: var(--text-2);
+  margin: 0 0 8px;
+}
+
+.dump-detail-update-edit-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.dump-detail-update-edit-actions .btn,
+.dump-detail-update-edit-actions .btn-approve {
+  font-size: 0.6875rem;
+  padding: 6px 14px;
+}
+
+@media (max-width: 640px) {
+  .dump-detail-update-edit-actions .btn,
+  .dump-detail-update-edit-actions .btn-approve {
+    min-height: 44px;
+    padding: 10px 16px;
+  }
+}
+
 /* Confirm dialog for unlink. One overlay, three content shapes
    (delete / detach / already_gone). Mirrors the blocker-picker overlay
    pattern so it feels native to the rest of the modal stack. */

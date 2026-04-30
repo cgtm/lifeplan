@@ -2072,7 +2072,41 @@ function reviewItemTitle(item) {
   if (t === 'tag') return `Tag: ${d.tag_name || ''}`;
   if (t === 'goal_link') return `Link to: ${d.goal_title || 'Unknown goal'}`;
   if (t === 'goal_new') return `New goal: ${d.title || 'Unknown goal'}`;
+  // Update item types — verb-leading titles. Naming follows the
+  // braindump-updates contract (rendering-vs-storage gap §2: Cam reads
+  // "note", schema column is "description").
+  if (t === 'task_update') return _updateItemVerbTitle(item);
+  if (t === 'goal_update') return _updateItemVerbTitle(item);
+  if (t === 'blocker_resolve') {
+    const label = d.blocker_label_at_extraction || 'blocker';
+    return `Mark blocker resolved: ${label}`;
+  }
+  if (t === 'person_note_append') {
+    const name = d.person_name_at_extraction || 'person';
+    return `Append note to ${name}`;
+  }
   return t;
+}
+
+// Verb-led title for task_update / goal_update rows. The verb depends
+// on the field; the entity title comes from the *_at_extraction echo.
+function _updateItemVerbTitle(item) {
+  const t = item.type;
+  const d = item.data || {};
+  const title = (t === 'task_update'
+    ? d.task_title_at_extraction
+    : d.goal_title_at_extraction) || (t === 'task_update' ? 'task' : 'goal');
+  const field = d.field;
+  const newValue = d.new_value;
+  if (field === 'status') {
+    if (newValue === 'completed') return `Mark ${t === 'task_update' ? 'task' : 'goal'} complete: ${title}`;
+    if (newValue === 'cancelled') return `Cancel ${t === 'task_update' ? 'task' : 'goal'}: ${title}`;
+    return `Update status: ${title}`;
+  }
+  if (field === 'due_date') return `Update due date: ${title}`;
+  if (field === 'target_date') return `Update target date: ${title}`;
+  if (field === 'description') return `Append note to ${title}`;
+  return `Update ${title}`;
 }
 
 function reviewItemTypeLabel(type) {
@@ -2084,8 +2118,71 @@ function reviewItemTypeLabel(type) {
     'tag': 'Tag',
     'goal_link': 'Goal',
     'goal_new': 'Goal',
+    'task_update': 'Task',
+    'goal_update': 'Goal',
+    'blocker_resolve': 'Blocker',
+    'person_note_append': 'Person',
   };
   return labels[type] || type;
+}
+
+// Set of update-shaped item types (carry a target entity rather than
+// creating one). Used by group placement, row rendering, and the
+// approve dispatcher.
+const UPDATE_ITEM_TYPES = new Set([
+  'task_update', 'goal_update', 'blocker_resolve', 'person_note_append',
+]);
+
+function isUpdateItem(item) {
+  return item && UPDATE_ITEM_TYPES.has(item.type);
+}
+
+// Per-type icon for update rows. Distinct silhouette from the create
+// icons (the .review-type-badge pill carries the entity colour; the
+// icon carries the action shape).
+function _updateItemIcon(type) {
+  if (type === 'blocker_resolve') return '✓';
+  if (type === 'person_note_append') return '💬';
+  // task_update / goal_update — pencil-on-card (Iris's spec).
+  return '✎';
+}
+
+// Render the "current → new" transition strip on an update row. Plain
+// text, schema-aware. For appends, we don't echo current because the
+// contract doesn't carry it (idempotency is enforced server-side by
+// provenance prefix scan).
+function _updateItemTransition(item) {
+  const t = item.type;
+  const d = item.data || {};
+  if (t === 'task_update' || t === 'goal_update') {
+    const field = d.field;
+    if (field === 'description') {
+      const snippet = String(d.new_value || '').trim();
+      const truncated = snippet.length > 80 ? snippet.slice(0, 80) + '…' : snippet;
+      return `+ "${truncated}"`;
+    }
+    const cur = d.current_value_at_extraction;
+    const nv = d.new_value;
+    const fieldLabel = field === 'due_date' ? 'due_date'
+                     : field === 'target_date' ? 'target_date'
+                     : field === 'status' ? 'status'
+                     : field;
+    return `${fieldLabel}: ${_updateValueDisplay(cur)} → ${_updateValueDisplay(nv)}`;
+  }
+  if (t === 'blocker_resolve') {
+    return 'active → resolved';
+  }
+  if (t === 'person_note_append') {
+    const snippet = String(d.note_text || '').trim();
+    const truncated = snippet.length > 80 ? snippet.slice(0, 80) + '…' : snippet;
+    return `+ "${truncated}"`;
+  }
+  return '';
+}
+
+function _updateValueDisplay(v) {
+  if (v === null || v === undefined || v === '') return '∅';
+  return String(v);
 }
 
 // Pretty exact-time line under the relative timestamp.
@@ -2227,13 +2324,29 @@ function _renderDumpDetailItems(dump, items, dumpStatus) {
   }
 
   const indexed = items.map((item, idx) => ({ ...item, _index: idx }));
-  const created = indexed.filter(i => i.status === 'auto_created' || i.status === 'approved');
-  const pending = indexed.filter(i => i.status === 'suggested');
-  const failed = indexed.filter(i => i.status === 'failed');
-  const rejected = indexed.filter(i => i.status === 'rejected');
+  // Update items at status=suggested float into a dedicated Updates
+  // group at the top, per Iris's plan §"Group placement". Once
+  // approved/rejected they fall back into the standard groups so the
+  // existing un-reject / launchpad affordances apply unchanged.
+  const updates = indexed
+    .filter(i => isUpdateItem(i) && i.status === 'suggested')
+    // Newer-first per Cam's guideline (memory: feedback_newer_first_default).
+    // Items appear in processed_items in extraction order (the order the
+    // LLM saw them in the dump); reverse that for the group.
+    .slice()
+    .reverse();
+  const updateIndexSet = new Set(updates.map(i => i._index));
+  const remaining = indexed.filter(i => !updateIndexSet.has(i._index));
+  const created = remaining.filter(i => i.status === 'auto_created' || i.status === 'approved');
+  const pending = remaining.filter(i => i.status === 'suggested');
+  const failed = remaining.filter(i => i.status === 'failed');
+  const rejected = remaining.filter(i => i.status === 'rejected');
 
-  // Order: needs_review puts Pending first; otherwise Created first.
-  const groups = (dumpStatus === 'needs_review')
+  // Updates group always sits at the very top — the high-stakes
+  // decisions ("change to existing thing") come before the
+  // lower-stakes ones ("new thing"). Within the create groups, the
+  // existing needs_review-first / created-first ordering stays.
+  const tail = (dumpStatus === 'needs_review')
     ? [
         ['pending', 'Pending review', pending],
         ['created', 'Created', created],
@@ -2246,6 +2359,10 @@ function _renderDumpDetailItems(dump, items, dumpStatus) {
         ['failed', 'Failed', failed],
         ['rejected', 'Rejected', rejected],
       ];
+  const groups = [
+    ['updates', 'Suggested updates', updates],
+    ...tail,
+  ];
 
   const showConfidence = pending.length >= 6;
 
@@ -2253,8 +2370,11 @@ function _renderDumpDetailItems(dump, items, dumpStatus) {
     .filter(([_k, _label, list]) => list.length > 0)
     .map(([key, label, list]) => {
       const rows = list.map(i => _renderDumpDetailItemRow(i, key, showConfidence)).join('');
+      const groupClass = key === 'updates'
+        ? 'dump-detail-items-group dump-detail-items-group-updates'
+        : 'dump-detail-items-group';
       return `
-        <div class="dump-detail-items-group">
+        <div class="${groupClass}">
           <div class="dump-detail-section-title">${esc(label)} <span class="dump-detail-section-count">(${list.length})</span></div>
           ${rows}
         </div>`;
@@ -2270,13 +2390,22 @@ function _renderDumpDetailItems(dump, items, dumpStatus) {
 function _renderDumpDetailItemRow(item, groupKey, showConfidence) {
   const t = item.type;
   const idx = item._index;
+  // Update rows have their own renderer — different visual shape, different
+  // affordances (Approve / Reject / Edit · launchpad to the matched entity).
+  if (groupKey === 'updates') {
+    return _renderDumpDetailUpdateRow(item, showConfidence);
+  }
   const typeLabel = reviewItemTypeLabel(t);
   const title = reviewItemTitle(item);
 
   const isLaunch = (groupKey === 'created') &&
     (t === 'task' || t === 'goal_link' || t === 'goal_new' ||
      t === 'person_new' || t === 'person_mention' ||
-     t === 'knowledge' || t === 'tag');
+     t === 'knowledge' || t === 'tag' ||
+     // Approved updates land in 'created' with created_id pointing at
+     // the bound entity (per contract §4 "On apply success"). Launchpad
+     // those rows the same way.
+     isUpdateItem(item));
 
   const sourceQuote =
     (groupKey === 'pending' || groupKey === 'failed') && item.source_text
@@ -2320,7 +2449,10 @@ function _renderDumpDetailItemRow(item, groupKey, showConfidence) {
   // auto_created/approved row. Hover-revealed on desktop, always visible
   // on mobile via CSS. Click consumes its own event so the launchpad
   // gesture (whole-row click) doesn't fire underneath.
-  const unlinkBtn = (groupKey === 'created')
+  // Skip on approved updates — there's nothing to unlink (no entity was
+  // created), and reversing an update lives on the entity surface per
+  // Iris's plan §"A Cam-approved update is wrong in retrospect."
+  const unlinkBtn = (groupKey === 'created' && !isUpdateItem(item))
     ? `<button type="button" class="dump-detail-item-unlink" data-action="unlink" data-index="${idx}" aria-label="Unlink this auto-created item">×</button>`
     : '';
 
@@ -2337,6 +2469,86 @@ function _renderDumpDetailItemRow(item, groupKey, showConfidence) {
       ${errorLine}
       ${actions}
     </div>`;
+}
+
+// Update-row renderer (Iris's plan §"The update row"). Visually
+// distinct from creates: pencil icon, amber left-border (in CSS),
+// verb-leading title, current → new transition strip. The same
+// Approve / Reject / Edit buttons as a create suggestion, but the
+// edit form is contextual (status select, date picker, textarea).
+function _renderDumpDetailUpdateRow(item, showConfidence) {
+  const idx = item._index;
+  const t = item.type;
+  const icon = _updateItemIcon(t);
+  const title = reviewItemTitle(item);
+  const transition = _updateItemTransition(item);
+  const typeLabel = reviewItemTypeLabel(t);
+
+  // Source quote always shown for suggested updates — Cam needs to see
+  // the dump fragment that triggered the proposed change.
+  const sourceQuote = item.source_text
+    ? `<div class="dump-detail-item-quote">"${esc(String(item.source_text).substring(0, 200))}"</div>`
+    : '';
+
+  const confidence = showConfidence
+    ? `<span class="dump-detail-item-confidence">${esc(confidenceLabel(item.confidence || 0))}</span>`
+    : '';
+
+  // Drift / missing markers — set transiently on the local model when
+  // an approve attempt comes back 409 / 404, so Cam knows not to retry
+  // the same approval as-is. Not persisted.
+  let staleBanner = '';
+  if (item._driftError) {
+    staleBanner = `<div class="dump-detail-update-stale">Stale — ${esc(item._driftError)}</div>`;
+  }
+
+  // The matched entity is launchable — clicking the title opens the
+  // entity surface. We render it as its own anchor inside the row so
+  // the whole row's tap targets stay distinct from the action buttons.
+  const launchData = _updateLaunchAttrs(item);
+
+  return `
+    <div class="dump-detail-item dump-detail-item-update ${esc('item-status-update')}"
+         data-item-index="${idx}" data-item-type="${esc(t)}">
+      <div class="dump-detail-item-row">
+        <span class="dump-detail-update-icon" aria-hidden="true">${icon}</span>
+        <span class="review-type-badge dump-detail-update-badge">${esc(typeLabel)} update</span>
+        <span class="dump-detail-item-title dump-detail-update-title"
+              ${launchData}
+              role="button" tabindex="0">${esc(title)}<span class="dump-detail-item-chev" aria-hidden="true"> ›</span></span>
+        ${confidence}
+      </div>
+      <div class="dump-detail-update-transition">${esc(transition)}</div>
+      ${sourceQuote}
+      ${staleBanner}
+      <div class="dump-detail-item-actions">
+        <button class="btn-approve" data-action="approve" data-index="${idx}">Approve</button>
+        <button class="btn" data-action="edit-update" data-index="${idx}">Edit</button>
+        <button class="btn-dismiss" data-action="reject" data-index="${idx}">Reject</button>
+      </div>
+    </div>`;
+}
+
+// Build the data attribute payload for launching the matched entity
+// from the row title. Goals get the goal-detail modal; tasks /
+// people / blockers fall back to navigation (no per-entity surface
+// for those today).
+function _updateLaunchAttrs(item) {
+  const t = item.type;
+  const d = item.data || {};
+  if (t === 'goal_update' && d.goal_id) {
+    return `data-update-launch="goal" data-update-target="${parseInt(d.goal_id) || 0}"`;
+  }
+  if (t === 'task_update') {
+    return `data-update-launch="task"`;
+  }
+  if (t === 'blocker_resolve') {
+    return `data-update-launch="blocker"`;
+  }
+  if (t === 'person_note_append') {
+    return `data-update-launch="person"`;
+  }
+  return '';
 }
 
 function _bindDumpDetailContent(dump) {
@@ -2381,6 +2593,24 @@ function _bindDumpDetailItems(dump) {
     });
   });
 
+  // Update-row launch — triggered by clicking the matched-entity title.
+  // Behaves like the existing whole-row launchpad on creates, but the
+  // launch glyph lives inside the title rather than at the row's edge.
+  $('#dumpDetailBody').querySelectorAll('.dump-detail-update-title[data-update-launch]').forEach(el => {
+    const trigger = (e) => {
+      if (e.type === 'keydown' && e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+      e.stopPropagation();
+      const row = el.closest('.dump-detail-item');
+      if (!row) return;
+      const idx = parseInt(row.dataset.itemIndex);
+      const item = (dump.processed_items && dump.processed_items.items[idx]) || null;
+      if (item) _dumpDetailLaunchEntity(item);
+    };
+    el.addEventListener('click', trigger);
+    el.addEventListener('keydown', trigger);
+  });
+
   // Per-item action buttons.
   $('#dumpDetailBody').querySelectorAll('.dump-detail-item button[data-action]').forEach(btn => {
     btn.addEventListener('click', async (e) => {
@@ -2397,6 +2627,20 @@ function _bindDumpDetailItems(dump) {
         btn.disabled = true;
         try {
           await _dumpDetailUnlinkFlow(dump.id, idx);
+        } finally {
+          btn.disabled = false;
+        }
+        return;
+      }
+
+      // Edit-and-approve on update items: render an inline form on the
+      // row, swap the action strip out for Save / Cancel. No spinner on
+      // the Edit button itself; the form's own primary button spins.
+      if (action === 'edit-update') {
+        if (btn.disabled) return;
+        btn.disabled = true;
+        try {
+          _openUpdateEditForm(dump, idx);
         } finally {
           btn.disabled = false;
         }
@@ -2462,7 +2706,159 @@ function _dumpDetailLaunchEntity(item) {
     setTimeout(() => navigate('people'), 50);
     return;
   }
+  // Update items — launchpad to the matched entity, not the dump's
+  // created_id (which only exists post-approval). For goals we have a
+  // detail surface; tasks / people / blockers fall back to the list
+  // view for now.
+  if (t === 'goal_update') {
+    const gid = (data.goal_id != null) ? parseInt(data.goal_id) : null;
+    if (gid) openGoalDetail(gid);
+    return;
+  }
+  if (t === 'task_update') {
+    closeModal($('#dumpDetailOverlay'));
+    setTimeout(() => navigate('tasks'), 50);
+    return;
+  }
+  if (t === 'person_note_append') {
+    closeModal($('#dumpDetailOverlay'));
+    setTimeout(() => navigate('people'), 50);
+    return;
+  }
+  if (t === 'blocker_resolve') {
+    // No per-blocker detail surface today; the blockers live inside
+    // the goal-detail modal. Best fallback: navigate to home where the
+    // active blockers are most visible.
+    closeModal($('#dumpDetailOverlay'));
+    setTimeout(() => navigate('home'), 50);
+    return;
+  }
   // Unknown — silent.
+}
+
+// Inline edit-and-approve form for update items. Replaces the row's
+// action strip with a small contextual control (status select, date
+// picker, or textarea) plus Save / Cancel. On save, fires the same
+// approve-item endpoint with edit_data per the contract.
+function _openUpdateEditForm(dump, itemIndex) {
+  const item = dump.processed_items && dump.processed_items.items[itemIndex];
+  if (!item) return;
+  const row = $('#dumpDetailBody').querySelector(
+    `.dump-detail-item-update[data-item-index="${itemIndex}"]`
+  );
+  if (!row) return;
+  // Avoid stacking two forms.
+  if (row.querySelector('.dump-detail-update-edit')) return;
+
+  const t = item.type;
+  const d = item.data || {};
+  let formInner = '';
+  if (t === 'task_update' && d.field === 'status') {
+    const cur = d.new_value || 'completed';
+    formInner = `
+      <label class="dump-detail-update-edit-label">New status
+        <select class="dump-detail-update-edit-input" data-field="new_value">
+          <option value="completed" ${cur === 'completed' ? 'selected' : ''}>completed</option>
+          <option value="cancelled" ${cur === 'cancelled' ? 'selected' : ''}>cancelled</option>
+        </select>
+      </label>`;
+  } else if (t === 'task_update' && d.field === 'due_date') {
+    const cur = d.new_value || '';
+    formInner = `
+      <label class="dump-detail-update-edit-label">New due date
+        <input type="date" class="dump-detail-update-edit-input" data-field="new_value" value="${esc(cur)}">
+      </label>`;
+  } else if (t === 'task_update' && d.field === 'description') {
+    const cur = d.new_value || '';
+    formInner = `
+      <label class="dump-detail-update-edit-label">Note to append
+        <textarea class="dump-detail-update-edit-input" data-field="new_value" rows="3">${esc(cur)}</textarea>
+      </label>`;
+  } else if (t === 'goal_update' && d.field === 'status') {
+    const cur = d.new_value || 'completed';
+    formInner = `
+      <label class="dump-detail-update-edit-label">New status
+        <select class="dump-detail-update-edit-input" data-field="new_value">
+          <option value="completed" ${cur === 'completed' ? 'selected' : ''}>completed</option>
+          <option value="cancelled" ${cur === 'cancelled' ? 'selected' : ''}>cancelled</option>
+        </select>
+      </label>`;
+  } else if (t === 'goal_update' && d.field === 'target_date') {
+    const cur = d.new_value || '';
+    formInner = `
+      <label class="dump-detail-update-edit-label">New target date
+        <input type="date" class="dump-detail-update-edit-input" data-field="new_value" value="${esc(cur)}">
+      </label>`;
+  } else if (t === 'goal_update' && d.field === 'description') {
+    const cur = d.new_value || '';
+    formInner = `
+      <label class="dump-detail-update-edit-label">Note to append
+        <textarea class="dump-detail-update-edit-input" data-field="new_value" rows="3">${esc(cur)}</textarea>
+      </label>`;
+  } else if (t === 'blocker_resolve') {
+    // Nothing to edit beyond confirming. Still useful to surface a
+    // confirmation step so Edit isn't a dead button.
+    formInner = `
+      <p class="dump-detail-update-edit-note">Mark this blocker resolved? Approve to apply.</p>`;
+  } else if (t === 'person_note_append') {
+    const cur = d.note_text || '';
+    formInner = `
+      <label class="dump-detail-update-edit-label">Note text
+        <textarea class="dump-detail-update-edit-input" data-field="note_text" rows="3">${esc(cur)}</textarea>
+      </label>`;
+  } else {
+    formInner = `<p class="dump-detail-update-edit-note">No editable fields for this update type.</p>`;
+  }
+
+  const formEl = document.createElement('div');
+  formEl.className = 'dump-detail-update-edit';
+  formEl.innerHTML = `
+    ${formInner}
+    <div class="dump-detail-update-edit-actions">
+      <button class="btn-approve" data-edit-action="save">Save &amp; approve</button>
+      <button class="btn" data-edit-action="cancel">Cancel</button>
+    </div>`;
+  row.appendChild(formEl);
+
+  // Hide the original action strip while the form is open.
+  const actionsStrip = row.querySelector(':scope > .dump-detail-item-actions');
+  if (actionsStrip) actionsStrip.style.display = 'none';
+
+  formEl.querySelector('[data-edit-action="cancel"]').addEventListener('click', (e) => {
+    e.stopPropagation();
+    formEl.remove();
+    if (actionsStrip) actionsStrip.style.display = '';
+  });
+
+  formEl.querySelector('[data-edit-action="save"]').addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const saveBtn = formEl.querySelector('[data-edit-action="save"]');
+    saveBtn.disabled = true;
+    saveBtn.textContent = '…';
+    // Collect edit_data — only the fields the form actually exposes.
+    const editData = {};
+    formEl.querySelectorAll('.dump-detail-update-edit-input').forEach(input => {
+      const field = input.dataset.field;
+      if (!field) return;
+      let v = input.value;
+      // Empty string on a date input means "clear" — pass null through
+      // so the schema-nullable columns clear correctly.
+      if (input.type === 'date' && v === '') v = null;
+      editData[field] = v;
+    });
+    try {
+      await _dumpDetailItemAction(dump.id, itemIndex, 'edit_approve', editData);
+    } catch (err) {
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Save & approve';
+      // _dumpDetailItemAction already surfaces 409/404 toasts; nothing
+      // more to do here.
+    }
+  });
+
+  // Focus the first input for keyboard-first flow.
+  const first = formEl.querySelector('.dump-detail-update-edit-input');
+  if (first) setTimeout(() => first.focus(), 30);
 }
 
 // ── Mutation helpers ────────────────────────────────────
@@ -2470,26 +2866,36 @@ function _dumpDetailLaunchEntity(item) {
 // failure. Optimistic where possible: items flip immediately, then
 // the server's response replaces local state on success.
 
-async function _dumpDetailItemAction(dumpId, itemIndex, action) {
+async function _dumpDetailItemAction(dumpId, itemIndex, action, editData) {
   // Optimistic flip — mutate local model + re-render.
   const dump = allDumps.find(d => d.id === dumpId);
   if (!dump || !dump.processed_items || !dump.processed_items.items) return;
   const item = dump.processed_items.items[itemIndex];
   if (!item) return;
   const prevStatus = item.status;
+  const wasUpdate = isUpdateItem(item);
+  // Update items don't optimistic-flip on approve/edit_approve — the
+  // 409 (drift) and 404 (missing) failure modes are common enough that
+  // jumping the row out of the Updates group only to slam it back is
+  // visually noisy. Reject/unreject still flip optimistically (no
+  // failure shape that needs rollback).
   const optimisticStatus = (
-    action === 'approve' ? 'approved' :
+    !wasUpdate && (action === 'approve' || action === 'edit_approve') ? 'approved' :
     action === 'reject' ? 'rejected' :
     action === 'retry' ? 'approved' :
     action === 'unreject' ? 'suggested' :
     null
   );
   if (optimisticStatus) item.status = optimisticStatus;
+  // Clear any prior stale-marker when re-attempting.
+  if (item._driftError) item._driftError = null;
   _refreshDumpDetail();
+  const body = { item_index: itemIndex, action };
+  if (editData) body.edit_data = editData;
   try {
     const updated = await apiTry(`/brain-dumps/${dumpId}/approve-item`, {
       method: 'POST',
-      body: { item_index: itemIndex, action },
+      body,
     });
     // Server returns the updated dump row. Sync local state.
     if (updated && updated.id === dumpId) {
@@ -2500,6 +2906,13 @@ async function _dumpDetailItemAction(dumpId, itemIndex, action) {
       if (currentView === 'dump') renderDumps();
       const reviewCount = allDumps.filter(d => d.processing_status === 'needs_review').length;
       updateDumpBadge(reviewCount);
+      // Confirmation toast for approved updates — they don't get the
+      // visible "moved into Created" reassurance for free, since the
+      // updates group sits at the top and the row vanishes from the
+      // updates group on success. A short toast carries the receipt.
+      if (wasUpdate && (action === 'approve' || action === 'edit_approve')) {
+        showToast('Update applied.');
+      }
     } else {
       // Defensive: re-fetch.
       await loadDumps();
@@ -2508,6 +2921,34 @@ async function _dumpDetailItemAction(dumpId, itemIndex, action) {
   } catch (err) {
     // Revert.
     item.status = prevStatus;
+
+    // Update-item-specific drift / missing handling per the
+    // braindump-updates contract §"Failure modes".
+    if (wasUpdate && err && err.status === 409 && err.payload && err.payload.error === 'drift') {
+      const p = err.payload || {};
+      const field = p.field || _updateFieldLabel(item);
+      const cur = _updateValueDisplay(p.current_value);
+      // Two flavours: "value mismatch" and "already appended".
+      let msg;
+      if (p.expected_value === 'not yet appended' && p.current_value === 'already appended') {
+        msg = 'This note was already appended from this dump.';
+      } else {
+        msg = `The ${field} changed since this was suggested. Current value: ${cur}.`;
+      }
+      item._driftError = msg;
+      _refreshDumpDetail();
+      showToast(msg);
+      return;
+    }
+    if (wasUpdate && err && err.status === 404) {
+      const entityWord = _updateEntityWord(item);
+      const msg = `The ${entityWord} this update targets no longer exists.`;
+      item._driftError = `${entityWord} no longer exists`;
+      _refreshDumpDetail();
+      showToast(msg);
+      return;
+    }
+
     _refreshDumpDetail();
     if (err && err.status === 409) {
       showToast('That item has already changed.');
@@ -2518,6 +2959,27 @@ async function _dumpDetailItemAction(dumpId, itemIndex, action) {
     apiError(err);
     throw err;
   }
+}
+
+// Helpers used by the drift / missing toasts above.
+function _updateFieldLabel(item) {
+  const t = item.type;
+  const d = item.data || {};
+  if (t === 'task_update' || t === 'goal_update') {
+    if (d.field === 'description') return 'note';
+    return d.field || 'field';
+  }
+  if (t === 'blocker_resolve') return 'resolved state';
+  if (t === 'person_note_append') return 'note';
+  return 'field';
+}
+
+function _updateEntityWord(item) {
+  if (item.type === 'task_update') return 'task';
+  if (item.type === 'goal_update') return 'goal';
+  if (item.type === 'blocker_resolve') return 'blocker';
+  if (item.type === 'person_note_append') return 'person';
+  return 'entity';
 }
 
 // ── Unlink flow (Iris 2026-04-30) ────────────────────────────

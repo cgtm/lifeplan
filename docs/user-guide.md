@@ -87,6 +87,16 @@ Click any dump row (in the brain dump view, or in "Recent captures" on home) to 
 
 If you change your mind about an unlink, the row drops into the **Rejected** group with the existing **↶ Un-reject** button, the same as any other reject. Un-reject + re-approve rebuilds the link.
 
+### Suggested updates — change-to-existing-thing
+
+Brain dumps don't only create. If you write *"I booked the flights"* and there's already a task called "Book flights to Seoul," the LLM proposes ticking it off rather than making a new task. Those proposals land in a **Suggested updates** group at the top of the dump-detail modal — pencil icon, amber stripe down the left, a verb-leading title like *"Mark task complete: Book flights to Seoul"*. Underneath each title you see the change made explicit: `status: active → completed`, or `target_date: 2026-06-15 → 2026-10-01`. The matched entity name is right there so you can spot a wrong match before you tap.
+
+Every update is **suggested** — none auto-apply, regardless of confidence. Tap **Approve** to apply it, **Reject** to ignore it, **Edit** to tweak the proposed value (a status dropdown, a date picker, or a textarea on the note text — whatever the field needs) before approving. Tapping the entity title launches you into that entity's surface to verify in context first.
+
+If you've already changed the thing yourself between the dump being captured and you approving the update — ticked the task off in another tab, edited the goal's target date manually — the update is now stale and won't apply. The row marks itself stale and a toast tells you the current value. Reject it and move on. The same happens if the entity has been deleted: the toast says so, and the row stops accepting approval. No silent overwrites.
+
+Rejected updates behave exactly like any other reject — they drop into the **Rejected** group with the **↶ Un-reject** button if you change your mind.
+
 ### Honest about what to expect
 
 The LLM is good but not magical. It will sometimes:
