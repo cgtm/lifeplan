@@ -2316,12 +2316,21 @@ function _renderDumpDetailItemRow(item, groupKey, showConfidence) {
     ? `<span class="dump-detail-item-chev" aria-hidden="true">›</span>`
     : '';
 
+  // Iris's design (2026-04-30): an × on the right edge of every
+  // auto_created/approved row. Hover-revealed on desktop, always visible
+  // on mobile via CSS. Click consumes its own event so the launchpad
+  // gesture (whole-row click) doesn't fire underneath.
+  const unlinkBtn = (groupKey === 'created')
+    ? `<button type="button" class="dump-detail-item-unlink" data-action="unlink" data-index="${idx}" aria-label="Unlink this auto-created item">×</button>`
+    : '';
+
   return `
     <div class="dump-detail-item ${esc('item-status-' + groupKey)}" data-item-index="${idx}" data-item-type="${esc(t)}" ${launchAttr}>
       <div class="dump-detail-item-row">
         <span class="review-type-badge ${esc(t)}">${esc(typeLabel)}</span>
         <span class="dump-detail-item-title">${esc(title)}</span>
         ${confidence}
+        ${unlinkBtn}
         ${chev}
       </div>
       ${sourceQuote}
@@ -2378,6 +2387,22 @@ function _bindDumpDetailItems(dump) {
       e.stopPropagation();
       const action = btn.dataset.action;
       const idx = parseInt(btn.dataset.index);
+
+      // Unlink takes a different shape: preview -> confirm dialog ->
+      // submit. The button itself isn't a "doing the thing" button, it's
+      // a "let me show you the thing" button. So no spinner-replace on
+      // the × itself; the dialog has its own primary-button spinner.
+      if (action === 'unlink') {
+        if (btn.disabled) return;
+        btn.disabled = true;
+        try {
+          await _dumpDetailUnlinkFlow(dump.id, idx);
+        } finally {
+          btn.disabled = false;
+        }
+        return;
+      }
+
       btn.disabled = true;
       const originalLabel = btn.textContent;
       btn.textContent = '…';
@@ -2491,6 +2516,261 @@ async function _dumpDetailItemAction(dumpId, itemIndex, action) {
       return;
     }
     apiError(err);
+    throw err;
+  }
+}
+
+// ── Unlink flow (Iris 2026-04-30) ────────────────────────────
+//
+// The × on every auto_created/approved row hits this function. It runs
+// the preview, opens the confirm dialog, and on confirm submits the
+// 'unlink' action. Drift between preview and confirm (409 with a
+// new_path) is handled by re-prompting once with the new verdict.
+//
+// Contract: app/contracts/auto-create-item.md ('unlink' action),
+// docs/architecture/unlink-safety-heuristic.md (per-entity rules),
+// docs/ux-design/2026-04-30-unlink-auto-created.md (dialog templates).
+async function _dumpDetailUnlinkFlow(dumpId, itemIndex) {
+  // Fetch the preview verdict.
+  let preview;
+  try {
+    preview = await apiTry(`/brain-dumps/${dumpId}/unlink-preview`, {
+      method: 'POST',
+      body: { item_index: itemIndex },
+    });
+  } catch (err) {
+    if (err && err.status === 404) {
+      showToast('Item or entity no longer exists.');
+      await loadDumps();
+      _refreshDumpDetail();
+      return;
+    }
+    apiError(err);
+    return;
+  }
+  // The preview path drives the dialog template.
+  await _openUnlinkDialog(dumpId, itemIndex, preview);
+}
+
+// Humanise a heuristic reason kind into a phrase Cam reads, not an
+// enum string. Falls back to a tidied version if a new kind appears
+// before this map gets a new entry.
+function _humaniseUnlinkReason(reason) {
+  // Vault may emit either a bare string or {kind, ...} shapes; accept both.
+  const kind = (reason && typeof reason === 'object') ? reason.kind : reason;
+  if (!kind) return null;
+  const map = {
+    'edited':            'edited since auto-creation',
+    'linked_tasks':      'has tasks under it',
+    'other_dumps':       'mentioned in other brain dumps',
+    'applied_tags':      'has tags from elsewhere',
+    'external_reference':'this references an existing entity, not one this dump created',
+    'linked_people':     'has people linked',
+    'blockers':          'has blockers',
+    'completed':         'marked completed',
+    'source_changed':    'source has been edited',
+    'entry_tags':        'applied to journal entries',
+    'junction_apply_to': 'applied to other entities',
+    'linked_goals':      'linked to other goals',
+  };
+  if (map[kind]) return map[kind];
+  // Fall-through: turn snake_case into a phrase rather than show a raw enum.
+  return String(kind).replace(/_/g, ' ');
+}
+
+function _humaniseUnlinkReasons(reasons) {
+  if (!Array.isArray(reasons)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const r of reasons) {
+    const phrase = _humaniseUnlinkReason(r);
+    if (phrase && !seen.has(phrase)) {
+      seen.add(phrase);
+      out.push(phrase);
+    }
+  }
+  return out;
+}
+
+// Resolve the row's display label client-side (the server's
+// entity_label is intentionally content-free per contract). Falls back
+// to the type name when the JSON has no title.
+function _unlinkEntityDisplayLabel(dump, itemIndex) {
+  const item = dump && dump.processed_items && dump.processed_items.items
+    ? dump.processed_items.items[itemIndex]
+    : null;
+  if (!item) return 'this item';
+  return reviewItemTitle(item);
+}
+
+// One overlay; three content templates (delete / detach / already_gone).
+// Submitted action mirrors the existing _dumpDetailItemAction shape so
+// the optimistic flip + revert behaviour is consistent.
+function _openUnlinkDialog(dumpId, itemIndex, preview) {
+  return new Promise((resolve) => {
+    // Strip any prior instance.
+    document.querySelectorAll('.unlink-dialog-overlay').forEach(el => el.remove());
+
+    const dump = allDumps.find(d => d.id === dumpId);
+    const label = _unlinkEntityDisplayLabel(dump, itemIndex);
+    const path = preview && preview.path;
+    const reasons = _humaniseUnlinkReasons(preview && preview.reasons);
+
+    let headline, body, primaryLabel, primaryClass, confirmedPath;
+    if (path === 'delete') {
+      headline = 'Delete this entity?';
+      body = `<p>Delete &ldquo;${esc(label)}&rdquo;? This will remove the entity entirely. The brain dump's claim to it will be cleared.</p>`;
+      primaryLabel = 'Delete';
+      primaryClass = 'btn-danger';
+      confirmedPath = 'delete';
+    } else if (path === 'detach') {
+      headline = 'Detach from this dump?';
+      const reasonsBlock = reasons.length
+        ? `<ul class="unlink-dialog-reasons">${reasons.map(r => `<li>${esc(r)}</li>`).join('')}</ul>`
+        : '';
+      body = `
+        <p>Detach &ldquo;${esc(label)}&rdquo; from this brain dump? The entity itself will remain — detaching only clears the dump's claim.</p>
+        ${reasonsBlock}
+      `;
+      primaryLabel = 'Detach';
+      primaryClass = 'btn-primary';
+      confirmedPath = 'detach';
+    } else if (path === 'already_gone') {
+      headline = 'Already gone';
+      body = `<p>This entity is already gone. Clear the dump's claim?</p>`;
+      primaryLabel = 'Clear claim';
+      primaryClass = 'btn-primary';
+      // already_gone doesn't take a confirmed_path — we send 'detach' as
+      // the safer default; the server ignores confirmed_path on this
+      // path per contract.
+      confirmedPath = 'detach';
+    } else {
+      // Unknown path — close gracefully.
+      showToast("Couldn't read that — try again.");
+      resolve(false);
+      return;
+    }
+
+    const overlay = document.createElement('div');
+    overlay.className = 'unlink-dialog-overlay';
+    overlay.innerHTML = `
+      <div class="unlink-dialog" role="dialog" aria-modal="true" aria-labelledby="unlinkDialogTitle">
+        <div class="unlink-dialog-title" id="unlinkDialogTitle">${esc(headline)}</div>
+        <div class="unlink-dialog-body">${body}</div>
+        <div class="unlink-dialog-actions">
+          <button type="button" class="unlink-dialog-cancel">Cancel</button>
+          <button type="button" class="unlink-dialog-confirm ${primaryClass}">${esc(primaryLabel)}</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+    requestAnimationFrame(() => overlay.classList.add('visible'));
+
+    let resolved = false;
+    const close = (val) => {
+      if (resolved) return;
+      resolved = true;
+      overlay.classList.remove('visible');
+      setTimeout(() => overlay.remove(), 180);
+      document.removeEventListener('keydown', onKey);
+      resolve(val);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') close(false);
+    };
+    document.addEventListener('keydown', onKey);
+
+    const cancelBtn = overlay.querySelector('.unlink-dialog-cancel');
+    const confirmBtn = overlay.querySelector('.unlink-dialog-confirm');
+
+    cancelBtn.addEventListener('click', () => close(false));
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) close(false);
+    });
+
+    confirmBtn.addEventListener('click', async () => {
+      // Lock the dialog while the request is in flight.
+      confirmBtn.disabled = true;
+      cancelBtn.disabled = true;
+      const originalLabel = confirmBtn.textContent;
+      confirmBtn.textContent = '…';
+      try {
+        await _dumpDetailUnlinkSubmit(dumpId, itemIndex, confirmedPath, path);
+        // On success, _dumpDetailUnlinkSubmit already toasted + flipped
+        // the row. Close the dialog.
+        close(true);
+      } catch (err) {
+        if (err && err.status === 409 && err.payload && err.payload.new_path) {
+          // Drift between preview and confirm: close this dialog and
+          // re-prompt once with the new verdict. Per Iris's design we
+          // cap re-prompts at one round-trip; if the user confirms
+          // again, fire with the new path. If they cancel, do nothing.
+          close(false);
+          showToast('Something changed — checking again.');
+          const newPreview = {
+            path: err.payload.new_path,
+            reasons: err.payload.reasons || [],
+          };
+          await _openUnlinkDialog(dumpId, itemIndex, newPreview);
+          return;
+        }
+        if (err && err.status === 404) {
+          showToast('Item or entity no longer exists.');
+          await loadDumps();
+          _refreshDumpDetail();
+          close(false);
+          return;
+        }
+        confirmBtn.disabled = false;
+        cancelBtn.disabled = false;
+        confirmBtn.textContent = originalLabel;
+        apiError(err);
+      }
+    });
+  });
+}
+
+// Submit the unlink action. Optimistic flip to 'rejected' + toast on
+// success; on failure, revert and re-throw so the dialog can decide
+// what to do (drift re-prompt vs hard error).
+async function _dumpDetailUnlinkSubmit(dumpId, itemIndex, confirmedPath, displayedPath) {
+  const dump = allDumps.find(d => d.id === dumpId);
+  if (!dump || !dump.processed_items || !dump.processed_items.items) return;
+  const item = dump.processed_items.items[itemIndex];
+  if (!item) return;
+  const prevStatus = item.status;
+  const prevCreatedId = item.created_id;
+  // Optimistic flip — the server will replace local state on 200.
+  item.status = 'rejected';
+  item.created_id = null;
+  _refreshDumpDetail();
+  try {
+    const updated = await apiTry(`/brain-dumps/${dumpId}/approve-item`, {
+      method: 'POST',
+      body: { item_index: itemIndex, action: 'unlink', confirmed_path: confirmedPath },
+    });
+    if (updated && updated.id === dumpId) {
+      const i = allDumps.findIndex(d => d.id === dumpId);
+      if (i !== -1) allDumps[i] = updated;
+      _refreshDumpDetail();
+      if (currentView === 'dump') renderDumps();
+      const reviewCount = allDumps.filter(d => d.processing_status === 'needs_review').length;
+      updateDumpBadge(reviewCount);
+    } else {
+      await loadDumps();
+      _refreshDumpDetail();
+    }
+    // Toast wording matches the path the user just confirmed (or, for
+    // already_gone, the housekeeping shape).
+    if (displayedPath === 'delete') showToast('Unlinked.');
+    else if (displayedPath === 'detach') showToast('Detached.');
+    else showToast('Cleared.');
+  } catch (err) {
+    // Revert the optimistic flip; let the caller decide what to do
+    // (drift re-prompt vs surface the error).
+    item.status = prevStatus;
+    item.created_id = prevCreatedId;
+    _refreshDumpDetail();
     throw err;
   }
 }

@@ -80,9 +80,12 @@ Click any dump row (in the brain dump view, or in "Recent captures" on home) to 
 - See the full original text.
 - See every extracted item — approved, suggested, dismissed.
 - **Approve / Edit & Approve / Dismiss** each suggestion individually.
+- **Unlink** an auto-created item that the LLM got wrong. Hover any created or approved row and a small × appears on the right (always visible on phones). Click it and the system reads the situation: if nothing else references the entity, it offers to delete it; if the entity has accreted other data — edits, tags, links from other dumps — it offers to *detach* it instead, leaving the entity intact and only severing this dump's claim. The dialog tells you which it picked and why before you commit.
 - **Retry** a failed dump.
 - **Re-process** a dump if the LLM was clearly wrong (edit the text first, then re-process — the system runs the LLM again on the new text).
 - **Delete** the whole thing.
+
+If you change your mind about an unlink, the row drops into the **Rejected** group with the existing **↶ Un-reject** button, the same as any other reject. Un-reject + re-approve rebuilds the link.
 
 ### Honest about what to expect
 

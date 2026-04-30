@@ -3431,6 +3431,153 @@ button.tag:active,
   padding: 4px 12px;
 }
 
+/* Iris's unlink × on auto_created/approved rows. Hover-revealed on
+   desktop, always visible on mobile (≤640px). The button consumes its
+   own click event in JS so the launchpad gesture doesn't fire. */
+.dump-detail-item-unlink {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--text-3);
+  font-size: 1.125rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm, 6px);
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity var(--transition), color var(--transition), background var(--transition);
+  /* 24×24 visible glyph; padding pushes the tap target to the 44pt floor. */
+  min-width: 32px;
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.dump-detail-item:hover .dump-detail-item-unlink,
+.dump-detail-item:focus-within .dump-detail-item-unlink {
+  opacity: 1;
+}
+
+.dump-detail-item-unlink:hover,
+.dump-detail-item-unlink:focus-visible {
+  color: var(--danger);
+  background: var(--accent-bg);
+  outline: none;
+}
+
+.dump-detail-item-unlink:focus-visible {
+  outline: 2px solid var(--focus, var(--accent));
+  outline-offset: 1px;
+}
+
+@media (max-width: 640px) {
+  .dump-detail-item-unlink {
+    opacity: 1;
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+/* Confirm dialog for unlink. One overlay, three content shapes
+   (delete / detach / already_gone). Mirrors the blocker-picker overlay
+   pattern so it feels native to the rest of the modal stack. */
+.unlink-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.40);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1100;
+  opacity: 0;
+  transition: opacity 160ms ease;
+  padding: 24px;
+}
+.unlink-dialog-overlay.visible { opacity: 1; }
+
+.unlink-dialog {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 20px 22px;
+  width: 100%;
+  max-width: 420px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.20);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.unlink-dialog-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.unlink-dialog-body {
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+.unlink-dialog-body p { margin: 0 0 8px 0; }
+.unlink-dialog-body p:last-child { margin-bottom: 0; }
+
+.unlink-dialog-reasons {
+  margin: 8px 0 0 0;
+  padding-left: 20px;
+  color: var(--text-2);
+  font-size: 0.8125rem;
+}
+
+.unlink-dialog-reasons li {
+  margin: 2px 0;
+}
+
+.unlink-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.unlink-dialog-actions button {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: transparent;
+  border-radius: var(--radius-md, 8px);
+  padding: 8px 16px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.875rem;
+  color: var(--text-2);
+  min-height: 36px;
+}
+
+.unlink-dialog-actions button:hover { color: var(--text); }
+.unlink-dialog-actions button:disabled { opacity: 0.5; cursor: progress; }
+
+.unlink-dialog-confirm.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg, #fff);
+}
+.unlink-dialog-confirm.btn-primary:hover { color: var(--accent-fg, #fff); filter: brightness(1.05); }
+
+.unlink-dialog-confirm.btn-danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+.unlink-dialog-confirm.btn-danger:hover { color: #fff; filter: brightness(1.05); }
+
+@media (max-width: 640px) {
+  .unlink-dialog { padding: 18px; }
+  .unlink-dialog-actions button { min-height: 44px; padding: 10px 16px; }
+}
+
 /* Suggestion-count chip on dump rows (needs_review state). */
 .dump-suggest-count {
   font-size: 0.6875rem;
