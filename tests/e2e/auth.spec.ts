@@ -49,11 +49,64 @@ function getSetCookieRaw(res: APIResponse): string {
 }
 
 // ──────────────────────────────────────────────────────────────────
+// Pre-suite limiter probe.
+//
+// The local server's in-process rate limiter is shared across the
+// entire suite. If a prior run (or any manual /login poking) has left
+// the limiter primed, the wrong-password tests below push it past the
+// threshold and every subsequent webkit fixture-login fails — all 6
+// failures look unrelated, retries fire, and 2.5 min vanish into a
+// limiter cascade that is not actually a bug.
+//
+// Detect that state up front. If POST /login with an obviously-bad
+// password returns 429, the limiter is already over the line: skip
+// the entire auth suite with a "run `lp restart`" message instead
+// of cascading failures. This is precondition #5 in
+// `probe-go-no-go.md`; the band-aid here is the ship-today move.
+// Vault owns the root-cause fix (rate-limiter loopback exemption);
+// queued in `team-practices.md`.
+// ──────────────────────────────────────────────────────────────────
+
+let limiterPrimed = false;
+
+test.beforeAll(async ({ baseURL }) => {
+  const { request: pwRequest } = await import('@playwright/test');
+  const ctx = await pwRequest.newContext({
+    baseURL,
+    ignoreHTTPSErrors: true,
+  });
+  try {
+    const probe = await ctx.post('login', {
+      headers: { 'Content-Type': 'application/json' },
+      data: { password: `probe-limiter-check-${Date.now()}` },
+    });
+    if (probe.status() === 429) {
+      limiterPrimed = true;
+    }
+  } catch {
+    /* probe failed: leave flag false so the suite runs and surfaces real errors */
+  } finally {
+    await ctx.dispose();
+  }
+});
+
+test.beforeEach(() => {
+  test.skip(
+    limiterPrimed,
+    'Login rate limiter is already primed (got 429 on a probe in beforeAll). ' +
+      'Run `/Users/cam/dev/personal/lifeplan/lp restart` to clear the ' +
+      'in-process limiter, then re-run the suite. This skip is the ' +
+      'limiter-cascade ship-today mitigation per ' +
+      '`docs/runbooks/probe-suite-scoping.md` §7.',
+  );
+});
+
+// ──────────────────────────────────────────────────────────────────
 // Contract: GET /login (public)
 // ──────────────────────────────────────────────────────────────────
 
 test.describe('GET /login (public)', () => {
-  test('contract: 200 + HTML form, unauthenticated', async ({ apiCtx }) => {
+  test('@smoke @auth contract: GET /login → 200 + HTML form, unauthenticated', async ({ apiCtx }) => {
     const res = await apiCtx.get('login');
     expect(res.status()).toBe(200);
     expect(res.headers()['content-type']).toMatch(/text\/html/);
@@ -69,7 +122,7 @@ test.describe('GET /login (public)', () => {
 // ──────────────────────────────────────────────────────────────────
 
 test.describe('POST /login (public)', () => {
-  test('contract: correct password → 200, sets session cookie with right flags', async ({
+  test('@smoke @auth contract: correct password → 200, sets session cookie with right flags', async ({
     apiCtx,
     mountPrefix,
     password,
@@ -101,7 +154,12 @@ test.describe('POST /login (public)', () => {
     }
   });
 
-  test('contract: wrong password → 401 {ok:false}, no cookie', async ({ apiCtx }) => {
+  // Not @smoke — multiple wrong-password attempts across both browser projects
+  // would prime the in-process rate limiter mid-run and cascade-fail later
+  // tests. Per `docs/runbooks/probe-suite-scoping.md` §9: "smoke skips
+  // wrong-password tests (≤ 1 wrong-pw probe) so cascade can't form."
+  // The full gate still runs this.
+  test('@auth contract: wrong password → 401 {ok:false}, no cookie', async ({ apiCtx }) => {
     const res = await apiCtx.post('login', {
       headers: { 'Content-Type': 'application/json' },
       data: { password: 'definitely-not-the-password-' + Date.now() },
@@ -113,7 +171,8 @@ test.describe('POST /login (public)', () => {
     expect(setCookieRaw.toLowerCase()).not.toContain(`${COOKIE_NAME.toLowerCase()}=`);
   });
 
-  test('UI: wrong password shows "Wrong password" in the form', async ({ page, loginPath }) => {
+  // Not @smoke — see comment on the contract: wrong-password test above.
+  test('@auth UI: wrong password shows "Wrong password" in the form', async ({ page, loginPath }) => {
     await page.goto(loginPath);
     await page.locator('#password').fill('this-is-wrong-' + Date.now());
     await page.locator('#submitBtn').click();
@@ -122,7 +181,7 @@ test.describe('POST /login (public)', () => {
     await expect(page.locator('#password')).toHaveValue('');
   });
 
-  test('contract: Content-Type gate — POST /login with form-urlencoded → 415 (NOT 401)', async ({
+  test('@auth contract: Content-Type gate — POST /login with form-urlencoded → 415 (NOT 401)', async ({
     apiCtx,
   }) => {
     const res = await apiCtx.post('login', {
@@ -172,7 +231,7 @@ test.describe('POST /login rate limit', () => {
     }
   });
 
-  test('contract: 5 failures return 401, 6th returns 429', async ({ apiCtx, page, loginPath }) => {
+  test('@auth contract: 5 failures return 401, 6th returns 429', async ({ apiCtx, page, loginPath }) => {
     test.skip(
       process.env.RATE_LIMIT_TEST !== '1',
       'Skipped by default. Set RATE_LIMIT_TEST=1 (and LIFEPLAN_RESTART_CMD) to run; this test burns the in-process limiter slots.',
@@ -210,7 +269,7 @@ test.describe('POST /login rate limit', () => {
 // ──────────────────────────────────────────────────────────────────
 
 test.describe('GET / (auth-required)', () => {
-  test('contract: authenticated → 200 with app HTML', async ({ loggedInPage, mountPrefix }) => {
+  test('@smoke @auth contract: authenticated GET / → 200 with app HTML', async ({ loggedInPage, mountPrefix }) => {
     const res = await loggedInPage.goto(mountPrefix);
     expect(res?.status()).toBe(200);
     const body = await loggedInPage.content();
@@ -221,7 +280,7 @@ test.describe('GET / (auth-required)', () => {
     expect(body).toMatch(/id=["']navMoreBtn["']/);
   });
 
-  test('contract: unauthenticated HTML GET → 302 to <mount>login (NO root-absolute path leak)', async ({
+  test('@smoke @auth contract: unauthenticated HTML GET → 302 to <mount>login (NO root-absolute path leak)', async ({
     request,
     mountPrefix,
     loginPath,
@@ -245,7 +304,7 @@ test.describe('GET / (auth-required)', () => {
 // ──────────────────────────────────────────────────────────────────
 
 test.describe('API auth gate', () => {
-  test('contract: unauthenticated /api/dashboard → 401 JSON, not 302', async ({ apiCtx }) => {
+  test('@smoke @auth contract: unauthenticated /api/dashboard → 401 JSON, not 302', async ({ apiCtx }) => {
     const r = await apiCtx.fetch('api/dashboard', {
       method: 'GET',
       // No Accept: text/html — this is an API client.
@@ -263,7 +322,7 @@ test.describe('API auth gate', () => {
 // ──────────────────────────────────────────────────────────────────
 
 test.describe('POST /logout (auth-required)', () => {
-  test('contract: 200 {ok:true} + clear-cookie; subsequent protected request → 401', async ({
+  test('@smoke @auth contract: POST /logout 200 {ok:true} + clear-cookie; subsequent protected request → 401', async ({
     browser,
     baseURL,
     password,
@@ -310,7 +369,7 @@ test.describe('POST /logout (auth-required)', () => {
 // ──────────────────────────────────────────────────────────────────
 
 test.describe('Logout via UI', () => {
-  test('regression: desktop logout chip lands on <mount>login (NOT apex)', async ({
+  test('@auth regression: desktop logout chip lands on <mount>login (NOT apex)', async ({
     browser,
     baseURL,
     password,
@@ -342,7 +401,7 @@ test.describe('Logout via UI', () => {
     await ctx.close();
   });
 
-  test('mobile (<640px): desktop chip hidden, More-menu Log out works', async ({
+  test('@auth mobile (<640px): desktop chip hidden, More-menu Log out works', async ({
     browser,
     baseURL,
     password,
@@ -381,7 +440,7 @@ test.describe('Logout via UI', () => {
 // ──────────────────────────────────────────────────────────────────
 
 test.describe('Tampered cookie', () => {
-  test('edited cookie value → reload redirects to login', async ({
+  test('@auth edited cookie value → reload redirects to login', async ({
     browser,
     baseURL,
     password,
@@ -418,7 +477,7 @@ test.describe('Tampered cookie', () => {
 
 test.describe('Public assets', () => {
   for (const path of ['manifest.json', 'apple-touch-icon.png', 'icon-192.png', 'icon-512.png']) {
-    test(`contract: GET ${path} → 200 unauthenticated`, async ({ apiCtx }) => {
+    test(`@smoke @auth contract: GET ${path} → 200 unauthenticated`, async ({ apiCtx }) => {
       const r = await apiCtx.get(path);
       expect(r.status(), `${path} must be reachable pre-auth`).toBe(200);
     });

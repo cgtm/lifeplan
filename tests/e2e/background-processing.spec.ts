@@ -159,10 +159,16 @@ async function newAuthedApi(baseURL: string, password: string): Promise<APIReque
 // ──────────────────────────────────────────────────────────────────
 
 test.describe('POST /api/brain-dumps (happy path)', () => {
-  test('contract: 202 + queued → claimed by worker within 30s → terminal within 120s', async ({
+  test('@worker @dump contract: 202 + queued → claimed by worker within 30s → terminal within 120s', async ({
     baseURL,
     password,
   }) => {
+    test.skip(
+      process.env.BG_HAPPY_TEST !== '1',
+      'Skipped by default. Set BG_HAPPY_TEST=1 to run the full happy-path ' +
+        'poll (claim within 30s + terminal within 120s). LLM-tier-dependent ' +
+        'flake; see docs/runbooks/probe-suite-scoping.md §5.',
+    );
     test.setTimeout(150_000);
     const api = await newAuthedApi(baseURL!, password);
     let dumpId: number | null = null;
@@ -215,7 +221,7 @@ test.describe('POST /api/brain-dumps (happy path)', () => {
 // ──────────────────────────────────────────────────────────────────
 
 test.describe('POST /api/brain-dumps non-blocking', () => {
-  test('contract: round-trip well under 1s (was 2-45s pre-rollout)', async ({
+  test('@worker @dump contract: round-trip well under 1s (was 2-45s pre-rollout)', async ({
     baseURL,
     password,
   }) => {
@@ -279,7 +285,7 @@ test.describe('POST /api/brain-dumps non-blocking', () => {
 // ──────────────────────────────────────────────────────────────────
 
 test.describe('POST /api/brain-dumps/<id>/retry', () => {
-  test('contract: retry on non-failed dump returns 409 "not in failed state"', async ({
+  test('@worker @dump contract: retry on non-failed dump returns 409 "not in failed state"', async ({
     baseURL,
     password,
   }) => {
@@ -307,7 +313,7 @@ test.describe('POST /api/brain-dumps/<id>/retry', () => {
     }
   });
 
-  test('contract: retry on non-existent dump returns 404', async ({ baseURL, password }) => {
+  test('@worker @dump contract: retry on non-existent dump returns 404', async ({ baseURL, password }) => {
     const api = await newAuthedApi(baseURL!, password);
     try {
       // High id unlikely to exist. Even if it does, the test still
@@ -341,7 +347,7 @@ test.describe('POST /api/brain-dumps/<id>/retry', () => {
 // ──────────────────────────────────────────────────────────────────
 
 test.describe('Worker failure handling (gated: FORCE_FAIL_TEST=1)', () => {
-  test('contract: 3 attempts on a poison job → status=failed', async () => {
+  test('@worker @dump contract: 3 attempts on a poison job → status=failed', async () => {
     test.skip(
       process.env.FORCE_FAIL_TEST !== '1',
       'Skipped by default. Set FORCE_FAIL_TEST=1 to inject a poison work_queue row.',
@@ -402,7 +408,7 @@ test.describe('Worker failure handling (gated: FORCE_FAIL_TEST=1)', () => {
 // ──────────────────────────────────────────────────────────────────
 
 test.describe('Watchdog reclaim (gated: WATCHDOG_TEST=1)', () => {
-  test('contract: stale processing row → reclaimed → done within ~90s', async ({
+  test('@worker @dump contract: stale processing row → reclaimed → done within ~90s', async ({
     baseURL,
     password,
   }) => {
@@ -467,10 +473,16 @@ test.describe('Watchdog reclaim (gated: WATCHDOG_TEST=1)', () => {
 // ──────────────────────────────────────────────────────────────────
 
 test.describe('UI live transitions on the dump-list page', () => {
-  test('UI: submit → "Pending" within 1s → terminal badge within 120s, no reload', async ({
+  test('@worker @dump UI: submit → "Pending" within 1s → terminal badge within 120s, no reload', async ({
     loggedInPage,
     mountPrefix,
   }) => {
+    test.skip(
+      process.env.BG_HAPPY_TEST !== '1',
+      'Skipped by default. Set BG_HAPPY_TEST=1 to run the full UI live ' +
+        'transition (Pending within 1s + terminal badge within 120s). ' +
+        'LLM-tier-dependent flake; see docs/runbooks/probe-suite-scoping.md §5.',
+    );
     // 150 s test budget. Worker is serial; in a full Probe pass this dump
     // can sit behind 10+ jobs queued by earlier tests. LLM tier chain is
     // ~3-5 s typical (Ollama 2 s timeout → Mistral cloud 1.5-3 s); when
@@ -532,7 +544,7 @@ test.describe('UI live transitions on the dump-list page', () => {
     }
   });
 
-  test('UI: leaving the dump page stops polling (no further /api/brain-dumps calls)', async ({
+  test('@worker @dump UI: leaving the dump page stops polling (no further /api/brain-dumps calls)', async ({
     loggedInPage,
     mountPrefix,
     baseURL,

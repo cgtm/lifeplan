@@ -218,7 +218,7 @@ test.describe('tag apply_to fan-out (Vault option C)', () => {
   //   task + knowledge created, then tag with apply_to=[{task, ...}]
   //   approved -> tag attaches via task_tags, NOT knowledge_tags.
   // ────────────────────────────────────────────────────────────────
-  test('case 1 happy path: apply_to=[task] -> only task_tags has the row', async ({
+  test('@tags @worker case 1 happy path: apply_to=[task] -> only task_tags has the row', async ({
     baseURL,
     password,
   }) => {
@@ -298,7 +298,7 @@ test.describe('tag apply_to fan-out (Vault option C)', () => {
   // Case 2: Multi-target
   //   apply_to=[task, knowledge] -> both junction tables get a row.
   // ────────────────────────────────────────────────────────────────
-  test('case 2 multi-target: apply_to=[task, knowledge] -> rows in both junctions', async ({
+  test('@tags @worker case 2 multi-target: apply_to=[task, knowledge] -> rows in both junctions', async ({
     baseURL,
     password,
   }) => {
@@ -363,7 +363,7 @@ test.describe('tag apply_to fan-out (Vault option C)', () => {
   // Case 3: Backwards compat (every historical row is this shape)
   //   tag with empty apply_to -> brain_dump_tags only, no per-item rows.
   // ────────────────────────────────────────────────────────────────
-  test('case 3 backwards compat: empty apply_to -> brain_dump_tags only', async ({
+  test('@tags @worker case 3 backwards compat: empty apply_to -> brain_dump_tags only', async ({
     baseURL,
     password,
   }) => {
@@ -426,7 +426,7 @@ test.describe('tag apply_to fan-out (Vault option C)', () => {
   //   path, but persisted JSON might carry it through. Either way:
   //   no error, no junction row, tag still created and dump-linked.
   // ────────────────────────────────────────────────────────────────
-  test('case 4 unknown apply_to type: dropped silently, tag still created', async ({
+  test('@tags @worker case 4 unknown apply_to type: dropped silently, tag still created', async ({
     baseURL,
     password,
   }) => {
@@ -482,7 +482,7 @@ test.describe('tag apply_to fan-out (Vault option C)', () => {
   //   (counted as `no_created_id` in the fanout log). The user can attach
   //   manually if they later approve the sibling. No error, tag created.
   // ────────────────────────────────────────────────────────────────
-  test('case 5 sibling not yet created: skipped silently, no error', async ({
+  test('@tags @worker case 5 sibling not yet created: skipped silently, no error', async ({
     baseURL,
     password,
   }) => {
@@ -551,7 +551,7 @@ test.describe('tag apply_to fan-out (Vault option C)', () => {
   //   pass-through end-to-end with a person sibling (different junction
   //   table from cases 1/2 to broaden coverage).
   // ────────────────────────────────────────────────────────────────
-  test('case 6 approve-handler reach: tag fans out via sibling pass-through', async ({
+  test('@tags @worker case 6 approve-handler reach: tag fans out via sibling pass-through', async ({
     baseURL,
     password,
   }) => {

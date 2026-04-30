@@ -304,7 +304,7 @@ test.afterAll(() => {
 // ──────────────────────────────────────────────────────────────────
 
 test.describe('contract: PUT /api/blockers/<id> dual-write', () => {
-  test('contract: {"resolved": true} → 200, resolved=1 + resolved_at populated', async ({
+  test('@smoke @blockers contract: PUT {"resolved": true} → 200, resolved=1 + resolved_at populated', async ({
     baseURL,
     password,
   }) => {
@@ -338,7 +338,7 @@ test.describe('contract: PUT /api/blockers/<id> dual-write', () => {
     }
   });
 
-  test('contract: {"resolved": false} → 200, resolved=0 + resolved_at NULL', async ({
+  test('@blockers contract: PUT {"resolved": false} → 200, resolved=0 + resolved_at NULL', async ({
     baseURL,
     password,
   }) => {
@@ -369,7 +369,7 @@ test.describe('contract: PUT /api/blockers/<id> dual-write', () => {
     }
   });
 
-  test('contract: {"notes": "..."} partial update → notes change, resolved/resolved_at untouched', async ({
+  test('@blockers contract: PUT {"notes": "..."} partial update → notes change, resolved/resolved_at untouched', async ({
     baseURL,
     password,
   }) => {
@@ -407,7 +407,7 @@ test.describe('contract: PUT /api/blockers/<id> dual-write', () => {
     }
   });
 
-  test('contract: 404 on missing id', async ({ baseURL, password }) => {
+  test('@blockers contract: PUT 404 on missing id', async ({ baseURL, password }) => {
     const api = await newAuthedApi(baseURL!, password);
     try {
       // Use an id that's almost certainly not present.
@@ -422,7 +422,7 @@ test.describe('contract: PUT /api/blockers/<id> dual-write', () => {
     }
   });
 
-  test('contract: 400 on {"unknown_key": 1}', async ({ baseURL, password }) => {
+  test('@blockers contract: PUT 400 on {"unknown_key": 1}', async ({ baseURL, password }) => {
     const api = await newAuthedApi(baseURL!, password);
     try {
       const goalA = injectGoal(uniqueLabel('goalA-unknown'));
@@ -442,7 +442,7 @@ test.describe('contract: PUT /api/blockers/<id> dual-write', () => {
     }
   });
 
-  test('contract: 400 on {"resolved": "yes"} (must be a boolean)', async ({
+  test('@blockers contract: PUT 400 on {"resolved": "yes"} (must be a boolean)', async ({
     baseURL,
     password,
   }) => {
@@ -475,7 +475,7 @@ test.describe('contract: PUT /api/blockers/<id> dual-write', () => {
 // ──────────────────────────────────────────────────────────────────
 
 test.describe('UI: hero card opens goal-detail modal', () => {
-  test('UI: clicking the hero card opens the goal-detail modal for the primary goal', async ({
+  test('@blockers @goal UI: clicking the hero card opens the goal-detail modal for the primary goal', async ({
     loggedInPage,
     mountPrefix,
   }) => {
@@ -503,7 +503,7 @@ test.describe('UI: hero card opens goal-detail modal', () => {
 // ──────────────────────────────────────────────────────────────────
 
 test.describe('UI: hero blocker row interactions', () => {
-  test('UI: tap blocker icon → row dims, toast shows Undo, PUT fires; after 5s blocker stays resolved (SQL verified)', async ({
+  test('@smoke @blockers UI: tap blocker icon → row dims, toast shows Undo, PUT fires; after 5s blocker stays resolved (SQL verified)', async ({
     loggedInPage,
     mountPrefix,
   }) => {
@@ -578,7 +578,7 @@ test.describe('UI: hero blocker row interactions', () => {
     expect(persisted.resolved_at).toBeTruthy();
   });
 
-  test('UI: tap blocker name on a task-typed blocker → navigates to tasks view', async ({
+  test('@blockers UI: tap blocker name on a task-typed blocker → navigates to tasks view', async ({
     loggedInPage,
     mountPrefix,
   }) => {
@@ -599,7 +599,7 @@ test.describe('UI: hero blocker row interactions', () => {
     await expect(page.locator('#view-tasks.active')).toBeVisible({ timeout: 5_000 });
   });
 
-  test('UI: tap blocker name on a goal-typed blocker → opens that goal-detail modal', async ({
+  test('@blockers @goal UI: tap blocker name on a goal-typed blocker → opens that goal-detail modal', async ({
     loggedInPage,
     mountPrefix,
   }) => {
@@ -627,7 +627,7 @@ test.describe('UI: hero blocker row interactions', () => {
 // ──────────────────────────────────────────────────────────────────
 
 test.describe('UI: goal-detail modal blocker ordering and header count', () => {
-  test('UI: active blockers above dimmed resolved; "Blockers (N active)" count matches', async ({
+  test('@blockers @goal UI: active blockers above dimmed resolved; "Blockers (N active)" count matches', async ({
     loggedInPage,
     mountPrefix,
   }) => {
@@ -683,7 +683,7 @@ test.describe('UI: goal-detail modal blocker ordering and header count', () => {
 // ──────────────────────────────────────────────────────────────────
 
 test.describe('UI: blocker_awareness prompt CTAs', () => {
-  test('UI: "Open the goal" CTA opens the goal-detail modal for the prompt source', async ({
+  test('@blockers @goal UI: "Open the goal" CTA opens the goal-detail modal for the prompt source', async ({
     loggedInPage,
     mountPrefix,
   }) => {
@@ -711,7 +711,7 @@ test.describe('UI: blocker_awareness prompt CTAs', () => {
     await expect(page.locator('#goalDetailTitle')).toHaveText(goalTitle);
   });
 
-  test('UI: "Mark resolved" with one active blocker → resolves directly (SQL verified)', async ({
+  test('@blockers UI: "Mark resolved" with one active blocker → resolves directly (SQL verified)', async ({
     loggedInPage,
     mountPrefix,
   }) => {
@@ -752,7 +752,7 @@ test.describe('UI: blocker_awareness prompt CTAs', () => {
     expect(readDependency(depId).resolved_at).toBeTruthy();
   });
 
-  test('UI: "Mark resolved" with multiple active blockers → picker overlay opens', async ({
+  test('@blockers UI: "Mark resolved" with multiple active blockers → picker overlay opens', async ({
     loggedInPage,
     mountPrefix,
   }) => {
@@ -789,7 +789,7 @@ test.describe('UI: blocker_awareness prompt CTAs', () => {
 // ──────────────────────────────────────────────────────────────────
 
 test.describe('UI: failed-dump Retry on home', () => {
-  test('UI: failed dump shows Retry; click → POST retry, processing_status flips to queued', async ({
+  test('@blockers @dump @worker UI: failed dump shows Retry; click → POST retry, processing_status flips to queued', async ({
     loggedInPage,
     mountPrefix,
   }) => {

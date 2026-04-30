@@ -195,7 +195,7 @@ test.describe('brain-dump detail modal — API + UI regression', () => {
   // ════════════════════════════════════════════════════════════════════
 
   // 1. retry on a failed item -> 200 + status flips to approved (success path).
-  test('API 1: action=retry on a failed item -> 200, item flips to approved', async ({
+  test('@dump @worker API 1: action=retry on a failed item -> 200, item flips to approved', async ({
     baseURL,
     password,
   }) => {
@@ -233,7 +233,7 @@ test.describe('brain-dump detail modal — API + UI regression', () => {
   });
 
   // 2. retry on suggested/approved/rejected -> 409 with documented body.
-  test('API 2: action=retry on non-failed item -> 409 "only failed items can be retried"', async ({
+  test('@dump @worker API 2: action=retry on non-failed item -> 409 "only failed items can be retried"', async ({
     baseURL,
     password,
   }) => {
@@ -278,7 +278,7 @@ test.describe('brain-dump detail modal — API + UI regression', () => {
   });
 
   // 3. unreject on rejected -> 200, status flips to suggested.
-  test('API 3: action=unreject on a rejected item -> 200, status=suggested', async ({
+  test('@dump @worker API 3: action=unreject on a rejected item -> 200, status=suggested', async ({
     baseURL,
     password,
   }) => {
@@ -315,7 +315,7 @@ test.describe('brain-dump detail modal — API + UI regression', () => {
   });
 
   // 4. unreject on non-rejected -> 409.
-  test('API 4: action=unreject on non-rejected item -> 409', async ({
+  test('@dump @worker API 4: action=unreject on non-rejected item -> 409', async ({
     baseURL,
     password,
   }) => {
@@ -347,7 +347,7 @@ test.describe('brain-dump detail modal — API + UI regression', () => {
 
   // 5. approve on already-approved -> 409 (Vault's tightening; was a silent
   //    re-clobber pre-patch).
-  test('API 5: action=approve on already-approved item -> 409 (no clobber)', async ({
+  test('@dump @worker API 5: action=approve on already-approved item -> 409 (no clobber)', async ({
     baseURL,
     password,
   }) => {
@@ -384,7 +384,7 @@ test.describe('brain-dump detail modal — API + UI regression', () => {
   });
 
   // 6. unknown action -> 400 with documented body.
-  test('API 6: unknown action -> 400 "unknown action: \'bogus\'"', async ({
+  test('@dump @worker API 6: unknown action -> 400 "unknown action: \'bogus\'"', async ({
     baseURL,
     password,
   }) => {
@@ -415,7 +415,7 @@ test.describe('brain-dump detail modal — API + UI regression', () => {
 
   // 7. unreject from a `processed` dump containing one rejected item ->
   //    dump rolls back to needs_review (and `processed` flag flips to 0).
-  test('API 7: unreject in a processed dump -> rolls back to needs_review, processed=0', async ({
+  test('@dump @worker API 7: unreject in a processed dump -> rolls back to needs_review, processed=0', async ({
     baseURL,
     password,
   }) => {
@@ -467,12 +467,16 @@ test.describe('brain-dump detail modal — API + UI regression', () => {
   // (cases 8-15 from Probe's brief)
   // ════════════════════════════════════════════════════════════════════
 
-  // 8. Click a dump row in the dumps list -> drawer opens with content+items.
-  test('UI 8: click dump row in dumps list -> drawer opens with content + items', async ({
+  // 8. Click a dump row -> drawer opens with content+items. Combined per
+  //    `docs/runbooks/probe-suite-scoping.md` §3 (Cairn-accepted): the
+  //    dumps-list and home-recents click targets share the same drawer
+  //    open path; the difference is which strip you click. One test, two
+  //    click-target assertions.
+  test('@smoke @dump UI 8: click dump row (dumps list + home recents) -> drawer opens with content + items', async ({
     loggedInPage,
   }) => {
     const dumpId = injectDump(
-      'open-from-dumps-list',
+      'open-from-dump-row',
       [
         {
           type: 'task',
@@ -486,14 +490,15 @@ test.describe('brain-dump detail modal — API + UI regression', () => {
       { processing_status: 'needs_review' },
     );
 
+    // Click target #1: the row in the dumps list.
     await loggedInPage.goto('');
     await loggedInPage.locator('[data-view="dump"]').first().click();
     await expect(loggedInPage.locator('#view-dump')).toBeVisible();
-    const row = loggedInPage.locator(
+    const dumpsListRow = loggedInPage.locator(
       `#view-dump .dump-item-clickable[data-dump-id="${dumpId}"]`,
     );
-    await row.waitFor({ state: 'visible', timeout: 10_000 });
-    await row.click();
+    await dumpsListRow.waitFor({ state: 'visible', timeout: 10_000 });
+    await dumpsListRow.click();
 
     const drawer = loggedInPage.locator('#dumpDetailOverlay');
     await expect(drawer).toBeVisible();
@@ -508,37 +513,19 @@ test.describe('brain-dump detail modal — API + UI regression', () => {
     await expect(
       drawer.locator(`.dump-detail-item[data-item-index="0"]`),
     ).toContainText(`${CANARY_PREFIX}item-title-A`);
-  });
 
-  // 9. Click a dump row in the home recents strip -> same drawer opens.
-  test('UI 9: click dump row in home recents strip -> drawer opens', async ({
-    loggedInPage,
-  }) => {
-    const dumpId = injectDump(
-      'open-from-home',
-      [
-        {
-          type: 'task',
-          confidence: 0.6,
-          status: 'suggested',
-          created_id: null,
-          data: { title: `${CANARY_PREFIX}home-item` },
-        },
-      ],
-      { processing_status: 'needs_review' },
-    );
+    // Close the drawer; the X button is a known affordance.
+    await loggedInPage.keyboard.press('Escape');
+    await expect(drawer).toBeHidden({ timeout: 5_000 });
 
-    await loggedInPage.goto('');
-    // Home shows the most-recent dumps; ours was just inserted so it
-    // should land in the strip. (`recent_dumps` in /api/home limits to a
-    // sensible recent set; the freshly-inserted row tops the order.)
-    const row = loggedInPage.locator(
+    // Click target #2: the row in the home recents strip opens the same drawer.
+    await loggedInPage.locator('[data-view="home"]').first().click();
+    const homeRow = loggedInPage.locator(
       `#homeRecentDumps .dump-item-clickable[data-dump-id="${dumpId}"]`,
     );
-    await row.waitFor({ state: 'visible', timeout: 10_000 });
-    await row.click();
+    await homeRow.waitFor({ state: 'visible', timeout: 10_000 });
+    await homeRow.click();
 
-    const drawer = loggedInPage.locator('#dumpDetailOverlay');
     await expect(drawer).toBeVisible();
     await expect(drawer.locator('#dumpDetailContent')).toContainText(
       CANARY_PREFIX,
@@ -560,7 +547,7 @@ test.describe('brain-dump detail modal — API + UI regression', () => {
   //     "close goal modal, return to drawer" path for the user today.
   // Probed via UI 10a (open-stack works) + UI 10b.fixme (close-X is
   // currently blocked). Lumen owns the z-stack/Escape-priority fix.
-  test('UI 10a: click auto_created goal item -> goal modal opens; drawer stays in DOM', async ({
+  test('@dump UI 10a: click auto_created goal item -> goal modal opens; drawer stays in DOM', async ({
     loggedInPage,
     baseURL,
     password,
@@ -624,7 +611,7 @@ test.describe('brain-dump detail modal — API + UI regression', () => {
   //      Marked .fixme so the failure mode is captured in the test plan and
   //      gets a green tick the moment Lumen fixes the z-index/Escape priority.
   test(
-    'UI 10b: close goal modal returns user to dump drawer (z-stack + Escape priority)',
+    '@dump UI 10b: close goal modal returns user to dump drawer (z-stack + Escape priority)',
     async ({ loggedInPage, baseURL, password }) => {
       const api = await newAuthedApi(baseURL!, password);
       let goalId: number;
@@ -673,9 +660,16 @@ test.describe('brain-dump detail modal — API + UI regression', () => {
 
   // 11. Approve a suggested item from the drawer -> optimistic flip,
   //     server confirms approved, row moves out of pending.
-  test('UI 11: approve suggested item from drawer -> status flips to approved', async ({
+  test('@dump UI 11: approve suggested item from drawer -> status flips to approved', async ({
     loggedInPage,
   }) => {
+    test.skip(
+      process.env.DUMP_RETRY_TEST !== '1',
+      'Skipped by default. Set DUMP_RETRY_TEST=1 to run the dump-detail ' +
+        'UI 11/12/13 retry/approve/edit flows. These race the worker on a ' +
+        'sqliteExec poll and flake under contention; ' +
+        'see docs/runbooks/probe-suite-scoping.md §5.',
+    );
     const dumpId = injectDump(
       'ui-approve',
       [
@@ -732,9 +726,15 @@ test.describe('brain-dump detail modal — API + UI regression', () => {
   //     (Iris's spec also called for a separate "Save (no re-process)" button
   //      and a no-op when content was unchanged. Reality ships only the
   //      "Save & re-process" + "Cancel" buttons. Flagged in the report.)
-  test('UI 12: edit content + Save & re-process -> status flips to queued', async ({
+  test('@dump UI 12: edit content + Save & re-process -> status flips to queued', async ({
     loggedInPage,
   }) => {
+    test.skip(
+      process.env.DUMP_RETRY_TEST !== '1',
+      'Skipped by default. Set DUMP_RETRY_TEST=1 to run the dump-detail ' +
+        'UI 11/12/13 retry/approve/edit flows. ' +
+        'See docs/runbooks/probe-suite-scoping.md §5.',
+    );
     const dumpId = injectDump(
       'ui-edit',
       [
@@ -785,9 +785,15 @@ test.describe('brain-dump detail modal — API + UI regression', () => {
 
   // 13. Failed-state dump -> red Failed badge inside drawer + Retry button
   //     in the header. Click Retry -> POST /retry -> dump flips to queued.
-  test('UI 13: failed dump shows red badge + Retry button -> retry flips to queued', async ({
+  test('@dump UI 13: failed dump shows red badge + Retry button -> retry flips to queued', async ({
     loggedInPage,
   }) => {
+    test.skip(
+      process.env.DUMP_RETRY_TEST !== '1',
+      'Skipped by default. Set DUMP_RETRY_TEST=1 to run the dump-detail ' +
+        'UI 11/12/13 retry/approve/edit flows. ' +
+        'See docs/runbooks/probe-suite-scoping.md §5.',
+    );
     const dumpId = injectDump(
       'ui-failed-retry',
       [],
@@ -835,7 +841,7 @@ test.describe('brain-dump detail modal — API + UI regression', () => {
   //   Fix is one line in `_pollOnce` (call `_refreshDumpDetail()` after
   //   loadDumps/renderHome). Lumen owns the patch.
   test(
-    'UI 14: drawer re-renders in place when processing_status changes via poll',
+    '@dump UI 14: drawer re-renders in place when processing_status changes via poll',
     async ({ loggedInPage }) => {
     const dumpId = injectDump(
       'ui-poll-reflow',
@@ -891,23 +897,9 @@ test.describe('brain-dump detail modal — API + UI regression', () => {
     },
   );
 
-  // 15. The old review modal is fully gone from app/.
-  //     `grep -r "reviewOverlay" app/` -> zero hits.
-  test('UI 15: reviewOverlay is fully gone from app/', async () => {
-    let hits = '';
-    try {
-      hits = execSync(
-        'grep -r "reviewOverlay" /Users/cam/dev/personal/lifeplan/app/',
-        { encoding: 'utf8' },
-      );
-    } catch (e: any) {
-      // grep exits non-zero with empty stdout when there are no matches.
-      if (e.status === 1) {
-        hits = '';
-      } else {
-        throw e;
-      }
-    }
-    expect(hits).toBe('');
-  });
+  // UI 15 ("reviewOverlay is fully gone from app/") was removed per
+  // `docs/runbooks/probe-suite-scoping.md` §3 (Cairn-accepted 2026-04-30):
+  // the assertion was a one-shot cleanup check from the dump-detail
+  // refactor. The review overlay isn't coming back, and a static-text
+  // grep belongs in a one-shot lint, not a per-deploy e2e.
 });

@@ -194,7 +194,7 @@ test.afterAll(() => {
 // ──────────────────────────────────────────────────────────────────
 
 test.describe('contract: GET /api/external-systems', () => {
-  test('API 7: returns the seeded list as an array of {id, name, ...}', async ({
+  test('@goal API 7: returns the seeded list as an array of {id, name, ...}', async ({
     baseURL,
     password,
   }) => {
@@ -223,7 +223,7 @@ test.describe('contract: GET /api/external-systems', () => {
 // ──────────────────────────────────────────────────────────────────
 
 test.describe('contract: POST /api/blockers happy paths', () => {
-  test('API 1a: blocker_type=goal → 201, full enriched row', async ({ baseURL, password }) => {
+  test('@smoke @goal @blockers API 1a: blocker_type=goal → 201, full enriched row', async ({ baseURL, password }) => {
     const api = await newAuthedApi(baseURL!, password);
     try {
       const target = injectGoal(uniqueLabel('post-goal-target'));
@@ -262,7 +262,7 @@ test.describe('contract: POST /api/blockers happy paths', () => {
     }
   });
 
-  test('API 1b: blocker_type=task → 201, full enriched row', async ({ baseURL, password }) => {
+  test('@goal @blockers API 1b: blocker_type=task → 201, full enriched row', async ({ baseURL, password }) => {
     const api = await newAuthedApi(baseURL!, password);
     try {
       const target = injectGoal(uniqueLabel('post-task-target'));
@@ -287,7 +287,7 @@ test.describe('contract: POST /api/blockers happy paths', () => {
     }
   });
 
-  test('API 1c: blocker_type=external_system → 201, full enriched row', async ({ baseURL, password }) => {
+  test('@goal @blockers API 1c: blocker_type=external_system → 201, full enriched row', async ({ baseURL, password }) => {
     const api = await newAuthedApi(baseURL!, password);
     try {
       const target = injectGoal(uniqueLabel('post-xs-target'));
@@ -318,7 +318,7 @@ test.describe('contract: POST /api/blockers happy paths', () => {
 // ──────────────────────────────────────────────────────────────────
 
 test.describe('contract: POST /api/blockers failure matrix', () => {
-  test('API 2: self-block → 422 with {error: "a goal cannot block itself"}', async ({
+  test('@goal @blockers API 2: self-block → 422 with {error: "a goal cannot block itself"}', async ({
     baseURL,
     password,
   }) => {
@@ -341,7 +341,7 @@ test.describe('contract: POST /api/blockers failure matrix', () => {
     }
   });
 
-  test('API 3: duplicate edge → 201 then 409 with {error, id}', async ({ baseURL, password }) => {
+  test('@goal @blockers API 3: duplicate edge → 201 then 409 with {error, id}', async ({ baseURL, password }) => {
     const api = await newAuthedApi(baseURL!, password);
     try {
       const target = injectGoal(uniqueLabel('dup-target'));
@@ -367,7 +367,7 @@ test.describe('contract: POST /api/blockers failure matrix', () => {
     }
   });
 
-  test('API 4: bad goal_id → 404 "goal not found"', async ({ baseURL, password }) => {
+  test('@goal @blockers API 4: bad goal_id → 404 "goal not found"', async ({ baseURL, password }) => {
     const api = await newAuthedApi(baseURL!, password);
     try {
       const blk = injectGoal(uniqueLabel('bad-goal-blocker'));
@@ -382,75 +382,78 @@ test.describe('contract: POST /api/blockers failure matrix', () => {
     }
   });
 
-  test('API 5: bad blocker_<type>_id → 404 "<type> not found" for each type', async ({
+  // Parametrised per `docs/runbooks/probe-suite-scoping.md` §3
+  // (Cairn-accepted): the three blocker_<type>_id 404 cases share one
+  // assertion shape, so iterate rather than three separate awaits with
+  // boilerplate.
+  test('@goal @blockers API 5: bad blocker_<type>_id → 404 "<type> not found" for each type', async ({
     baseURL,
     password,
   }) => {
     const api = await newAuthedApi(baseURL!, password);
     try {
       const target = injectGoal(uniqueLabel('bad-blocker-target'));
-
-      // goal
-      const rGoal = await api.post('api/blockers', {
-        headers: { 'Content-Type': 'application/json' },
-        data: { goal_id: target, blocker_type: 'goal', blocker_goal_id: 999_999_999 },
-      });
-      expect(rGoal.status()).toBe(404);
-      expect((await rGoal.json()).error).toBe('goal not found');
-
-      // task
-      const rTask = await api.post('api/blockers', {
-        headers: { 'Content-Type': 'application/json' },
-        data: { goal_id: target, blocker_type: 'task', blocker_task_id: 999_999_999 },
-      });
-      expect(rTask.status()).toBe(404);
-      expect((await rTask.json()).error).toBe('task not found');
-
-      // external_system
-      const rXs = await api.post('api/blockers', {
-        headers: { 'Content-Type': 'application/json' },
-        data: {
-          goal_id: target,
+      const cases: Array<{
+        blocker_type: 'goal' | 'task' | 'external_system';
+        idField: string;
+        expectedError: string;
+      }> = [
+        { blocker_type: 'goal', idField: 'blocker_goal_id', expectedError: 'goal not found' },
+        { blocker_type: 'task', idField: 'blocker_task_id', expectedError: 'task not found' },
+        {
           blocker_type: 'external_system',
-          blocker_external_system_id: 999_999_999,
+          idField: 'blocker_external_system_id',
+          expectedError: 'external_system not found',
         },
-      });
-      expect(rXs.status()).toBe(404);
-      expect((await rXs.json()).error).toBe('external_system not found');
+      ];
+      for (const c of cases) {
+        const r = await api.post('api/blockers', {
+          headers: { 'Content-Type': 'application/json' },
+          data: {
+            goal_id: target,
+            blocker_type: c.blocker_type,
+            [c.idField]: 999_999_999,
+          },
+        });
+        expect(r.status(), `blocker_type=${c.blocker_type} should 404`).toBe(404);
+        expect((await r.json()).error).toBe(c.expectedError);
+      }
     } finally {
       await api.dispose();
     }
   });
 
-  test('API 6: missing fields → 400 with field-named error', async ({ baseURL, password }) => {
+  // Parametrised per §3: the missing-field cases share one assertion
+  // shape (400 + field-named error). Two examples (one per required
+  // field) are enough to cover the Cartesian we used to enumerate.
+  test('@goal @blockers API 6: missing required fields → 400 with field-named error', async ({
+    baseURL,
+    password,
+  }) => {
     const api = await newAuthedApi(baseURL!, password);
     try {
-      // missing goal_id
-      const r1 = await api.post('api/blockers', {
-        headers: { 'Content-Type': 'application/json' },
-        data: { blocker_type: 'goal', blocker_goal_id: 1 },
-      });
-      expect(r1.status()).toBe(400);
-      expect((await r1.json()).error).toBe('goal_id is required');
-
-      // missing blocker_type
-      const target = injectGoal(uniqueLabel('miss-type'));
-      const r2 = await api.post('api/blockers', {
-        headers: { 'Content-Type': 'application/json' },
-        data: { goal_id: target },
-      });
-      expect(r2.status()).toBe(400);
-      expect((await r2.json()).error).toBe('blocker_type is required');
-
-      // missing matching blocker_<type>_id
-      const r3 = await api.post('api/blockers', {
-        headers: { 'Content-Type': 'application/json' },
-        data: { goal_id: target, blocker_type: 'task' },
-      });
-      expect(r3.status()).toBe(400);
-      expect((await r3.json()).error).toBe(
-        "blocker_task_id is required for blocker_type='task'",
-      );
+      const target = injectGoal(uniqueLabel('miss-required'));
+      const cases: Array<{
+        body: Record<string, unknown>;
+        expectedError: string;
+      }> = [
+        {
+          body: { blocker_type: 'goal', blocker_goal_id: 1 },
+          expectedError: 'goal_id is required',
+        },
+        {
+          body: { goal_id: target, blocker_type: 'task' },
+          expectedError: "blocker_task_id is required for blocker_type='task'",
+        },
+      ];
+      for (const c of cases) {
+        const r = await api.post('api/blockers', {
+          headers: { 'Content-Type': 'application/json' },
+          data: c.body,
+        });
+        expect(r.status()).toBe(400);
+        expect((await r.json()).error).toBe(c.expectedError);
+      }
     } finally {
       await api.dispose();
     }
@@ -462,7 +465,7 @@ test.describe('contract: POST /api/blockers failure matrix', () => {
 // ──────────────────────────────────────────────────────────────────
 
 test.describe('UI: goal-detail growability', () => {
-  test('UI 8: goal detail shows + Task chip and + Blocker chip in section headers', async ({
+  test('@smoke @goal @blockers UI 8: goal detail shows + Task chip and + Blocker chip in section headers', async ({
     loggedInPage,
     mountPrefix,
   }) => {
@@ -484,7 +487,7 @@ test.describe('UI: goal-detail growability', () => {
     await expect(page.locator('#goalDetailOverlay.visible')).toBeVisible();
   });
 
-  test('UI 9: + Task chip → form expands, submit prepends row + focus-flash, modal stays open', async ({
+  test('@goal @blockers UI 9: + Task chip → form expands, submit prepends row + focus-flash, modal stays open', async ({
     loggedInPage,
     mountPrefix,
   }) => {
@@ -523,7 +526,7 @@ test.describe('UI: goal-detail growability', () => {
     await expect(page.locator('#goalDetailOverlay.visible')).toBeVisible();
   });
 
-  test('UI 10: zero-task goal pre-expands the inline task form (empty-state-as-action)', async ({
+  test('@goal @blockers UI 10: zero-task goal pre-expands the inline task form (empty-state-as-action)', async ({
     loggedInPage,
     mountPrefix,
   }) => {
@@ -540,7 +543,7 @@ test.describe('UI: goal-detail growability', () => {
     await expect(page.locator('#growTaskTitle')).toBeFocused({ timeout: 2_000 });
   });
 
-  test('UI 11: + Blocker chip → picker opens; type-ahead returns results across all 3 types with badges', async ({
+  test('@goal @blockers UI 11: + Blocker chip → picker opens; type-ahead returns results across all 3 types with badges', async ({
     loggedInPage,
     mountPrefix,
   }) => {
@@ -585,7 +588,7 @@ test.describe('UI: goal-detail growability', () => {
     await expect(page.locator('#goalDetailOverlay.visible')).toBeVisible();
   });
 
-  test('UI 12: current goal is greyed out / disabled in picker results', async ({
+  test('@goal @blockers UI 12: current goal is greyed out / disabled in picker results', async ({
     loggedInPage,
     mountPrefix,
   }) => {
@@ -611,7 +614,7 @@ test.describe('UI: goal-detail growability', () => {
     await expect(selfRow).toHaveAttribute('aria-disabled', 'true');
   });
 
-  test('UI 13: pick a task → notes textarea reveals → Save → blocker appears, picker closes, modal stays open', async ({
+  test('@goal @blockers UI 13: pick a task → notes textarea reveals → Save → blocker appears, picker closes, modal stays open', async ({
     loggedInPage,
     mountPrefix,
   }) => {
@@ -668,7 +671,7 @@ test.describe('UI: goal-detail growability', () => {
     await expect(page.locator('#goalDetailOverlay.visible')).toBeVisible();
   });
 
-  test('UI 14: same triple twice → 409 → picker closes → toast + flash existing row', async ({
+  test('@goal @blockers UI 14: same triple twice → 409 → picker closes → toast + flash existing row', async ({
     loggedInPage,
     mountPrefix,
   }) => {
@@ -735,7 +738,7 @@ test.describe('UI: goal-detail growability', () => {
     await expect(page.locator('#goalDetailOverlay.visible')).toBeVisible();
   });
 
-  test('UI 15: external_system search with no match → "Coming soon" signpost shown', async ({
+  test('@goal @blockers UI 15: external_system search with no match → "Coming soon" signpost shown', async ({
     loggedInPage,
     mountPrefix,
   }) => {
@@ -768,7 +771,7 @@ test.describe('UI: goal-detail growability', () => {
     await expect(page.locator('#goalDetailOverlay.visible')).toBeVisible();
   });
 
-  test('UI 16: modal-stays-open invariant — every Add action keeps #goalDetailOverlay visible', async ({
+  test('@goal @blockers UI 16: modal-stays-open invariant — every Add action keeps #goalDetailOverlay visible', async ({
     loggedInPage,
     mountPrefix,
   }) => {

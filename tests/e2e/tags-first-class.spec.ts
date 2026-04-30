@@ -182,7 +182,7 @@ test.afterAll(() => {
 // ════════════════════════════════════════════════════════════════════
 
 test.describe('POST /api/tags', () => {
-  test('contract: 201 on a fresh name; 200 on a case-insensitive duplicate with the existing row', async ({
+  test('@smoke @tags contract: POST 201 on a fresh name; 200 on a case-insensitive duplicate with the existing row', async ({
     loggedInPage,
     mountPrefix,
   }) => {
@@ -217,7 +217,7 @@ test.describe('POST /api/tags', () => {
 // ════════════════════════════════════════════════════════════════════
 
 test.describe('PUT /api/tags/<id>', () => {
-  test('contract: 200 on rename to a free name; 409 with {error, id} on collision with another tag', async ({
+  test('@tags contract: PUT 200 on rename to a free name; 409 with {error, id} on collision with another tag', async ({
     loggedInPage,
     mountPrefix,
   }) => {
@@ -252,7 +252,7 @@ test.describe('PUT /api/tags/<id>', () => {
 // ════════════════════════════════════════════════════════════════════
 
 test.describe('POST /api/tags/<id>/merge', () => {
-  test('contract: merge re-points junctions, drops source, dedups overlap (no duplicate junction row)', async ({
+  test('@tags contract: merge re-points junctions, drops source, dedups overlap (no duplicate junction row)', async ({
     loggedInPage,
     mountPrefix,
   }) => {
@@ -313,7 +313,7 @@ test.describe('POST /api/tags/<id>/merge', () => {
 // ════════════════════════════════════════════════════════════════════
 
 test.describe('DELETE /api/tags/<id>', () => {
-  test('contract: 204 + cascades to junction rows in three different tables', async ({
+  test('@tags contract: DELETE 204 + cascades to junction rows in three different tables', async ({
     loggedInPage,
     mountPrefix,
   }) => {
@@ -382,7 +382,7 @@ test.describe('DELETE /api/tags/<id>', () => {
 // ════════════════════════════════════════════════════════════════════
 
 test.describe('GET /api/tags', () => {
-  test('contract: each row carries usage_count + breakdown across the six junctions', async ({
+  test('@smoke @tags contract: GET /api/tags each row carries usage_count + breakdown across the six junctions', async ({
     loggedInPage,
     mountPrefix,
   }) => {
@@ -431,7 +431,7 @@ test.describe('GET /api/tags', () => {
 // ════════════════════════════════════════════════════════════════════
 
 test.describe('GET /api/tags/<id>/usages', () => {
-  test('contract: payload has tag + usages with all six sections keyed', async ({
+  test('@tags contract: GET /api/tags/<id>/usages payload has tag + usages with all six sections keyed', async ({
     loggedInPage,
     mountPrefix,
   }) => {
@@ -473,7 +473,7 @@ test.describe('GET /api/tags/<id>/usages', () => {
 // ════════════════════════════════════════════════════════════════════
 
 test.describe('Chip click → drawer (cross-app)', () => {
-  test('UI: clicking a tag chip on a goal card opens the drawer for that tag', async ({
+  test('@tags UI: clicking a tag chip on a goal card opens the drawer for that tag', async ({
     loggedInPage,
     mountPrefix,
   }) => {
@@ -514,7 +514,7 @@ test.describe('Chip click → drawer (cross-app)', () => {
 // ════════════════════════════════════════════════════════════════════
 
 test.describe('Drawer → entity → back to drawer', () => {
-  test('UI: clicking a drawer item opens the entity, closing it leaves the drawer open', async ({
+  test('@tags UI: clicking a drawer item opens the entity, closing it leaves the drawer open', async ({
     loggedInPage,
     mountPrefix,
   }) => {
@@ -575,7 +575,7 @@ test.describe('Drawer → entity → back to drawer', () => {
 // ════════════════════════════════════════════════════════════════════
 
 test.describe('Tags view — inline add', () => {
-  test('UI: adding a fresh name appends a new row (201 path)', async ({
+  test('@tags UI: adding a fresh name appends a new row (201 path)', async ({
     loggedInPage,
   }) => {
     const tagName = uniqueTagName('inline-fresh');
@@ -596,7 +596,7 @@ test.describe('Tags view — inline add', () => {
     await expect(input).toHaveValue('');
   });
 
-  test('UI: adding an existing name focuses the existing row with highlight-flash (200 path)', async ({
+  test('@tags UI: adding an existing name focuses the existing row with highlight-flash (200 path)', async ({
     loggedInPage,
   }) => {
     // Seed an existing tag directly.
@@ -650,7 +650,7 @@ test.describe('Tags view — inline add', () => {
 // cascade.
 
 test.describe('Tag delete flow — Probe-found gap', () => {
-  test('UI: clicking Delete in the confirm dialog returns 204 and removes the tag (bare-fetch DELETE survives the content-type gate)', async ({
+  test('@tags UI: clicking Delete in the confirm dialog returns 204 and removes the tag (bare-fetch DELETE survives the content-type gate)', async ({
     loggedInPage,
   }) => {
     // Seed an unused canary tag so we can target it in the UI.
@@ -712,7 +712,7 @@ test.describe('Tag delete flow — Probe-found gap', () => {
 // ════════════════════════════════════════════════════════════════════
 
 test.describe('Rename collision → Merge pivot', () => {
-  test('UI: renaming A to B collides → inline error → clicking "Merge instead?" opens merge dialog pre-targeting B', async ({
+  test('@tags UI: renaming A to B collides → inline error → clicking "Merge instead?" opens merge dialog pre-targeting B', async ({
     loggedInPage,
   }) => {
     const a = uniqueTagName('collide-a');

@@ -214,7 +214,7 @@ test.describe('_auto_create_item status-truthfulness (Invariant 1)', () => {
   // Case 1: tag with is_new=False AND matched_existing_id=None
   //         -> fall-through to create-new -> status=approved with real id.
   // ────────────────────────────────────────────────────────────────
-  test('hit-list 1: tag is_new=False + no match -> falls through, status=approved with real id', async ({
+  test('@worker @dump @tags hit-list 1: tag is_new=False + no match -> falls through, status=approved with real id', async ({
     baseURL,
     password,
   }) => {
@@ -261,7 +261,7 @@ test.describe('_auto_create_item status-truthfulness (Invariant 1)', () => {
   // Case 2: person_mention with person_id=None
   //         -> fall-through to create-new from person_name.
   // ────────────────────────────────────────────────────────────────
-  test('hit-list 2: person_mention with null person_id -> falls through, status=approved + real people row', async ({
+  test('@worker @dump @people hit-list 2: person_mention with null person_id -> falls through, status=approved + real people row', async ({
     baseURL,
     password,
   }) => {
@@ -308,7 +308,7 @@ test.describe('_auto_create_item status-truthfulness (Invariant 1)', () => {
   //         -> log + None -> status=failed (NEW behaviour).
   //         Pre-patch: silently auto_created with created_id=null.
   // ────────────────────────────────────────────────────────────────
-  test('hit-list 3: goal_link with null goal_id -> status=failed, created_id=null (NOT auto_created)', async ({
+  test('@worker @dump @goal hit-list 3: goal_link with null goal_id -> status=failed, created_id=null (NOT auto_created)', async ({
     baseURL,
     password,
   }) => {
@@ -350,7 +350,7 @@ test.describe('_auto_create_item status-truthfulness (Invariant 1)', () => {
   //         -> MalformedItemData -> caught -> log + None -> status=failed.
   //         Pre-patch: KeyError into bare-except -> silent auto_created.
   // ────────────────────────────────────────────────────────────────
-  test('hit-list 4: task with missing title -> status=failed (was silently auto_created pre-patch)', async ({
+  test('@worker @dump hit-list 4: task with missing title -> status=failed (was silently auto_created pre-patch)', async ({
     baseURL,
     password,
   }) => {
@@ -387,7 +387,7 @@ test.describe('_auto_create_item status-truthfulness (Invariant 1)', () => {
   // ────────────────────────────────────────────────────────────────
   // Case 5: knowledge with missing `title` -> same shape as case 4.
   // ────────────────────────────────────────────────────────────────
-  test('hit-list 5: knowledge with missing title -> status=failed', async ({
+  test('@worker @dump @knowledge hit-list 5: knowledge with missing title -> status=failed', async ({
     baseURL,
     password,
   }) => {
@@ -428,7 +428,7 @@ test.describe('_auto_create_item status-truthfulness (Invariant 1)', () => {
   //          Pre-patch: silently fell past every elif -> status=approved
   //             with created_id=null.
   // ────────────────────────────────────────────────────────────────
-  test('hit-list 6a (approve surface): unknown itype -> 500 with class-name body, item status untouched', async ({
+  test('@worker @dump hit-list 6a (approve surface): unknown itype -> 500 with class-name body, item status untouched', async ({
     baseURL,
     password,
   }) => {
@@ -477,7 +477,7 @@ test.describe('_auto_create_item status-truthfulness (Invariant 1)', () => {
   //          FORCE_FAIL_TEST in background-processing.spec.ts; we just
   //          verify the function-level invariant here.
   // ────────────────────────────────────────────────────────────────
-  test('hit-list 6b (worker surface): _auto_create_item raises UnknownItemType (never silent None)', async () => {
+  test('@worker @dump hit-list 6b (worker surface): _auto_create_item raises UnknownItemType (never silent None)', async () => {
     // Drive a Python harness that imports the function and calls it on a
     // fabricated item. Exit code 0 + "RAISED:UnknownItemType" on stdout
     // proves the dispatcher else raises rather than returning None.
@@ -514,7 +514,7 @@ finally:
   // (Caller-obligation check: `failed` doesn't reopen needs_review, but
   // it doesn't prematurely close it either.)
   // ────────────────────────────────────────────────────────────────
-  test('caller obligation: failed item alongside pending suggestion keeps dump in needs_review', async ({
+  test('@worker @dump caller obligation: failed item alongside pending suggestion keeps dump in needs_review', async ({
     baseURL,
     password,
   }) => {

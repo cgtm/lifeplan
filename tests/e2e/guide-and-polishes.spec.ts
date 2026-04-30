@@ -243,7 +243,7 @@ test.afterAll(() => {
 // ══════════════════════════════════════════════════════════════════
 
 test.describe('A. user guide — API contract', () => {
-  test('GET /api/help/user-guide authed → 200, text/plain, body matches the file', async ({
+  test('@smoke @guide GET /api/help/user-guide authed → 200, text/plain, body matches the file', async ({
     baseURL,
     password,
   }) => {
@@ -270,7 +270,7 @@ test.describe('A. user guide — API contract', () => {
     }
   });
 
-  test('GET /api/help/user-guide unauthed → 401 (auth-gated like the rest of /api)', async ({
+  test('@guide GET /api/help/user-guide unauthed → 401 (auth-gated like the rest of /api)', async ({
     apiCtx,
   }) => {
     const r = await apiCtx.get('api/help/user-guide');
@@ -279,7 +279,7 @@ test.describe('A. user guide — API contract', () => {
 });
 
 test.describe('A. user guide — UI: open and content', () => {
-  test('desktop nav has a Help link → opens modal with title and ×', async ({ loggedInPage: page }) => {
+  test('@smoke @guide desktop nav has a Help link → opens modal with title and ×', async ({ loggedInPage: page }) => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto('/');
 
@@ -297,7 +297,7 @@ test.describe('A. user guide — UI: open and content', () => {
     await expect(page.locator('#helpBody .help-content')).toBeVisible({ timeout: 5000 });
   });
 
-  test('mobile More menu has Help → opens same modal', async ({ loggedInPage: page }) => {
+  test('@guide mobile More menu has Help → opens same modal', async ({ loggedInPage: page }) => {
     await page.setViewportSize({ width: 390, height: 844 }); // iPhone-ish
     await page.goto('/');
 
@@ -314,7 +314,7 @@ test.describe('A. user guide — UI: open and content', () => {
     await expect(page.locator('#helpBody .help-content')).toBeVisible({ timeout: 5000 });
   });
 
-  test('markdown renders: h1, lists, fenced code, links, and HTML is escaped', async ({
+  test('@guide markdown renders: h1, lists, fenced code, links, and HTML is escaped', async ({
     loggedInPage: page,
   }) => {
     await page.goto('/');
@@ -378,7 +378,7 @@ test.describe('A. user guide — UI: open and content', () => {
     expect(escaped.hasEscapedText, 'raw `<` should render as text').toBe(true);
   });
 
-  test('close paths: × / click-outside / Esc — all close, body scroll OK', async ({
+  test('@guide close paths: × / click-outside / Esc — all close, body scroll OK', async ({
     loggedInPage: page,
   }) => {
     await page.goto('/');
@@ -411,7 +411,7 @@ test.describe('A. user guide — UI: open and content', () => {
     expect(['visible', 'auto', '']).toContain(bodyOverflow);
   });
 
-  test('Cmd+F-able body: a known phrase from the guide is in the rendered DOM', async ({
+  test('@guide Cmd+F-able body: a known phrase from the guide is in the rendered DOM', async ({
     loggedInPage: page,
   }) => {
     await page.goto('/');
@@ -430,7 +430,7 @@ test.describe('A. user guide — UI: open and content', () => {
 // ══════════════════════════════════════════════════════════════════
 
 test.describe('B. tag chips have ↗ affordance', () => {
-  test('Goals view: every visible .tag-chip carries the ↗ ::after glyph', async ({
+  test('@tags @goal Goals view: every visible .tag-chip carries the ↗ ::after glyph', async ({
     loggedInPage: page,
   }) => {
     // Tag chips render via tagsHtml(tags) on goal/knowledge/journal cards.
@@ -467,7 +467,7 @@ test.describe('B. tag chips have ↗ affordance', () => {
     }
   });
 
-  test('CSS: .tag-chip-wrap variant suppresses the ::after glyph', async ({
+  test('@tags CSS: .tag-chip-wrap variant suppresses the ::after glyph', async ({
     loggedInPage: page,
   }) => {
     // No surface currently renders .tag-chip-wrap; assert the CSS rule
@@ -494,7 +494,7 @@ test.describe('B. tag chips have ↗ affordance', () => {
 // ══════════════════════════════════════════════════════════════════
 
 test.describe('C. persistent undo-resolve chip', () => {
-  test('home: resolve a hero blocker → toast + .undo-resolve-chip with name', async ({
+  test('@blockers home: resolve a hero blocker → toast + .undo-resolve-chip with name', async ({
     loggedInPage: page,
   }) => {
     // Seed: a blocker on the hero goal (id=1).
@@ -523,7 +523,7 @@ test.describe('C. persistent undo-resolve chip', () => {
     }
   });
 
-  test('home: clicking the chip un-resolves and the chip disappears', async ({
+  test('@blockers home: clicking the chip un-resolves and the chip disappears', async ({
     loggedInPage: page,
   }) => {
     const blockerGoal = injectGoal(uniqueLabel('chip-undo-goal'));
@@ -553,7 +553,7 @@ test.describe('C. persistent undo-resolve chip', () => {
       .toBe(0);
   });
 
-  test('goal-detail: chip appears INSIDE the modal, not on the hero', async ({
+  test('@blockers @goal goal-detail: chip appears INSIDE the modal, not on the hero', async ({
     loggedInPage: page,
   }) => {
     // Seed a fresh goal and attach a blocker so we can open it in the
@@ -589,7 +589,7 @@ test.describe('C. persistent undo-resolve chip', () => {
     await expect(chipOnHome).toHaveCount(0);
   });
 
-  test('chip survives navigate-away-and-back within the 30-min window', async ({
+  test('@blockers chip survives navigate-away-and-back within the 30-min window', async ({
     loggedInPage: page,
   }) => {
     const blockerGoal = injectGoal(uniqueLabel('persist-goal'));
@@ -624,7 +624,7 @@ test.describe('C. persistent undo-resolve chip', () => {
 // ══════════════════════════════════════════════════════════════════
 
 test.describe('D. prompt secondary button reads "Noted"', () => {
-  test('knowledge_gap prompt: secondary button reads "Noted"', async ({
+  test('@knowledge knowledge_gap prompt: secondary button reads "Noted"', async ({
     loggedInPage: page,
   }) => {
     const title = uniqueLabel('kg-title');
@@ -646,7 +646,7 @@ test.describe('D. prompt secondary button reads "Noted"', () => {
     await expect(card).not.toContainText('Got it');
   });
 
-  test('blocker_awareness prompt: secondary button reads "Noted"', async ({
+  test('@blockers blocker_awareness prompt: secondary button reads "Noted"', async ({
     loggedInPage: page,
   }) => {
     const goalId = injectGoal(uniqueLabel('ba-goal'));
@@ -674,7 +674,7 @@ test.describe('D. prompt secondary button reads "Noted"', () => {
 // ══════════════════════════════════════════════════════════════════
 
 test.describe('E. deploy.sh --with-db gate', () => {
-  test('refuses --with-db without --force (non-zero exit, REFUSED message)', () => {
+  test('@guide refuses --with-db without --force (non-zero exit, REFUSED message)', () => {
     // SAFE: the refusal path exits before any rsync / ssh. We run it
     // synchronously and capture stdout+stderr+exit.
     let stdout = '';
@@ -698,7 +698,7 @@ test.describe('E. deploy.sh --with-db gate', () => {
     expect(combined).toMatch(/Pass --force to confirm/);
   });
 
-  test('with --force: script reads the flag and reaches the 3-second countdown branch (parse-only)', () => {
+  test('@guide with --force: script reads the flag and reaches the 3-second countdown branch (parse-only)', () => {
     // Per Probe's constraints: do NOT actually run --with-db --force, it
     // would touch prod. Verify by parsing the script that the success
     // path is wired correctly:
