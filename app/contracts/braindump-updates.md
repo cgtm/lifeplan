@@ -1,9 +1,9 @@
 # Contract: braindump-updates
 
 **Authors:** Vault (server + worker), supervised by Cairn
-**Status:** proposed
+**Status:** accepted
 **Last updated:** 2026-04-23
-**Cairn approval:** pending — sign off before any Phase 1b code lands.
+**Cairn approved 2026-04-30** — Vault unblocked for Phase 1b after Reed's Phase 1a verification. Five open questions resolved inline in §10; no substantive changes required to the body of the contract.
 
 Spec for Iris's brain-dump-triggered-updates plan
 ([`docs/ux-design/2026-04-30-braindump-updates-plan.md`](../../docs/ux-design/2026-04-30-braindump-updates-plan.md)).
@@ -67,6 +67,11 @@ Per Iris's plan §"In scope (Phase 1)" and Cam's three product sign-offs
   augments knowledge it should land as a new `knowledge` create item,
   not an update. The LLM is told this in the prompt; a stray
   `knowledge_update` from prompt drift is dropped at parse time.
+- `blocker_note_append`. Iris's plan listed it; Cairn ratified the
+  drop for v1 per §10.3 (low-frequency append target; structural cost
+  to add later is small). If first-fortnight real-world use shows
+  Cam wanting to append to blocker notes via dump, Vault adds it as
+  a follow-up — parallel shape to `person_note_append`.
 - Status transitions other than `active → completed | cancelled`.
 - Reverse transitions (`completed → active` etc.).
 - `tasks.title` / `goals.title` rewrites.
@@ -239,6 +244,15 @@ generic prose. Apply helpers UPDATE the column the schema actually has
 — no schema-rename needed. The LLM prompt frames both as "append to
 the entity's free-text field" so the model doesn't have to track the
 column name.
+
+**Rendering-vs-storage gap (note for Lumen).** The wire/contract uses
+the schema column name (`description` for tasks and goals). The
+user-facing label in the dump-detail row should still read "Notes" /
+"Note appended" — Cam's mental model is "notes," and the schema name
+is an implementation detail. The translation lives in Lumen's row
+renderer, not in the wire shape. Concretely: a `task_update` with
+`field: "description"` renders as "Append note to *Book flights to
+Seoul*" in the row title, not "Append description to ..."
 
 **`tasks.completed_at` / `goals.completed_at`.** When `field=status`
 transitions to `completed`, the apply helper ALSO sets
@@ -761,37 +775,81 @@ the `new_value` content. Never `note_text`. Never the entity's
 has a task #42 whose status was 'completed' when an update tried to
 set it to 'completed'" — that's id-and-enum, no user content.
 
-## 10. Open questions for Cairn
+## 10. Open questions for Cairn — resolved 2026-04-30
 
-Five questions, each with Vault's leaning called out.
+Five questions, with Cairn's decision on each.
 
-1. **Per-entity types vs unified `item_update`.** Vault chose
-   per-entity (§1). Cleaner dispatch, cleaner few-shot examples,
-   matches `_auto_create_item`'s pattern. Cairn: ratify or push to
-   unified?
-2. **Separate file vs extending `auto-create-item.md`.** Vault chose
-   separate file (rationale at top). The two contracts are tightly
-   coupled; reading them together is the workflow. Cairn: keep split,
-   or fold into one file at the cost of length?
-3. **`blocker_note_append` collapse.** Iris's plan included
-   `blocker_update.notes` (append). Vault's per-entity type list
-   collapses to four (no blocker note append) because (a) the
-   dispatch text from Cam reads four explicit shapes, and (b)
-   blocker notes are the lowest-frequency append target in real use.
-   Cairn: ratify the collapse, or insist on `blocker_note_append` as
-   the fifth type to match Iris's vocabulary?
-4. **Drift body shape on 409.** Vault chose `{"error": "drift",
-   "field", "expected_value", "current_value"}`. The unlink-drift
-   precedent uses `{"error": "state changed", "new_path",
-   "reasons"}`. Different body shape because the surfaced UI is
-   different (drift here is per-field; unlink drift is per-path),
-   but Cairn might prefer normalised vocabulary across both. Vault's
-   preference: keep distinct — the field-name signal carries
-   meaningful UI behaviour.
-5. **Prompt context cap on open tasks.** Vault chose 50 most-recent
-   active tasks. Iris's plan says "drop the cap if Cam reports the
-   LLM missing matches." Cairn: 50 is a guess; ratify, or specify a
-   different starting cap?
+1. **Per-entity types vs unified `item_update`.** **DECISION:
+   ratified — per-entity types.** The type-as-dispatch-key pattern
+   matches `_auto_create_item` exactly; reading the two helpers
+   side-by-side is part of the workflow and consistency wins. Unified
+   shape would force every branch through `data["target_type"]`
+   indirection for zero readability gain and makes the few-shot
+   examples noisier. Per-entity it is.
+
+2. **Separate file vs extending `auto-create-item.md`.** **DECISION:
+   ratified — separate file.** `auto-create-item.md` is already 700
+   lines spanning create / retry / unreject / unlink. Folding update
+   semantics in pushes it past the one-page contract threshold into
+   reference-manual territory. Update-path invariants (drift, no
+   auto-apply, no created entity) are materially different from
+   create-path invariants and easier to reason about side-by-side
+   than woven in. Cross-references at the top of each file are
+   sufficient; readers land on the right one from Iris's plan.
+
+3. **`blocker_note_append` collapse.** **DECISION: ratified — drop
+   it for v1.** Vault's two reasons hold: Cam's dispatch text reads
+   four explicit shapes, and blocker notes are the lowest-frequency
+   append target in real use. The structural cost of adding it later
+   is small (one type, one prompt example, one apply branch — all
+   parallel to `person_note_append`). If first-fortnight real-world
+   use shows Cam wanting to append to blocker notes via dump,
+   Vault adds it as a follow-up; until then YAGNI. Logged as a known
+   deferred item in §"What's out of scope (Phase 1)" — Vault: extend
+   the existing `blocker_resolve` bullet there to also note "and
+   `blocker_note_append`, deferred per §10.3" so future readers find
+   the trail.
+
+4. **Drift body shape on 409.** **DECISION: keep distinct.**
+   The two surfaces carry different signals:
+   - **Unlink drift** (`auto-create-item.md`): "the heuristic's verdict
+     changed between preview and confirm." The body answers *which
+     path now and why* (`new_path`, `reasons`).
+   - **Update drift** (this contract): "this specific field's value
+     changed between extraction and approve." The body answers *which
+     field, expected what, found what* (`field`, `expected_value`,
+     `current_value`).
+
+   Normalising to one shape would either lose the field-level signal
+   the update UI needs to render the per-row inline error, or bloat
+   the unlink shape with empty `field`/`expected_value` slots that
+   never carry meaning. The shared invariant is the **HTTP signal**
+   (409 = "the state you assumed has shifted"), not the body shape.
+   Cairn's note for future contracts: when you add a third drift-shaped
+   surface, copy *the conceptual contract* (409 + body that names
+   what shifted) — not the literal field names of either existing
+   case. Each surface speaks its own language; the practice is the
+   shared shape, not the shared schema.
+
+5. **Prompt context cap on open tasks.** **DECISION: ratified — 50
+   most-recently-updated active tasks.** Reasoning: Cam's active-task
+   count today sits in the low-double-digits; 50 covers all of it
+   with headroom and survives a year of growth without re-tuning. The
+   "most-recently-updated" axis is the right tiebreaker because dumps
+   are far more likely to mention recently-touched work than dormant
+   tasks. Token budget is fine — 50 rows × ~80 chars/row ≈ 4 KB,
+   negligible against the existing prompt. Revisit only if (a) Cam
+   reports the LLM missing matches that ARE in the open-tasks set
+   (cap raise), or (b) prompts start truncating (cap lower or move
+   to retrieval). Both are real-world signals, not pre-tuning.
+
+   **Sub-note for Vault:** the sort key is `tasks.updated_at DESC`,
+   not `tasks.created_at DESC`. Restating because the difference
+   matters when Cam edits an old task — that edit should pull it
+   into context, and `updated_at` is the column that captures it.
+
+The blocker-resolve cap of 30 (§7) is ratified by extension — same
+reasoning, smaller working set.
 
 ## 11. Open questions for Cam
 
