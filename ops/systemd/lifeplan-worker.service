@@ -5,8 +5,8 @@ Wants=lifeplan.service
 
 [Service]
 Type=simple
-User=your-user
-Group=your-user
+User=lifeplan
+Group=lifeplan
 WorkingDirectory=/opt/lifeplan
 ExecStart=/usr/bin/python3.14 -m app.worker
 Restart=on-failure

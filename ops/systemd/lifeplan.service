@@ -4,8 +4,8 @@ After=network.target
 
 [Service]
 Type=simple
-User=your-user
-Group=your-user
+User=lifeplan
+Group=lifeplan
 WorkingDirectory=/opt/lifeplan
 ExecStart=/usr/bin/python3.14 -m app.server
 Restart=on-failure

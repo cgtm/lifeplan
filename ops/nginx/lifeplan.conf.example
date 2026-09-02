@@ -1,3 +1,10 @@
+# lifeplan -- nginx vhost template. Real values are gitignored (deploy.conf);
+# this file ships with a placeholder domain. server-setup.sh renders it by
+# substituting SERVER_HOST from deploy.conf for `your-domain.example` before
+# installing to /etc/nginx/sites-available/<real-domain>. If adapting this
+# by hand instead, copy it to /etc/nginx/sites-available/<your-domain> and
+# replace every `your-domain.example` below with your real domain.
+
 # HTTP: redirect everything to HTTPS
 server {
     listen 80 default_server;

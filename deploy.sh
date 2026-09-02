@@ -12,9 +12,23 @@
 
 set -euo pipefail
 
-SERVER="your-user@your-domain.example"
-REMOTE_BASE="/opt/lifeplan"
 LOCAL_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# ── Load real server details from deploy.conf (gitignored) ───────
+DEPLOY_CONF="$LOCAL_DIR/deploy.conf"
+if [[ ! -f "$DEPLOY_CONF" ]]; then
+    echo "ERROR: $DEPLOY_CONF not found."
+    echo "Copy deploy.conf.example to deploy.conf and fill in your real server details:"
+    echo "  cp deploy.conf.example deploy.conf"
+    exit 1
+fi
+# shellcheck source=/dev/null
+source "$DEPLOY_CONF"
+: "${SERVER_HOST:?SERVER_HOST not set in deploy.conf}"
+: "${SERVER_USER:?SERVER_USER not set in deploy.conf}"
+: "${REMOTE_BASE:?REMOTE_BASE not set in deploy.conf}"
+
+SERVER="${SERVER_USER}@${SERVER_HOST}"
 
 # ── Argument parsing ─────────────────────────────────────────────
 MODE="code"
@@ -141,7 +155,7 @@ echo "    http:    $HTTP_CODE"
 
 if [[ "$HTTP_CODE" == "200" ]]; then
     echo ""
-    echo "==> deploy complete. App is running at https://your-domain.example/lifeplan (public internet, gated by app-level cookie session auth)"
+    echo "==> deploy complete. App is running at https://${SERVER_HOST}/lifeplan (public internet, gated by app-level cookie session auth)"
 else
     echo "    WARNING: expected 200, got $HTTP_CODE"
     echo "    check: ssh $SERVER journalctl -u lifeplan -n 30"

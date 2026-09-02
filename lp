@@ -74,11 +74,22 @@ case "${1:-help}" in
     cd "$(dirname "$0")" && python3 -m app.generate_prompts
     ;;
   pull-db)
+    DEPLOY_CONF="$(dirname "$0")/deploy.conf"
+    if [[ ! -f "$DEPLOY_CONF" ]]; then
+      echo "ERROR: $DEPLOY_CONF not found."
+      echo "Copy deploy.conf.example to deploy.conf and fill in your real server details."
+      exit 1
+    fi
+    # shellcheck source=/dev/null
+    source "$DEPLOY_CONF"
+    : "${SERVER_HOST:?SERVER_HOST not set in deploy.conf}"
+    : "${SERVER_USER:?SERVER_USER not set in deploy.conf}"
+    : "${REMOTE_BASE:?REMOTE_BASE not set in deploy.conf}"
     LOCAL_DB="$(dirname "$0")/data/lifeplan.db"
     echo "Pulling database from droplet..."
     echo "  Local backup: ${LOCAL_DB}.before-pull"
     cp "$LOCAL_DB" "${LOCAL_DB}.before-pull"
-    rsync -az your-user@your-domain.example:/opt/lifeplan/data/lifeplan.db "$LOCAL_DB"
+    rsync -az "${SERVER_USER}@${SERVER_HOST}:${REMOTE_BASE}/data/lifeplan.db" "$LOCAL_DB"
     echo "  Done. Local database updated from droplet."
     ;;
   deploy)

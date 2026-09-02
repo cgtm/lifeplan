@@ -79,7 +79,7 @@ No title field. Brain dumps don't have titles; the content *is* the title. Addin
 ```
 ┌───────────────────────────────────────────────────────┐
 │                                                       │
-│ Need to chase Nadia about the deposit thing this week, │
+│ Need to chase Nadia about the deposit thing this week,│
 │ and remember to sort out the work permit timeline...  │
 │ [full content, line-broken, selectable]               │
 │                                                       │
@@ -103,8 +103,8 @@ The most important part of the modal. Renders `processed_items.items[]` grouped 
 │ Extracted (5)                                         │
 │                                                       │
 │ ── Created (2) ──────────────────────────────────────│
-│ ✓ Task   Chase Nadia about deposit                  → │
-│ ✓ Person Nadia                                       → │
+│ ✓ Task   Chase Nadia about deposit                 → │
+│ ✓ Person Nadia                                      → │
 │                                                       │
 │ ── Pending review (2) ──────────────────────────────│
 │ ?  Goal   Sort work permit timeline                  │

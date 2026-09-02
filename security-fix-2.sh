@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
+# Run on the droplet itself (paths below assume the values from
+# deploy.conf -- see deploy.conf.example). If your REMOTE_BASE / SERVER_USER
+# / nginx site filename differ from the defaults, adjust below.
 set -euo pipefail
+
+APP_DIR="${LIFEPLAN_REMOTE_BASE:-/opt/lifeplan}"
+APP_USER="${LIFEPLAN_SERVER_USER:?set LIFEPLAN_SERVER_USER to the SERVER_USER from deploy.conf}"
+SITE_CONF="${LIFEPLAN_NGINX_SITE:-/etc/nginx/sites-available/your-domain.example}"
 
 echo "=== Lifeplan Security Fixes (remaining) ==="
 echo ""
 
 # 2. Backup cron
-echo "[2/5] Scheduling daily backup cron for user your-user..."
-CRON_LINE="0 3 * * * /opt/lifeplan/backup.sh >> /opt/lifeplan/backups/backup.log 2>&1"
-if sudo -u your-user crontab -l 2>/dev/null | grep -qF "/opt/lifeplan/backup.sh"; then
+echo "[2/5] Scheduling daily backup cron for user $APP_USER..."
+CRON_LINE="0 3 * * * $APP_DIR/backup.sh >> $APP_DIR/backups/backup.log 2>&1"
+if sudo -u "$APP_USER" crontab -l 2>/dev/null | grep -qF "$APP_DIR/backup.sh"; then
     echo "  Already exists, skipping."
 else
-    (sudo -u your-user crontab -l 2>/dev/null; echo "$CRON_LINE") | sudo -u your-user crontab -
+    (sudo -u "$APP_USER" crontab -l 2>/dev/null; echo "$CRON_LINE") | sudo -u "$APP_USER" crontab -
     echo "  Added."
 fi
 echo ""
@@ -18,7 +25,6 @@ echo ""
 # 3. Nginx rate limiting
 echo "[3/5] Adding nginx rate limiting..."
 NGINX_CONF="/etc/nginx/nginx.conf"
-SITE_CONF="/etc/nginx/sites-available/your-domain.example"
 
 if grep -q "limit_req_zone.*zone=authzone" "$NGINX_CONF"; then
     echo "  Rate limit zone already in nginx.conf, skipping."
@@ -62,8 +68,8 @@ else
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     }' "$SITE_CONF"
     # Deduplicate if both ssl lines matched
-    awk '!seen[$0]++ || !/add_header/' "$SITE_CONF" > /tmp/your-user-dedup.conf
-    mv /tmp/your-user-dedup.conf "$SITE_CONF"
+    awk '!seen[$0]++ || !/add_header/' "$SITE_CONF" > /tmp/lifeplan-dedup.conf
+    mv /tmp/lifeplan-dedup.conf "$SITE_CONF"
     echo "  Added security headers"
 fi
 

@@ -3,6 +3,12 @@
 **Date:** 2026-04-23
 **Engineer:** Forge
 
+> **Note:** This approach (Tailscale-restricted nginx access) was tried and
+> NOT adopted -- the chosen posture is public internet + app-level cookie
+> auth. Kept here for reference value only. All domain, hostnames, and
+> Tailscale IPs below are placeholders; the real values were redacted before
+> this repo went public.
+
 ---
 
 ## What Was Done
@@ -30,7 +36,7 @@ All app files, database, and `.env` have been rsynced to `~/lifeplan-staging/` o
 
 The server `.env` contains:
 ```
-MISTRAL_API_KEY=REDACTED_ROTATED_API_KEY
+MISTRAL_API_KEY=<redacted -- see .env on the server, rotate if ever exposed>
 OLLAMA_URL=http://100.64.0.2:11434
 ```
 
@@ -143,14 +149,14 @@ From outside Tailscale, the same URL should return 403 Forbidden.
 
 ---
 
-## Tailscale IPs (for reference)
+## Tailscale IPs (for reference; redacted -- see note at top of file)
 
 | Device | Tailscale IP |
 |--------|-------------|
-| Droplet (your-user) | 100.64.0.1 |
-| Cam's MacBook | 100.64.0.2 |
-| iPhone | 100.64.0.3 |
-| The Vault | 100.64.0.4 |
+| Droplet | 100.64.0.1 |
+| Laptop | 100.64.0.2 |
+| Phone | 100.64.0.3 |
+| NAS/home server | 100.64.0.4 |
 
 ---
 

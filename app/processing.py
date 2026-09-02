@@ -213,7 +213,6 @@ STEM_MAP = {
     "legal": "legal",
     "studying": "korean",
     "learning": "korean",
-    "settlement": "settlement",
     "relocate": "seoul", "relocating": "seoul",
     "budgeting": "finance",
 }
@@ -1452,7 +1451,7 @@ Return a JSON object with this exact structure:
     {{
       "goal_id": 2,
       "goal_title": "Finalise Property Settlement",
-      "matched_keywords": ["settlement", "priya", "settlement"],
+      "matched_keywords": ["settlement", "priya", "legal"],
       "confidence": 0.85
     }},
     {{

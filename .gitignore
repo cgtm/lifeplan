@@ -20,6 +20,9 @@ data/goal_keywords.local.json
 # Environment (secrets)
 .env
 
+# Deploy config (real server domain/user, gitignored — copy from deploy.conf.example)
+deploy.conf
+
 # Python
 __pycache__/
 *.pyc

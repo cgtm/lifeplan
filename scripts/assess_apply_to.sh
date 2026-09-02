@@ -7,7 +7,8 @@
 #          deploy date, whichever comes first.
 #
 # What this script does:
-#   1. Pulls production brain_dumps + tags + junction tables from your-domain.example.
+#   1. Pulls production brain_dumps + tags + junction tables from the prod
+#      host (deploy.conf).
 #   2. Filters to dumps captured (processed_at) AFTER DEPLOY_DATE.
 #   3. Per-dump: prints id, content preview, tags extracted, apply_to
 #      populated count, populated ratio, junction-table attachments observed.
@@ -55,8 +56,22 @@ set -euo pipefail
 # Override at run time: LIFEPLAN_APPLY_TO_DEPLOY_DATE=YYYY-MM-DD HH:MM:SS ./assess_apply_to.sh
 DEPLOY_DATE="${LIFEPLAN_APPLY_TO_DEPLOY_DATE:-2026-04-26 01:00:00}"
 
-PROD_HOST="your-user@your-domain.example"
-PROD_DB="/opt/lifeplan/data/lifeplan.db"
+# ── Load real server details from deploy.conf (gitignored) ───────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEPLOY_CONF="$SCRIPT_DIR/../deploy.conf"
+if [ ! -f "$DEPLOY_CONF" ]; then
+    echo "ERROR: $DEPLOY_CONF not found." >&2
+    echo "Copy deploy.conf.example to deploy.conf and fill in your real server details." >&2
+    exit 1
+fi
+# shellcheck source=/dev/null
+source "$DEPLOY_CONF"
+: "${SERVER_HOST:?SERVER_HOST not set in deploy.conf}"
+: "${SERVER_USER:?SERVER_USER not set in deploy.conf}"
+: "${REMOTE_BASE:?REMOTE_BASE not set in deploy.conf}"
+
+PROD_HOST="${SERVER_USER}@${SERVER_HOST}"
+PROD_DB="${REMOTE_BASE}/data/lifeplan.db"
 
 # Suspicious-empty: a tag with apply_to=[] in a dump that ALSO produced >=2
 # non-tag items. (LLM should usually attach the tag to at least one when

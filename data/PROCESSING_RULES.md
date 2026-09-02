@@ -248,7 +248,7 @@ New person suggestions should always go to review (never auto-create people).
    | Goal | Keywords |
    |------|----------|
    | Move to Seoul | seoul, korea, move, relocate, apartment, housing, visa, immigration |
-   | Finalise Property Settlement | settlement, settlement, lawyer, legal, custody, separation, Priya |
+   | Finalise Property Settlement | settlement, lawyer, legal, contract, dispute, priya |
    | Move House | house, move, packing, lease, rent, landlord, moving |
    | Nadia's Visit | nadia, visit, september, october |
    | Learn Korean | korean, language, study, vocabulary, grammar, hangul, TOPIK |
@@ -342,7 +342,7 @@ New person suggestions should always go to review (never auto-create people).
 1. **Existing tag matching:** Check if any existing tag name (or its un-hyphenated form) appears as a word in the dump text. Case-insensitive.
    - "move-house" matches "move house", "moving house"
    - "korean" matches "Korean", "korean"
-   - "settlement" matches "settlement", "settling"
+   - "settlement" matches "settlement", "settled"
 
 2. **New tag suggestion:** After extracting all items, identify the dominant topics that are NOT already covered by matched existing tags. A new tag is suggested when:
    - A noun or noun-phrase appears 2+ times in the dump
@@ -356,7 +356,7 @@ New person suggestions should always go to review (never auto-create people).
 | Condition | Score |
 |-----------|-------|
 | Exact match on existing tag | 0.95 |
-| Stem/variant match on existing tag ("settling" -> "settlement") | 0.85 |
+| Stem/variant match on existing tag ("settled" -> "settlement") | 0.85 |
 | New tag, strong thematic evidence (2+ mentions, or tied to 2+ extracted items) | 0.70 |
 | New tag, single mention but clear topic | 0.50 |
 

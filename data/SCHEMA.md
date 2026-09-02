@@ -148,7 +148,7 @@ First-class person entities. Anyone relevant to Cam's life: family, partners, pr
 
 **Index:** `idx_people_name` on `name`
 
-**Retrieval scenarios:** "Who is involved in the settlement?" / "Show me everyone in Seoul."
+**Retrieval scenarios:** "Who is involved in the property settlement?" / "Show me everyone in Seoul."
 
 ---
 
@@ -205,7 +205,7 @@ Actionable items, optionally linked to a goal. Tasks are the concrete steps that
 - `someday` -- nice to do, not urgent
 - `cancelled` -- deliberately dropped
 
-**Retrieval scenarios:** "What are my active tasks for the settlement?" / "What have I completed this month?" / "What's overdue?"
+**Retrieval scenarios:** "What are my active tasks for the property settlement?" / "What have I completed this month?" / "What's overdue?"
 
 ---
 

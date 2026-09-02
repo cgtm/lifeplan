@@ -1,0 +1,11 @@
+# deploy.conf — real values, gitignored, create locally (copy from deploy.conf.example)
+#
+#   cp deploy.conf.example deploy.conf
+#
+# Then edit deploy.conf with your actual server details. deploy.conf is
+# listed in .gitignore and must never be committed — only this .example
+# file (with placeholder values) is tracked.
+
+SERVER_HOST=your-domain.example
+SERVER_USER=your-user
+REMOTE_BASE=/opt/lifeplan

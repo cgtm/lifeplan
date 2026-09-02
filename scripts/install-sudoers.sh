@@ -44,7 +44,18 @@
 set -euo pipefail
 
 SUDOERS_FILE="/etc/sudoers.d/lifeplan"
-APP_USER="your-user"
+
+# ── Load the app user from deploy.conf (gitignored) ───────────────
+# This script is deployed alongside the rest of the repo under
+# $REMOTE_BASE/scripts/ (see deploy.sh), so deploy.conf should be present
+# two directories up. Fall back to an explicit env var if run standalone.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEPLOY_CONF="$SCRIPT_DIR/../deploy.conf"
+if [ -f "$DEPLOY_CONF" ]; then
+    # shellcheck source=/dev/null
+    source "$DEPLOY_CONF"
+fi
+APP_USER="${SERVER_USER:-${LIFEPLAN_SERVER_USER:?set SERVER_USER via deploy.conf or LIFEPLAN_SERVER_USER}}"
 
 echo "==> installing $SUDOERS_FILE"
 
@@ -54,8 +65,8 @@ echo "==> installing $SUDOERS_FILE"
 TMP=$(mktemp)
 trap 'rm -f "$TMP"' EXIT
 
-cat > "$TMP" <<'SUDOERS'
-# Allow your-user to manage the lifeplan service + worker without a password.
+cat > "$TMP" <<SUDOERS
+# Allow $APP_USER to manage the lifeplan service + worker without a password.
 # Installed by scripts/install-sudoers.sh. Keep verbs in sync with deploy.sh
 # and docs/runbooks/. sudoers matches args positionally and exactly, so each
 # combination must be listed (no globs -- we keep this minimal).
@@ -73,7 +84,7 @@ Cmnd_Alias LIFEPLAN_CTL = \
     /usr/bin/systemctl start   lifeplan lifeplan-worker, \
     /usr/bin/systemctl status  lifeplan lifeplan-worker
 
-your-user ALL=(ALL) NOPASSWD: LIFEPLAN_CTL
+$APP_USER ALL=(ALL) NOPASSWD: LIFEPLAN_CTL
 SUDOERS
 
 # Validate before installing -- visudo -c -f rejects syntactically bad files.

@@ -75,8 +75,8 @@ Cam wants to (a) audit his vocabulary — *"what tags do I even have?"* — and 
 │ finance                                  24       │
 │   8 goals · 11 tasks · 5 knowledge                │
 │                                                   │
-│ settlement                                  19       │
-│   3 goals · 2 tasks · 7 knowledge · 7 dumps       │
+│ settlement                                15       │
+│   2 goals · 3 tasks · 5 knowledge · 5 dumps       │
 │                                                   │
 │ ...                                               │
 └───────────────────────────────────────────────────┘

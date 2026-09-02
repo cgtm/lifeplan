@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
 # security-fix.sh -- Fix issues from Sage's security audit (2026-04-23)
 # Skips: root SSH login (Cam wants to leave as-is)
-# Requires: sudo with password (your-user's NOPASSWD scope is too narrow for these)
+# Requires: sudo with password (the deploy user's NOPASSWD scope is too
+# narrow for these)
+#
+# Run on the droplet itself (paths below assume the values from
+# deploy.conf -- see deploy.conf.example). If your REMOTE_BASE / nginx site
+# filename differ from the defaults, adjust APP_DIR / SITE_CONF below.
 set -euo pipefail
+
+APP_DIR="${LIFEPLAN_REMOTE_BASE:-/opt/lifeplan}"
+SITE_CONF="${LIFEPLAN_NGINX_SITE:-/etc/nginx/sites-available/your-domain.example}"
 
 echo "=== Lifeplan Security Fixes ==="
 echo ""
@@ -12,24 +20,24 @@ echo ""
 # ---------------------------------------------------------------
 echo "[1/5] Fixing file permissions..."
 
-chmod 600 /opt/lifeplan/.env
+chmod 600 "$APP_DIR/.env"
 echo "  .env -> 600"
 
-chmod 600 /opt/lifeplan/data/lifeplan.db
+chmod 600 "$APP_DIR/data/lifeplan.db"
 echo "  lifeplan.db -> 600"
 
 # Also lock down WAL/SHM files if they exist
-for f in /opt/lifeplan/data/lifeplan.db-wal /opt/lifeplan/data/lifeplan.db-shm; do
+for f in "$APP_DIR/data/lifeplan.db-wal" "$APP_DIR/data/lifeplan.db-shm"; do
     if [ -f "$f" ]; then
         chmod 600 "$f"
         echo "  $(basename "$f") -> 600"
     fi
 done
 
-chmod 700 /opt/lifeplan/data/
+chmod 700 "$APP_DIR/data/"
 echo "  data/ -> 700"
 
-chmod 700 /opt/lifeplan/backups/
+chmod 700 "$APP_DIR/backups/"
 echo "  backups/ -> 700"
 
 echo "  Done."
@@ -40,9 +48,9 @@ echo ""
 # ---------------------------------------------------------------
 echo "[2/5] Scheduling daily backup cron..."
 
-# Add to your-user's crontab (avoids duplicates by checking first)
-CRON_LINE="0 3 * * * /opt/lifeplan/backup.sh >> /opt/lifeplan/backups/backup.log 2>&1"
-if crontab -l 2>/dev/null | grep -qF "/opt/lifeplan/backup.sh"; then
+# Add to the app user's crontab (avoids duplicates by checking first)
+CRON_LINE="0 3 * * * $APP_DIR/backup.sh >> $APP_DIR/backups/backup.log 2>&1"
+if crontab -l 2>/dev/null | grep -qF "$APP_DIR/backup.sh"; then
     echo "  Cron job already exists, skipping."
 else
     (crontab -l 2>/dev/null; echo "$CRON_LINE") | crontab -
@@ -75,7 +83,6 @@ else
 fi
 
 # Add limit_req to the /lifeplan location block in site config
-SITE_CONF="/etc/nginx/sites-available/your-domain.example"
 if sudo grep -q "limit_req zone=authzone" "$SITE_CONF"; then
     echo "  Rate limit directive already in site config, skipping."
 else
@@ -182,6 +189,6 @@ echo "What was NOT changed (per Cam's request):"
 echo "  - Root SSH login remains enabled"
 echo ""
 echo "Verify with:"
-echo "  curl -sI https://your-domain.example/lifeplan/ | grep -iE 'server:|x-frame|x-content|strict|referrer'"
+echo "  curl -sI https://\$SERVER_HOST/lifeplan/ | grep -iE 'server:|x-frame|x-content|strict|referrer'  # \$SERVER_HOST from deploy.conf"
 echo "  sudo fail2ban-client status"
 echo "  crontab -l"

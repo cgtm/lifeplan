@@ -6,33 +6,51 @@
 #
 # Preconditions (must be true before this script runs):
 #   - Ubuntu droplet with sudo access for the running user
-#   - nginx installed, with /etc/nginx/sites-available/your-domain.example present and
-#     already TLS-configured (certbot/Let's Encrypt cert issued and renewing)
+#   - nginx installed, with /etc/nginx/sites-available/<your-domain> present
+#     and already TLS-configured (certbot/Let's Encrypt cert issued and
+#     renewing)
 #   - Python 3.10+ available as /usr/bin/python3
-#   - The your-user:your-user system user exists
-#   - App files already rsynced to /home/your-user/lifeplan-staging/
+#   - The app system user (matching SERVER_USER in deploy.conf) exists
+#   - App files already rsynced to the staging dir, including deploy.conf
+#     (copy deploy.conf alongside this script -- see deploy.conf.example)
 #
-# Usage: sudo bash /home/your-user/lifeplan-staging/server-setup.sh
+# Usage: sudo bash <staging-dir>/server-setup.sh
 #
 # What this script does (idempotent where it can be):
-#   1. Moves the app to /opt/lifeplan/ (owned by your-user)
+#   1. Moves the app to $APP_DIR (owned by the app user)
 #   2. Creates the systemd service
-#   3. Installs the canonical your-domain.example nginx vhost + authzone fragment from ops/nginx/
+#   3. Installs the canonical nginx vhost + authzone fragment from ops/nginx/
 #   4. Sets up daily SQLite backup cron
 #   5. Installs the deploy sudoers rule and verifies cookie-auth env vars
 
 set -euo pipefail
 
-APP_USER="your-user"
-APP_DIR="/opt/lifeplan"
-STAGING_DIR="/home/$APP_USER/lifeplan-staging"
-NGINX_CONF="/etc/nginx/sites-available/your-domain.example"
-NGINX_AUTHZONE_CONF="/etc/nginx/conf.d/authzone.conf"
-BACKUP_DIR="/opt/lifeplan/backups"
-
-# Resolve the directory this script lives in so we can find sibling ops/ files.
+# Resolve the directory this script lives in so we can find sibling ops/ and
+# deploy.conf files.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-NGINX_SRC_SITE="$SCRIPT_DIR/ops/nginx/your-domain.example.conf"
+
+# ── Load real server details from deploy.conf (gitignored) ───────
+DEPLOY_CONF="$SCRIPT_DIR/deploy.conf"
+if [[ ! -f "$DEPLOY_CONF" ]]; then
+    echo "ERROR: $DEPLOY_CONF not found."
+    echo "Copy deploy.conf.example to deploy.conf (with your real server details)"
+    echo "onto the droplet alongside this script, then re-run."
+    exit 1
+fi
+# shellcheck source=/dev/null
+source "$DEPLOY_CONF"
+: "${SERVER_HOST:?SERVER_HOST not set in deploy.conf}"
+: "${SERVER_USER:?SERVER_USER not set in deploy.conf}"
+: "${REMOTE_BASE:?REMOTE_BASE not set in deploy.conf}"
+
+APP_USER="$SERVER_USER"
+APP_DIR="$REMOTE_BASE"
+STAGING_DIR="/home/$APP_USER/lifeplan-staging"
+NGINX_CONF="/etc/nginx/sites-available/$SERVER_HOST"
+NGINX_AUTHZONE_CONF="/etc/nginx/conf.d/authzone.conf"
+BACKUP_DIR="$REMOTE_BASE/backups"
+
+NGINX_SRC_SITE="$SCRIPT_DIR/ops/nginx/lifeplan.conf.example"
 NGINX_SRC_AUTHZONE="$SCRIPT_DIR/ops/nginx/authzone.conf"
 SYSTEMD_SRC_DIR="$SCRIPT_DIR/ops/systemd"
 
@@ -70,16 +88,16 @@ echo "    ownership set to $APP_USER"
 # ── 2. Systemd service ──────────────────────────────────────────
 echo ""
 echo "--- creating systemd service ---"
-cat > /etc/systemd/system/lifeplan.service <<'UNIT'
+cat > /etc/systemd/system/lifeplan.service <<UNIT
 [Unit]
 Description=lifeplan personal knowledge app
 After=network.target
 
 [Service]
 Type=simple
-User=your-user
-Group=your-user
-WorkingDirectory=/opt/lifeplan
+User=$APP_USER
+Group=$APP_USER
+WorkingDirectory=$APP_DIR
 ExecStart=/usr/bin/python3 -m app.server
 Restart=on-failure
 RestartSec=5
@@ -91,7 +109,7 @@ SyslogIdentifier=lifeplan
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/opt/lifeplan/data
+ReadWritePaths=$APP_DIR/data
 PrivateTmp=yes
 
 [Install]
@@ -115,6 +133,9 @@ for unit in lifeplan-worker.service lifeplan-prompts.service lifeplan-prompts.ti
         exit 1
     fi
     cp -f "$src" "/etc/systemd/system/$unit"
+    # ops/systemd/*.service ship with placeholder User=/Group=/paths; rewrite
+    # to the real values from deploy.conf so the unit runs as the right user.
+    sed -i "s/^User=.*/User=$APP_USER/; s/^Group=.*/Group=$APP_USER/; s#/opt/lifeplan#$APP_DIR#g" "/etc/systemd/system/$unit"
     chmod 0644 "/etc/systemd/system/$unit"
     echo "    installed /etc/systemd/system/$unit"
 done
@@ -129,7 +150,7 @@ echo "    lifeplan-prompts.timer enabled + started (next run: $(systemctl list-t
 
 # ── 3. Nginx vhost + authzone ────────────────────────────────────
 # Ship the canonical nginx config from the repo rather than building it inline.
-# Source of truth: ops/nginx/your-domain.example.conf and ops/nginx/authzone.conf.
+# Source of truth: ops/nginx/lifeplan.conf.example and ops/nginx/authzone.conf.
 echo ""
 echo "--- configuring nginx ---"
 
@@ -159,24 +180,30 @@ else
     echo "    updated $NGINX_AUTHZONE_CONF (previous version backed up)"
 fi
 
-# 3b. Site config: drop in the canonical your-domain.example vhost.
-# If the existing file is byte-identical, skip. Otherwise back up and overwrite.
-if [ -f "$NGINX_CONF" ] && cmp -s "$NGINX_SRC_SITE" "$NGINX_CONF"; then
+# 3b. Site config: drop in the canonical vhost, with the placeholder domain
+# in ops/nginx/lifeplan.conf.example substituted for the real SERVER_HOST.
+# If the rendered result is byte-identical to what's live, skip. Otherwise
+# back up and overwrite.
+RENDERED_SITE="$(mktemp)"
+trap 'rm -f "$RENDERED_SITE"' EXIT
+sed "s/your-domain\.example/$SERVER_HOST/g" "$NGINX_SRC_SITE" > "$RENDERED_SITE"
+
+if [ -f "$NGINX_CONF" ] && cmp -s "$RENDERED_SITE" "$NGINX_CONF"; then
     echo "    $NGINX_CONF already up to date"
 else
     if [ -f "$NGINX_CONF" ]; then
         cp -a "$NGINX_CONF" "$NGINX_CONF.bak.$(date +%Y%m%d-%H%M%S)"
         echo "    backed up existing $NGINX_CONF"
     fi
-    cp "$NGINX_SRC_SITE" "$NGINX_CONF"
+    cp "$RENDERED_SITE" "$NGINX_CONF"
     chmod 0644 "$NGINX_CONF"
-    echo "    installed $NGINX_CONF from $NGINX_SRC_SITE"
+    echo "    installed $NGINX_CONF (rendered from $NGINX_SRC_SITE)"
 fi
 
 # Make sure the site is enabled (idempotent symlink).
-if [ ! -L /etc/nginx/sites-enabled/your-domain.example ]; then
-    ln -s "$NGINX_CONF" /etc/nginx/sites-enabled/your-domain.example
-    echo "    enabled your-domain.example site"
+if [ ! -L "/etc/nginx/sites-enabled/$SERVER_HOST" ]; then
+    ln -s "$NGINX_CONF" "/etc/nginx/sites-enabled/$SERVER_HOST"
+    echo "    enabled $SERVER_HOST site"
 fi
 
 # 3c. Validate and reload.
@@ -189,76 +216,76 @@ echo ""
 echo "--- setting up daily backup cron ---"
 
 BACKUP_SCRIPT="$APP_DIR/backup.sh"
-cat > "$BACKUP_SCRIPT" <<'BSCRIPT'
+cat > "$BACKUP_SCRIPT" <<BSCRIPT
 #!/usr/bin/env bash
 # Daily SQLite backup for lifeplan
 set -euo pipefail
 
-DB="/opt/lifeplan/data/lifeplan.db"
-BACKUP_DIR="/opt/lifeplan/backups"
-DATE=$(date +%Y%m%d-%H%M%S)
-BACKUP_FILE="$BACKUP_DIR/lifeplan-$DATE.db"
+DB="$APP_DIR/data/lifeplan.db"
+BACKUP_DIR="$APP_DIR/backups"
+DATE=\$(date +%Y%m%d-%H%M%S)
+BACKUP_FILE="\$BACKUP_DIR/lifeplan-\$DATE.db"
 
 # Use SQLite .backup command for a safe, consistent backup
-sqlite3 "$DB" ".backup '$BACKUP_FILE'"
+sqlite3 "\$DB" ".backup '\$BACKUP_FILE'"
 
 # Keep only the last 14 backups
-ls -t "$BACKUP_DIR"/lifeplan-*.db 2>/dev/null | tail -n +15 | xargs -r rm --
+ls -t "\$BACKUP_DIR"/lifeplan-*.db 2>/dev/null | tail -n +15 | xargs -r rm --
 
-echo "$(date): backup complete -> $BACKUP_FILE"
+echo "\$(date): backup complete -> \$BACKUP_FILE"
 BSCRIPT
 
 chmod +x "$BACKUP_SCRIPT"
 chown "$APP_USER:$APP_USER" "$BACKUP_SCRIPT"
 
-# Install cron job for your-user user (daily at 03:00)
-CRON_LINE="0 3 * * * /opt/lifeplan/backup.sh >> /opt/lifeplan/backups/backup.log 2>&1"
+# Install cron job for the app user (daily at 03:00)
+CRON_LINE="0 3 * * * $APP_DIR/backup.sh >> $APP_DIR/backups/backup.log 2>&1"
 (crontab -u "$APP_USER" -l 2>/dev/null | grep -v "lifeplan/backup.sh"; echo "$CRON_LINE") | crontab -u "$APP_USER" -
 
 echo "    backup cron installed (daily at 03:00 UTC)"
 
 # ── 5. Server README ────────────────────────────────────────────
 echo ""
-echo "--- writing /opt/lifeplan/SETUP.md ---"
-cat > /opt/lifeplan/SETUP.md <<'README'
+echo "--- writing $APP_DIR/SETUP.md ---"
+cat > "$APP_DIR/SETUP.md" <<README
 # lifeplan -- server setup notes
 
 ## What's running
 - **App**: Python 3 HTTP server on port 3131 (localhost only)
-- **Service**: systemd unit `lifeplan.service`
+- **Service**: systemd unit \`lifeplan.service\`
 - **Proxy**: nginx reverse proxy at /lifeplan, public internet, rate-limited (limit_req zone=authzone)
-- **Auth**: app-level cookie session auth (no nginx auth_basic). Configured via env vars in /opt/lifeplan/.env
+- **Auth**: app-level cookie session auth (no nginx auth_basic). Configured via env vars in $APP_DIR/.env
 - **Backups**: daily SQLite backup at 03:00 UTC, 14-day retention
 
 ## File layout
-- `/opt/lifeplan/app/`       -- application code
-- `/opt/lifeplan/data/`      -- SQLite database
-- `/opt/lifeplan/backups/`   -- daily database backups
-- `/opt/lifeplan/.env`       -- environment variables (API keys, Ollama URL, cookie auth secrets)
-- `/opt/lifeplan/backup.sh`  -- backup script
+- \`$APP_DIR/app/\`       -- application code
+- \`$APP_DIR/data/\`      -- SQLite database
+- \`$APP_DIR/backups/\`   -- daily database backups
+- \`$APP_DIR/.env\`       -- environment variables (API keys, Ollama URL, cookie auth secrets)
+- \`$APP_DIR/backup.sh\`  -- backup script
 
-## Auth env vars (required in /opt/lifeplan/.env, mode 600)
-- `LIFEPLAN_PASSWORD_HASH`   -- generated by `python3 -m app.auth set-password`
-- `LIFEPLAN_AUTH_SALT`       -- generated by `python3 -m app.auth set-password`
-- `LIFEPLAN_SESSION_SECRET`  -- random secret used to sign session cookies
-- `LIFEPLAN_COOKIE_PATH=/lifeplan` -- scope cookie to the proxied path
+## Auth env vars (required in $APP_DIR/.env, mode 600)
+- \`LIFEPLAN_PASSWORD_HASH\`   -- generated by \`python3 -m app.auth set-password\`
+- \`LIFEPLAN_AUTH_SALT\`       -- generated by \`python3 -m app.auth set-password\`
+- \`LIFEPLAN_SESSION_SECRET\`  -- random secret used to sign session cookies
+- \`LIFEPLAN_COOKIE_PATH=/lifeplan\` -- scope cookie to the proxied path
 
 ## Common commands
-```
+\`\`\`
 sudo systemctl status lifeplan     # check status
 sudo systemctl restart lifeplan    # restart after deploy
 journalctl -u lifeplan -n 50      # view recent logs
 sudo nginx -t && sudo systemctl reload nginx  # test and reload nginx
-```
+\`\`\`
 
 ## Redeploy
-From Cam's Mac: `./deploy.sh` in the lifeplan directory.
+From your Mac: \`./deploy.sh\` in the lifeplan directory.
 
 ## Access
-Public internet, gated by app-level cookie session auth: https://your-domain.example/lifeplan
+Public internet, gated by app-level cookie session auth: https://$SERVER_HOST/lifeplan
 README
 
-chown "$APP_USER:$APP_USER" /opt/lifeplan/SETUP.md
+chown "$APP_USER:$APP_USER" "$APP_DIR/SETUP.md"
 
 # ── 6. Sudoers rule for passwordless service restart ─────────────
 # Source of truth: scripts/install-sudoers.sh. We inline the same content
@@ -267,8 +294,8 @@ chown "$APP_USER:$APP_USER" /opt/lifeplan/SETUP.md
 # operator-applied path for fixing prod without re-running everything.
 echo ""
 echo "--- setting up sudoers for deploy ---"
-cat > /etc/sudoers.d/lifeplan <<'SUDOERS'
-# Allow your-user to manage the lifeplan service + worker without a password.
+cat > /etc/sudoers.d/lifeplan <<SUDOERS
+# Allow $APP_USER to manage the lifeplan service + worker without a password.
 # Keep verbs in sync with scripts/install-sudoers.sh and deploy.sh.
 # sudoers matches args positionally and exactly: each form deploy.sh or
 # the runbooks invoke must be listed (no globs -- minimal grant).
@@ -286,7 +313,7 @@ Cmnd_Alias LIFEPLAN_CTL = \
     /usr/bin/systemctl start   lifeplan lifeplan-worker, \
     /usr/bin/systemctl status  lifeplan lifeplan-worker
 
-your-user ALL=(ALL) NOPASSWD: LIFEPLAN_CTL
+$APP_USER ALL=(ALL) NOPASSWD: LIFEPLAN_CTL
 SUDOERS
 chmod 0440 /etc/sudoers.d/lifeplan
 visudo -c -f /etc/sudoers.d/lifeplan
@@ -306,7 +333,7 @@ if [ -f "$ENV_FILE" ]; then
         fi
     done
 else
-    echo "    NOTE: $ENV_FILE does not exist yet -- create it (mode 600, owner your-user)"
+    echo "    NOTE: $ENV_FILE does not exist yet -- create it (mode 600, owner $APP_USER)"
     MISSING_VARS=(LIFEPLAN_PASSWORD_HASH LIFEPLAN_AUTH_SALT LIFEPLAN_SESSION_SECRET LIFEPLAN_COOKIE_PATH)
 fi
 
@@ -348,5 +375,5 @@ fi
 echo ""
 echo "==> setup complete"
 echo ""
-echo "    App is running at https://your-domain.example/lifeplan (public internet, gated by app-level cookie session auth)"
-echo "    Future deploys: run ./deploy.sh from Cam's Mac"
+echo "    App is running at https://$SERVER_HOST/lifeplan (public internet, gated by app-level cookie session auth)"
+echo "    Future deploys: run ./deploy.sh from your Mac"
