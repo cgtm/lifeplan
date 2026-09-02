@@ -535,7 +535,7 @@ The old `processed` column (INTEGER 0/1) is retained for backward compatibility.
 
 3. **Goal keyword index.** Build this at processing time by querying `goals` table. Cache it if processing multiple dumps in sequence. The keyword lists in Rule 4 are starting points -- the implementation should also include words from each goal's `description` field.
 
-4. **People matching.** Query the `people` table at processing time. Match whole words only to avoid false positives (e.g. "set" should not match "Jess" -- use word boundary matching).
+4. **People matching.** Query the `people` table at processing time. Match whole words only to avoid false positives (e.g. "guess" should not match "Jess" -- use word boundary matching).
 
 5. **Date resolution.** All relative dates resolve against the brain dump's `captured_at` timestamp, not the processing time. This matters if processing is delayed.
 

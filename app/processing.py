@@ -13,6 +13,7 @@ Privacy invariant (CONTRACT, NON-NEGOTIABLE):
 
 import json
 import logging
+import os
 import re
 import sqlite3
 import time
@@ -123,45 +124,47 @@ OLLAMA_TIMEOUT = 2  # seconds
 
 
 # ── Goal keyword index (Rule 4) ─────────────────────────────────
+#
+# Personalised per-goal keyword lists are not committed to source (they name
+# real people, places, and life events). Real values live in a gitignored
+# local file loaded at import time; the public repo ships with a small
+# fictional fallback so brain-dump goal-matching works out of the box for
+# anyone on a fresh clone.
 
-GOAL_KEYWORDS = {
-    "Move to Seoul": {
-        "title_words": {"seoul", "move"},
-        "keywords": {"korea", "korean", "relocate", "apartment", "housing", "visa", "immigration", "itaewon"},
-    },
-    "Finalise Property Settlement": {
-        "title_words": {"settlement", "finalise"},
-        "keywords": {"settlement", "lawyer", "solicitor", "legal", "custody", "separation", "priya", "court", "financial"},
-    },
-    "Move House": {
-        "title_words": {"house", "move"},
-        "keywords": {"packing", "lease", "rent", "landlord", "moving", "boxes", "rental"},
-    },
-    "Nadia's Visit (26 Sept - 8 Oct 2025)": {
-        "title_words": {"nadia", "visit"},
-        "keywords": {"september", "october"},
-    },
-    "Learn Korean": {
-        "title_words": {"korean", "learn"},
-        "keywords": {"language", "study", "vocabulary", "grammar", "hangul", "topik", "speaking", "phrases"},
-    },
-    "Attend Korean Language School in Seoul": {
-        "title_words": {"language", "school"},
-        "keywords": {"enrolment", "enrollment", "semester", "tuition", "student", "d-4", "d4"},
-    },
-    "Achieve Debt Freedom": {
-        "title_words": {"debt", "freedom"},
-        "keywords": {"money", "payment", "loan", "finance", "budget", "savings", "pay"},
-    },
-    "Work Transition": {
-        "title_words": {"work", "transition"},
-        "keywords": {"job", "career", "remote", "contract", "employer", "freelance"},
-    },
-    "Achieve Korean Proficiency": {
-        "title_words": {"korean", "proficiency"},
-        "keywords": {"fluency", "topik", "level", "exam"},
+GOAL_KEYWORDS_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "data", "goal_keywords.local.json"
+)
+
+_FALLBACK_GOAL_KEYWORDS = {
+    "Example Goal": {
+        "title_words": ["example", "goal"],
+        "keywords": ["sample", "demo", "placeholder"],
     },
 }
+
+
+def _load_goal_keywords():
+    """Load the goal-keyword index from the local gitignored JSON file.
+
+    Falls back to a small fictional example if the file doesn't exist, so
+    the app works with zero personal data on a fresh clone. Values are
+    stored as JSON lists (JSON has no set type) and converted to sets here.
+    """
+    try:
+        with open(GOAL_KEYWORDS_PATH, "r") as f:
+            raw = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        raw = _FALLBACK_GOAL_KEYWORDS
+    return {
+        title: {
+            "title_words": set(entry.get("title_words", [])),
+            "keywords": set(entry.get("keywords", [])),
+        }
+        for title, entry in raw.items()
+    }
+
+
+GOAL_KEYWORDS = _load_goal_keywords()
 
 # Common words that should never be detected as person names
 COMMON_WORDS = {

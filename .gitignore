@@ -5,6 +5,10 @@ data/*.db-shm
 data/backups/
 data/server.log
 data/prompts.log
+data/worker.log
+
+# Personal goal-keyword personalisation (names real people/places; never committed)
+data/goal_keywords.local.json
 
 # Claude Code settings (personal, not project-level)
 .claude/settings.local.json
